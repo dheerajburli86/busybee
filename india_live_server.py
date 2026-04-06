@@ -93,7 +93,7 @@ def load_prev_closes(jwt, token_to_sym):
                          "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
                          "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
                          "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
-                json={"mode": "LTP", "exchangeTokens": {"NSE": batch}},
+                json={"mode": "FULL", "exchangeTokens": {"NSE": batch}},
                 timeout=15
             ).json()
             if resp.get("status"):
