@@ -282,3 +282,4 @@ def bulk_quote_poll(jwt, token_to_sym, prev_closes):
             log.info(f"Bulk quote poll: pushed {len(records)} records")
         except Exception as e:
             log.error(f"Bulk quote poll error: {e}")
+# force redeploy
