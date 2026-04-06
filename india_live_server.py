@@ -223,10 +223,14 @@ async def run_websocket(jwt, feed_token, tokens, token_to_sym):
 
         def on_open(wsapp):
             log.info("WebSocket connected — subscribing to tokens...")
-            # Mode 3 = SNAP_QUOTE (LTP + OHLC + volume + circuit limits)
-            token_list = [{"exchangeType": 1, "tokens": tokens}]  # 1 = NSE
-            sws.subscribe("india_live", 3, token_list)
-            log.info(f"Subscribed to {len(tokens)} NSE tokens")
+            # Angel One limit: 1000 tokens per subscribe call — split into batches
+            BATCH = 999
+            for i in range(0, len(tokens), BATCH):
+                batch = tokens[i:i+BATCH]
+                token_list = [{"exchangeType": 1, "tokens": batch}]
+                sws.subscribe(f"india_live_{i}", 3, token_list)
+                log.info(f"Subscribed batch {i//BATCH+1}: {len(batch)} tokens")
+            log.info(f"Total subscribed: {len(tokens)} NSE tokens")
 
         def on_data(wsapp, message):
             asyncio.run_coroutine_threadsafe(
