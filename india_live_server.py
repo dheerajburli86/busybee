@@ -283,3 +283,5 @@ def bulk_quote_poll(jwt, token_to_sym, prev_closes):
         except Exception as e:
             log.error(f"Bulk quote poll error: {e}")
 # force redeploy
+
+# force redeploy
