@@ -4,3 +4,4 @@ pyotp
 requests
 supabase
 python-dotenv
+logzero
