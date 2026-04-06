@@ -207,32 +207,6 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes):
     sws.on_error = on_error; sws.on_close = on_close
     sws.connect()
 
-def main():
-    log.info("🚀 India Live Server starting...")
-    token_to_sym, sym_to_token = load_scrip_master()
-
-    threading.Thread(target=flush_loop, daemon=True).start()
-
-    while True:
-        if not is_nse_open():
-            wait = seconds_until_nse_open()
-            log.info(f"NSE closed — sleeping {wait/3600:.1f} hours until next open")
-            time.sleep(min(wait, 3600))
-            continue
-        try:
-            log.info("NSE is open — connecting to Angel One WebSocket...")
-            jwt, feed_token = angel_login()
-            tokens     = load_india_tokens(sym_to_token)
-            prev_closes = load_prev_closes(jwt, token_to_sym)
-            threading.Thread(target=bulk_quote_poll, args=(jwt, token_to_sym, prev_closes), daemon=True).start()
-            run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
-        except Exception as e:
-            log.error(f"Error: {e} — reconnecting in 10s...")
-            time.sleep(10)
-
-if __name__ == "__main__":
-    main()
-
 
 def bulk_quote_poll(jwt, token_to_sym, prev_closes):
     tokens = list(token_to_sym.keys())
@@ -282,6 +256,29 @@ def bulk_quote_poll(jwt, token_to_sym, prev_closes):
             log.info(f"Bulk quote poll: pushed {len(records)} records")
         except Exception as e:
             log.error(f"Bulk quote poll error: {e}")
-# force redeploy
 
-# force redeploy
+def main():
+    log.info("🚀 India Live Server starting...")
+    token_to_sym, sym_to_token = load_scrip_master()
+
+    threading.Thread(target=flush_loop, daemon=True).start()
+
+    while True:
+        if not is_nse_open():
+            wait = seconds_until_nse_open()
+            log.info(f"NSE closed — sleeping {wait/3600:.1f} hours until next open")
+            time.sleep(min(wait, 3600))
+            continue
+        try:
+            log.info("NSE is open — connecting to Angel One WebSocket...")
+            jwt, feed_token = angel_login()
+            tokens     = load_india_tokens(sym_to_token)
+            prev_closes = load_prev_closes(jwt, token_to_sym)
+            threading.Thread(target=bulk_quote_poll, args=(jwt, token_to_sym, prev_closes), daemon=True).start()
+            run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
+        except Exception as e:
+            log.error(f"Error: {e} — reconnecting in 10s...")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main()
