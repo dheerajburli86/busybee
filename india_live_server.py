@@ -204,7 +204,7 @@ async def on_tick(tick, token_to_sym):
         log.warning(f"Tick processing error: {e}")
 
 # ─── WEBSOCKET CLIENT ─────────────────────────────────────────────────────────
-async def run_websocket(jwt, feed_token, tokens, token_to_sym):
+def run_websocket(jwt, feed_token, tokens, token_to_sym):
     """
     Connect to Angel One smartWebSocketV2 and stream ticks.
     Uses the official smartapi-python SmartWebSocketV2 under the hood.
