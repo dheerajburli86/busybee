@@ -214,7 +214,7 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym):
         from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
         sws = SmartWebSocketV2(
-            AUTH_TOKEN=jwt,
+            auth_token=jwt,
             API_KEY=ANGEL_API_KEY,
             CLIENT_CODE=ANGEL_CLIENT_ID,
             FEED_TOKEN=feed_token,
