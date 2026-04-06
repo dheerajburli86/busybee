@@ -1,19 +1,14 @@
 """
 india_live_server.py — Railway always-on server
-================================================
-Connects to Angel One smartWebSocketV2, streams live NSE ticks
-for all India stocks, writes to Supabase `india_live_prices` table.
+Streams Angel One live ticks → Supabase india_live_prices table.
+Loads prev_close from DB on startup for accurate intraday % calculation.
 """
 
 import os, time, threading, logging, pyotp, requests
 from datetime import datetime, timezone, timedelta
 from supabase import create_client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
 
 ANGEL_API_KEY     = os.environ["ANGEL_API_KEY"]
@@ -57,46 +52,75 @@ def angel_login():
     totp = pyotp.TOTP(ANGEL_TOTP_SECRET).now()
     resp = requests.post(
         "https://apiconnect.angelbroking.com/rest/auth/angelbroking/user/v1/loginByPassword",
-        headers={
-            "Content-Type": "application/json", "Accept": "application/json",
-            "X-UserType": "USER", "X-SourceID": "WEB",
-            "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
-            "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY,
-        },
-        json={"clientcode": ANGEL_CLIENT_ID, "password": ANGEL_PIN, "totp": totp},
+        headers={"Content-Type":"application/json","Accept":"application/json","X-UserType":"USER","X-SourceID":"WEB","X-ClientLocalIP":"127.0.0.1","X-ClientPublicIP":"127.0.0.1","X-MACAddress":"00:00:00:00:00:00","X-PrivateKey":ANGEL_API_KEY},
+        json={"clientcode":ANGEL_CLIENT_ID,"password":ANGEL_PIN,"totp":totp},
         timeout=15
     ).json()
-    if not resp.get("status") or not resp.get("data", {}).get("jwtToken"):
-        raise Exception(f"Login failed: {resp.get('message')} ({resp.get('errorcode')})")
+    if not resp.get("status") or not resp.get("data",{}).get("jwtToken"):
+        raise Exception(f"Login failed: {resp.get('message')}")
     log.info("Angel One login successful")
     return resp["data"]["jwtToken"], resp["data"]["feedToken"]
 
 def load_scrip_master():
     log.info("Loading scrip master...")
-    data = requests.get(
-        "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json",
-        timeout=30
-    ).json()
+    data = requests.get("https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json", timeout=30).json()
     token_to_sym = {}
     sym_to_token = {}
     for item in data:
         if item.get("exch_seg") == "NSE" and str(item.get("symbol","")).endswith("-EQ"):
-            sym   = item["symbol"].replace("-EQ", "")
-            token = str(item["token"])
-            token_to_sym[token] = sym
-            sym_to_token[sym]   = token
+            sym = item["symbol"].replace("-EQ","")
+            tok = str(item["token"])
+            token_to_sym[tok] = sym
+            sym_to_token[sym] = tok
     log.info(f"Scrip master loaded: {len(token_to_sym)} NSE equity symbols")
     return token_to_sym, sym_to_token
+
+def load_prev_closes():
+    """
+    Load yesterday's closing price for all India stocks from Supabase.
+    Used as fallback when Angel One WebSocket sends close_price=0.
+    Returns {symbol: prev_close_price}.
+    """
+    log.info("Loading prev_close from DB...")
+    prev_closes = {}
+    try:
+        # Get all india_stocks instrument ids and symbols
+        all_instrs = []
+        offset = 0
+        while True:
+            batch = supabase.table("instruments").select("id,symbol").eq("universe","india_stocks").range(offset, offset+999).execute()
+            all_instrs.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+            offset += 1000
+
+        id_to_sym = {r["id"]: r["symbol"] for r in all_instrs}
+        ids = list(id_to_sym.keys())
+
+        # Get latest prices for all instruments
+        for i in range(0, len(ids), 500):
+            batch_ids = ids[i:i+500]
+            rows = supabase.table("prices").select("instrument_id,price_native").in_("instrument_id", batch_ids).order("as_of", desc=True).execute()
+            seen = set()
+            for r in rows.data:
+                iid = r["instrument_id"]
+                if iid not in seen and r["price_native"]:
+                    seen.add(iid)
+                    sym = id_to_sym.get(iid)
+                    if sym:
+                        prev_closes[sym] = float(r["price_native"])
+
+        log.info(f"Loaded prev_close for {len(prev_closes)} symbols")
+    except Exception as e:
+        log.error(f"Failed to load prev_closes: {e}")
+    return prev_closes
 
 def load_india_tokens(sym_to_token):
     log.info("Loading India instruments from Supabase...")
     all_syms = []
     offset = 0
     while True:
-        batch = supabase.table("instruments") \
-                        .select("symbol") \
-                        .eq("universe", "india_stocks") \
-                        .range(offset, offset + 999).execute()
+        batch = supabase.table("instruments").select("symbol").eq("universe","india_stocks").range(offset, offset+999).execute()
         all_syms.extend([r["symbol"] for r in batch.data])
         if len(batch.data) < 1000:
             break
@@ -104,8 +128,7 @@ def load_india_tokens(sym_to_token):
     tokens = []
     skipped = []
     for sym in all_syms:
-        tok = sym_to_token.get(sym) or \
-              sym_to_token.get(sym.replace("_","")) or \
+        tok = sym_to_token.get(sym) or sym_to_token.get(sym.replace("_","")) or \
               (sym_to_token.get(sym.replace(".RR","")) if ".RR" in sym else None)
         if tok:
             tokens.append(tok)
@@ -117,23 +140,31 @@ def load_india_tokens(sym_to_token):
 tick_buffer = {}
 buffer_lock = threading.Lock()
 
-def on_tick(tick, token_to_sym):
+def on_tick(tick, token_to_sym, prev_closes):
     try:
-        token = str(tick.get("token", ""))
+        token = str(tick.get("token",""))
         sym   = token_to_sym.get(token)
         if not sym:
             return
         ltp  = tick.get("last_traded_price", 0) / 100
         prev = tick.get("close_price", 0) / 100
-        pct  = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
+
+        # If Angel One sends zero prev_close, use DB prev_close
+        if prev <= 0:
+            prev = prev_closes.get(sym, 0)
+
+        pct = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
+
         with buffer_lock:
-            tick_buffer[sym] = {
-                "symbol":         sym,
-                "ltp":            round(ltp, 2),
-                "prev_close":     round(prev, 2),
-                if pct is not None: record["percent_change"] = round(pct, 4)
-                "updated_at":     datetime.now(timezone.utc).isoformat(),
+            record = {
+                "symbol":     sym,
+                "ltp":        round(ltp, 2),
+                "prev_close": round(prev, 2),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
+            if pct is not None:
+                record["percent_change"] = round(pct, 4)
+            tick_buffer[sym] = record
     except Exception as e:
         log.warning(f"Tick error: {e}")
 
@@ -147,23 +178,17 @@ def flush_loop():
             tick_buffer.clear()
         try:
             for i in range(0, len(records), UPSERT_BATCH):
-                batch = records[i:i+UPSERT_BATCH]
-                supabase.table("india_live_prices").upsert(
-                    batch, on_conflict="symbol"
-                ).execute()
+                supabase.table("india_live_prices").upsert(records[i:i+UPSERT_BATCH], on_conflict="symbol").execute()
             log.info(f"Flushed {len(records)} ticks to Supabase")
         except Exception as e:
             log.error(f"Supabase flush error: {e}")
 
-def run_websocket(jwt, feed_token, tokens, token_to_sym):
+def run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes):
     from SmartApi.smartWebSocketV2 import SmartWebSocketV2
 
     sws = SmartWebSocketV2(
-        auth_token=jwt,
-        api_key=ANGEL_API_KEY,
-        client_code=ANGEL_CLIENT_ID,
-        feed_token=feed_token,
-        max_retry_attempt=5,
+        auth_token=jwt, api_key=ANGEL_API_KEY,
+        client_code=ANGEL_CLIENT_ID, feed_token=feed_token, max_retry_attempt=5,
     )
 
     def on_open(wsapp):
@@ -171,12 +196,12 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym):
         BATCH = 999
         for i in range(0, len(tokens), BATCH):
             b = tokens[i:i+BATCH]
-            sws.subscribe(f"india_live_{i}", 3, [{"exchangeType": 1, "tokens": b}])
+            sws.subscribe(f"india_live_{i}", 3, [{"exchangeType":1,"tokens":b}])
             log.info(f"Subscribed batch {i//BATCH+1}: {len(b)} tokens")
         log.info(f"Total: {len(tokens)} tokens subscribed")
 
     def on_data(wsapp, message):
-        on_tick(message, token_to_sym)
+        on_tick(message, token_to_sym, prev_closes)
 
     def on_error(wsapp, error):
         log.error(f"WebSocket error: {error}")
@@ -184,18 +209,15 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym):
     def on_close(wsapp):
         log.warning("WebSocket closed")
 
-    sws.on_open  = on_open
-    sws.on_data  = on_data
-    sws.on_error = on_error
-    sws.on_close = on_close
+    sws.on_open = on_open; sws.on_data = on_data
+    sws.on_error = on_error; sws.on_close = on_close
     sws.connect()
 
 def main():
     log.info("🚀 India Live Server starting...")
     token_to_sym, sym_to_token = load_scrip_master()
 
-    t = threading.Thread(target=flush_loop, daemon=True)
-    t.start()
+    threading.Thread(target=flush_loop, daemon=True).start()
 
     while True:
         if not is_nse_open():
@@ -206,8 +228,9 @@ def main():
         try:
             log.info("NSE is open — connecting to Angel One WebSocket...")
             jwt, feed_token = angel_login()
-            tokens = load_india_tokens(sym_to_token)
-            run_websocket(jwt, feed_token, tokens, token_to_sym)
+            tokens     = load_india_tokens(sym_to_token)
+            prev_closes = load_prev_closes()
+            run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
             log.error(f"Error: {e} — reconnecting in 10s...")
             time.sleep(10)
