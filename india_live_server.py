@@ -215,9 +215,9 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym):
 
         sws = SmartWebSocketV2(
             auth_token=jwt,
-            API_KEY=ANGEL_API_KEY,
-            CLIENT_CODE=ANGEL_CLIENT_ID,
-            FEED_TOKEN=feed_token,
+            api_key=ANGEL_API_KEY,
+            client_code=ANGEL_CLIENT_ID,
+            feed_token=feed_token,
             max_retry_attempt=5,
         )
 
