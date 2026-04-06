@@ -125,13 +125,13 @@ def on_tick(tick, token_to_sym):
             return
         ltp  = tick.get("last_traded_price", 0) / 100
         prev = tick.get("close_price", 0) / 100
-        pct  = ((ltp - prev) / prev * 100) if prev > 0 else 0
+        pct  = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
         with buffer_lock:
             tick_buffer[sym] = {
                 "symbol":         sym,
                 "ltp":            round(ltp, 2),
                 "prev_close":     round(prev, 2),
-                "percent_change": round(pct, 4),
+                if pct is not None: record["percent_change"] = round(pct, 4)
                 "updated_at":     datetime.now(timezone.utc).isoformat(),
             }
     except Exception as e:
