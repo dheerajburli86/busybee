@@ -93,7 +93,7 @@ def load_prev_closes(jwt, token_to_sym):
                          "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
                          "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
                          "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
-                json={"mode": "FULL", "exchangeTokens": {"NSE": batch}},
+                json={"mode": "LTP", "exchangeTokens": {"NSE": batch}},
                 timeout=15
             ).json()
             if resp.get("status"):
@@ -224,6 +224,7 @@ def main():
             jwt, feed_token = angel_login()
             tokens     = load_india_tokens(sym_to_token)
             prev_closes = load_prev_closes(jwt, token_to_sym)
+            threading.Thread(target=bulk_quote_poll, args=(jwt, token_to_sym, prev_closes), daemon=True).start()
             run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
             log.error(f"Error: {e} — reconnecting in 10s...")
@@ -231,3 +232,53 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def bulk_quote_poll(jwt, token_to_sym, prev_closes):
+    tokens = list(token_to_sym.keys())
+    last_poll = [0]
+    while True:
+        time.sleep(5)
+        if time.time() - last_poll[0] < 60:
+            continue
+        if not is_nse_open():
+            continue
+        last_poll[0] = time.time()
+        log.info("Bulk quote poll starting...")
+        records = []
+        try:
+            for i in range(0, len(tokens), 50):
+                batch = tokens[i:i+50]
+                resp = requests.post(
+                    "https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/",
+                    headers={"Authorization": f"Bearer {jwt}", "Content-Type": "application/json",
+                             "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
+                             "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
+                             "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
+                    json={"mode": "FULL", "exchangeTokens": {"NSE": batch}},
+                    timeout=15
+                ).json()
+                if resp.get("status"):
+                    for q in resp.get("data", {}).get("fetched", []):
+                        tok = str(q.get("symbolToken", ""))
+                        sym = token_to_sym.get(tok)
+                        if not sym:
+                            continue
+                        ltp  = float(q.get("ltp") or 0)
+                        prev = float(q.get("close") or 0) or prev_closes.get(sym, 0)
+                        pct  = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
+                        if ltp > 0:
+                            record = {
+                                "symbol": sym, "ltp": round(ltp, 2),
+                                "prev_close": round(prev, 2),
+                                "updated_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            if pct is not None:
+                                record["percent_change"] = round(pct, 4)
+                            records.append(record)
+                time.sleep(0.1)
+            for i in range(0, len(records), UPSERT_BATCH):
+                supabase.table("india_live_prices").upsert(records[i:i+UPSERT_BATCH], on_conflict="symbol").execute()
+            log.info(f"Bulk quote poll: pushed {len(records)} records")
+        except Exception as e:
+            log.error(f"Bulk quote poll error: {e}")
