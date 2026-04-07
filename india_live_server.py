@@ -1,6 +1,6 @@
 ﻿"""
-india_live_server.py â€” Railway always-on server
-Streams Angel One live ticks â†’ Supabase india_live_prices table.
+india_live_server.py — Railway always-on server
+Streams Angel One live ticks → Supabase india_live_prices table.
 Loads prev_close from DB on startup for accurate intraday % calculation.
 """
 
@@ -186,7 +186,7 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes):
     )
 
     def on_open(wsapp):
-        log.info("WebSocket connected â€” subscribing tokens...")
+        log.info("WebSocket connected — subscribing tokens...")
         BATCH = 999
         for i in range(0, len(tokens), BATCH):
             b = tokens[i:i+BATCH]
@@ -252,12 +252,12 @@ def bulk_quote_poll(token_to_sym, prev_closes):
                     try:
                         resp = raw.json()
                     except Exception:
-                        log.warning("Bulk poll: invalid JSON â€” JWT expired mid-run, refreshing...")
+                        log.warning("Bulk poll: invalid JSON — JWT expired mid-run, refreshing...")
                         current_jwt[0], _ = angel_login()
                         last_login[0] = time.time()
                         continue
                 except Exception as e:
-                    log.warning(f"Bulk poll batch error: {e} â€” skipping batch")
+                    log.warning(f"Bulk poll batch error: {e} — skipping batch")
                     time.sleep(1)
                     continue
 
@@ -285,7 +285,7 @@ def bulk_quote_poll(token_to_sym, prev_closes):
             log.error(f"Bulk quote poll error: {e}")
 
 def main():
-    log.info("ðŸš€ India Live Server starting...")
+    log.info("🚀 India Live Server starting...")
     token_to_sym, sym_to_token = load_scrip_master()
 
     threading.Thread(target=flush_loop, daemon=True).start()
@@ -293,20 +293,19 @@ def main():
     while True:
         if not is_nse_open():
             wait = seconds_until_nse_open()
-            log.info(f"NSE closed â€” sleeping {wait/3600:.1f} hours until next open")
+            log.info(f"NSE closed — sleeping {wait/3600:.1f} hours until next open")
             time.sleep(min(wait, 3600))
             continue
         try:
-            log.info("NSE is open â€” connecting to Angel One WebSocket...")
+            log.info("NSE is open — connecting to Angel One WebSocket...")
             jwt, feed_token = angel_login()
             tokens     = load_india_tokens(sym_to_token)
             prev_closes = load_prev_closes()
             threading.Thread(target=bulk_quote_poll, args=(token_to_sym, prev_closes), daemon=True).start()
             run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
-            log.error(f"Error: {e} â€” reconnecting in 10s...")
+            log.error(f"Error: {e} — reconnecting in 10s...")
             time.sleep(10)
 
 if __name__ == "__main__":
-    main()#   c a c h e   b u s t   0 4 / 0 7 / 2 0 2 6   1 2 : 1 9 : 2 9 
- 
+    main()
