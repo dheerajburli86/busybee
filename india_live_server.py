@@ -255,12 +255,8 @@ def bulk_quote_poll(token_to_sym, prev_closes):
                         last_login[0] = time.time()
                         continue
                 except Exception as e:
-                    log.warning(f"Bulk poll batch error: {e} — refreshing JWT")
-                    try:
-                        current_jwt[0], _ = angel_login()
-                        last_login[0] = time.time()
-                    except Exception:
-                        pass
+                    log.warning(f"Bulk poll batch error: {e} — skipping batch")
+                    time.sleep(1)
                     continue
 
                 if resp.get("status"):
