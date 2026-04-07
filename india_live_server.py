@@ -150,15 +150,13 @@ def on_tick(tick, token_to_sym, prev_closes):
         pct = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
 
         with buffer_lock:
-            record = {
-                "symbol":     sym,
-                "ltp":        round(ltp, 2),
-                "prev_close": round(prev, 2),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+            tick_buffer[sym] = {
+                "symbol":         sym,
+                "ltp":            round(ltp, 2),
+                "prev_close":     round(prev, 2),
+                "percent_change": round(pct, 4) if pct is not None else 0,
+                "updated_at":     datetime.now(timezone.utc).isoformat(),
             }
-            if pct is not None:
-                record["percent_change"] = round(pct, 4)
-            tick_buffer[sym] = record
     except Exception as e:
         log.warning(f"Tick error: {e}")
 
@@ -208,30 +206,63 @@ def run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes):
     sws.connect()
 
 
-def bulk_quote_poll(jwt, token_to_sym, prev_closes):
+def bulk_quote_poll(token_to_sym, prev_closes):
     tokens = list(token_to_sym.keys())
     last_poll = [0]
+    current_jwt = [None]
+    last_login = [0]
+
     while True:
         time.sleep(5)
-        if time.time() - last_poll[0] < 60:
+        if time.time() - last_poll[0] < 300:
             continue
         if not is_nse_open():
             continue
         last_poll[0] = time.time()
+
+        # Refresh JWT every 3 hours
+        if current_jwt[0] is None or time.time() - last_login[0] > 10800:
+            try:
+                current_jwt[0], _ = angel_login()
+                last_login[0] = time.time()
+                log.info("Bulk quote poll: JWT refreshed")
+            except Exception as e:
+                log.error(f"Bulk quote poll: login failed: {e}")
+                continue
+
         log.info("Bulk quote poll starting...")
         records = []
         try:
             for i in range(0, len(tokens), 50):
                 batch = tokens[i:i+50]
-                resp = requests.post(
-                    "https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/",
-                    headers={"Authorization": f"Bearer {jwt}", "Content-Type": "application/json",
-                             "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
-                             "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
-                             "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
-                    json={"mode": "FULL", "exchangeTokens": {"NSE": batch}},
-                    timeout=15
-                ).json()
+                try:
+                    raw = requests.post(
+                        "https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/",
+                        headers={"Authorization": f"Bearer {current_jwt[0]}", "Content-Type": "application/json",
+                                 "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
+                                 "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
+                                 "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
+                        json={"mode": "FULL", "exchangeTokens": {"NSE": batch}},
+                        timeout=15
+                    )
+                    if raw.status_code != 200:
+                        raise Exception(f"HTTP {raw.status_code}")
+                    try:
+                        resp = raw.json()
+                    except Exception:
+                        log.warning("Bulk poll: invalid JSON — JWT expired mid-run, refreshing...")
+                        current_jwt[0], _ = angel_login()
+                        last_login[0] = time.time()
+                        continue
+                except Exception as e:
+                    log.warning(f"Bulk poll batch error: {e} — refreshing JWT")
+                    try:
+                        current_jwt[0], _ = angel_login()
+                        last_login[0] = time.time()
+                    except Exception:
+                        pass
+                    continue
+
                 if resp.get("status"):
                     for q in resp.get("data", {}).get("fetched", []):
                         tok = str(q.get("symbolToken", ""))
@@ -242,14 +273,12 @@ def bulk_quote_poll(jwt, token_to_sym, prev_closes):
                         prev = float(q.get("close") or 0) or prev_closes.get(sym, 0)
                         pct  = ((ltp - prev) / prev * 100) if prev > 0 and ltp > 0 else None
                         if ltp > 0:
-                            record = {
+                            records.append({
                                 "symbol": sym, "ltp": round(ltp, 2),
                                 "prev_close": round(prev, 2),
+                                "percent_change": round(pct, 4) if pct is not None else 0,
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                            if pct is not None:
-                                record["percent_change"] = round(pct, 4)
-                            records.append(record)
+                            })
                 time.sleep(0.1)
             for i in range(0, len(records), UPSERT_BATCH):
                 supabase.table("india_live_prices").upsert(records[i:i+UPSERT_BATCH], on_conflict="symbol").execute()
@@ -274,7 +303,7 @@ def main():
             jwt, feed_token = angel_login()
             tokens     = load_india_tokens(sym_to_token)
             prev_closes = load_prev_closes(jwt, token_to_sym)
-            threading.Thread(target=bulk_quote_poll, args=(jwt, token_to_sym, prev_closes), daemon=True).start()
+            threading.Thread(target=bulk_quote_poll, args=(token_to_sym, prev_closes), daemon=True).start()
             run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
             log.error(f"Error: {e} — reconnecting in 10s...")
