@@ -75,39 +75,41 @@ def load_scrip_master():
     log.info(f"Scrip master loaded: {len(token_to_sym)} NSE equity symbols")
     return token_to_sym, sym_to_token
 
-def load_prev_closes(jwt, token_to_sym):
-    """
-    Fetch official NSE previous close for all India stocks via Angel One bulk quote.
-    Angel One's 'close' field = yesterday's official closing price from NSE.
-    Returns {symbol: prev_close_price}.
-    """
-    log.info("Loading prev_close from Angel One bulk quote...")
+def load_prev_closes():
+    log.info("Loading prev_close from Supabase DB...")
     prev_closes = {}
-    tokens = list(token_to_sym.keys())
     try:
-        for i in range(0, len(tokens), 50):
-            batch = tokens[i:i+50]
-            resp = requests.post(
-                "https://apiconnect.angelbroking.com/rest/secure/angelbroking/market/v1/quote/",
-                headers={"Authorization": f"Bearer {jwt}", "Content-Type": "application/json",
-                         "Accept": "application/json", "X-UserType": "USER", "X-SourceID": "WEB",
-                         "X-ClientLocalIP": "127.0.0.1", "X-ClientPublicIP": "127.0.0.1",
-                         "X-MACAddress": "00:00:00:00:00:00", "X-PrivateKey": ANGEL_API_KEY},
-                json={"mode": "LTP", "exchangeTokens": {"NSE": batch}},
-                timeout=15
-            ).json()
-            if resp.get("status"):
-                for q in resp.get("data", {}).get("fetched", []):
-                    tok = str(q.get("symbolToken", ""))
-                    sym = token_to_sym.get(tok)
-                    close = q.get("close") or q.get("ltp")
-                    if sym and close:
-                        prev_closes[sym] = float(close)
-            time.sleep(0.1)
+        all_instrs = []
+        offset = 0
+        while True:
+            batch = supabase.table("instruments").select("id,symbol").eq("universe","india_stocks").range(offset, offset+999).execute()
+            all_instrs.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+            offset += 1000
+
+        id_to_sym = {r["id"]: r["symbol"] for r in all_instrs}
+        ids = list(id_to_sym.keys())
+
+        for i in range(0, len(ids), 500):
+            batch_ids = ids[i:i+500]
+            rows = supabase.table("prices").select("instrument_id,price_native") \
+                .in_("instrument_id", batch_ids) \
+                .order("as_of", desc=True).execute()
+            seen = set()
+            for r in rows.data:
+                iid = r["instrument_id"]
+                if iid not in seen and r["price_native"]:
+                    seen.add(iid)
+                    sym = id_to_sym.get(iid)
+                    if sym:
+                        prev_closes[sym] = float(r["price_native"])
+
+        log.info(f"Loaded prev_close for {len(prev_closes)} symbols")
     except Exception as e:
         log.error(f"Failed to load prev_closes: {e}")
-    log.info(f"Loaded prev_close for {len(prev_closes)} symbols")
     return prev_closes
+
 
 def load_india_tokens(sym_to_token):
     log.info("Loading India instruments from Supabase...")
@@ -298,7 +300,7 @@ def main():
             log.info("NSE is open — connecting to Angel One WebSocket...")
             jwt, feed_token = angel_login()
             tokens     = load_india_tokens(sym_to_token)
-            prev_closes = load_prev_closes(jwt, token_to_sym)
+            prev_closes = load_prev_closes()
             threading.Thread(target=bulk_quote_poll, args=(token_to_sym, prev_closes), daemon=True).start()
             run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
