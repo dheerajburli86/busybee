@@ -121,6 +121,13 @@ def load_india_tokens(sym_to_token):
         if len(batch.data) < 1000:
             break
         offset += 1000
+
+    # Also load india_etfs tokens (stored in inv_symbol)
+    etf_rows = supabase.table("instruments").select("symbol,inv_symbol").eq("universe","india_etfs").execute().data
+    etf_tokens = [r["inv_symbol"] for r in etf_rows if r.get("inv_symbol")]
+    etf_syms   = {r["inv_symbol"]: r["symbol"] for r in etf_rows if r.get("inv_symbol")}
+    log.info(f"India ETFs: {len(etf_tokens)} tokens loaded")
+
     tokens = []
     skipped = []
     for sym in all_syms:
@@ -130,8 +137,11 @@ def load_india_tokens(sym_to_token):
             tokens.append(tok)
         else:
             skipped.append(sym)
-    log.info(f"Mapped: {len(tokens)}  Skipped: {len(skipped)}")
-    return tokens
+
+    # Add ETF tokens and update token_to_sym map
+    tokens.extend(etf_tokens)
+    log.info(f"Stocks mapped: {len(tokens) - len(etf_tokens)}  Skipped: {len(skipped)}  ETFs: {len(etf_tokens)}")
+    return tokens, etf_syms
 
 tick_buffer = {}
 buffer_lock = threading.Lock()
@@ -299,9 +309,10 @@ def main():
         try:
             log.info("NSE is open — connecting to Angel One WebSocket...")
             jwt, feed_token = angel_login()
-            tokens     = load_india_tokens(sym_to_token)
+            tokens, etf_token_map = load_india_tokens(sym_to_token)
             prev_closes = load_prev_closes()
             threading.Thread(target=bulk_quote_poll, args=(token_to_sym, prev_closes), daemon=True).start()
+            token_to_sym.update(etf_token_map)
             run_websocket(jwt, feed_token, tokens, token_to_sym, prev_closes)
         except Exception as e:
             log.error(f"Error: {e} — reconnecting in 10s...")
