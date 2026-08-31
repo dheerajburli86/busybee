@@ -1,5 +1,5 @@
 // app/api/tasks/route.ts
-import { createServerSideClient } from "@/lib/supabase";
+import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 
 // GET /api/tasks - list tasks for current user's desks

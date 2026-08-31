@@ -1,5 +1,5 @@
 // app/api/date-proposals/route.ts
-import { createServerSideClient } from "@/lib/supabase";
+import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 
 // GET /api/date-proposals?task_id=xxx - get proposals for a task
