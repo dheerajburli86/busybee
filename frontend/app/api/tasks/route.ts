@@ -16,37 +16,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get user's desks
-    const { data: desks, error: desksError } = await supabase
-      .from("desk_members")
-      .select("desk_id")
-      .eq("user_id", user.id);
-
-    if (desksError) throw desksError;
-
-    const deskIds = desks.map((d) => d.desk_id);
-
-    // Get tasks in those desks
+    // Get all tasks (no desk filter for now)
     const { data: tasks, error: tasksError } = await supabase
       .from("tasks")
-      .select(
-        `
-        id,
-        title,
-        description,
-        priority,
-        assigned_to,
-        created_by,
-        stage_id,
-        project_id,
-        desk_id,
-        created_at,
-        archived_at,
-        approved_deadlines (approved_datetime),
-        subtasks (id, title, done)
-      `
-      )
-      .in("desk_id", deskIds)
+      .select(`*`)
       .is("archived_at", null)
       .order("created_at", { ascending: false });
 
@@ -86,22 +59,7 @@ export async function POST(request: NextRequest) {
       task_group_id = null,
     } = body;
 
-    // Verify user is a supervisor in this desk
-    const { data: member } = await supabase
-      .from("desk_members")
-      .select("role")
-      .eq("desk_id", desk_id)
-      .eq("user_id", user.id)
-      .single();
-
-    if (!member || !["supervisor", "owner"].includes(member.role)) {
-      return NextResponse.json(
-        { error: "Only supervisors can create tasks" },
-        { status: 403 }
-      );
-    }
-
-    // Create task
+    // Create task (anyone can create)
     const { data: task, error } = await supabase
       .from("tasks")
       .insert({
