@@ -1,6 +1,10 @@
-// lib/supabase.ts
-import { createBrowserClient } from "@supabase/ssr";
+'use server';
 
+import { createBrowserClient } from "@supabase/ssr";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
+
+// Browser client
 export function createClient() {
   return createBrowserClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -9,15 +13,12 @@ export function createClient() {
 }
 
 // Server-side client (for API routes)
-import { createServerClient, serialize, parse } from "@supabase/ssr";
-import { cookies } from "next/headers";
-
 export async function createServerSideClient() {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    process.env.SUPABASE_SERVICE_KEY!,
     {
       cookies: {
         get(name: string) {
@@ -31,15 +32,5 @@ export async function createServerSideClient() {
         },
       },
     }
-  );
-}
-
-// Service role client (for admin operations)
-export function createServiceRoleClient() {
-  const { createClient: createServiceClient } = require("@supabase/supabase-js");
-  
-  return createServiceClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!
   );
 }
