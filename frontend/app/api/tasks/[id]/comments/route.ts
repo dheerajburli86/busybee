@@ -5,9 +5,9 @@ import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id: taskId } = params;
+  const { id: taskId } = await params;
 
   try {
     const supabase = await createServerSideClient();
@@ -33,6 +33,31 @@ export async function POST(
     return NextResponse.json(comment);
   } catch (error: any) {
     console.error("POST /api/tasks/[id]/comments failed:", error);
+    return NextResponse.json({ error: error?.message }, { status: 500 });
+  }
+}
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: taskId } = await params;
+
+  try {
+    const supabase = await createServerSideClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { data, error } = await supabase
+      .from("comments")
+      .select("id, content, author_id, created_at")
+      .eq("task_id", taskId)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+    return NextResponse.json(data || []);
+  } catch (error: any) {
+    console.error("GET /api/tasks/[id]/comments failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });
   }
 }
