@@ -1,7 +1,0 @@
-smartapi-python
-websocket-client
-pyotp
-requests
-supabase
-python-dotenv
-logzero
