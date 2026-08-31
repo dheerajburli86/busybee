@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { TaskDetail } from "@/components/TaskDetail";
+import { useState } from "react";
 
 type Task = {
   id: string;
@@ -14,175 +13,252 @@ type Task = {
   created_at: string;
 };
 
-export default function DashboardPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [dueDate, setDueDate] = useState("");
-  const [priority, setPriority] = useState("medium");
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState("");
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+type Comment = {
+  id: string;
+  content: string;
+  author_id: string;
+  created_at: string;
+};
 
-  useEffect(() => {
-    loadTasks();
-  }, []);
+type Attachment = {
+  id: string;
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  created_at: string;
+};
 
-  const loadTasks = async () => {
+type Subtask = {
+  id: string;
+  title: string;
+  done: boolean;
+  progress_percent: number;
+};
+
+export function TaskDetail({ task }: { task: Task }) {
+  const [expanded, setExpanded] = useState(false);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [subtasks, setSubtasks] = useState<Subtask[]>([]);
+  const [activity, setActivity] = useState<any[]>([]);
+  const [newComment, setNewComment] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const loadTaskDetails = async () => {
+    setLoading(true);
     try {
-      const res = await fetch("/api/tasks");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not load tasks");
-      setTasks(data.tasks || []);
-    } catch (e: any) {
-      setError(e.message);
+      const [commentsRes, attachmentsRes, subtasksRes, activityRes] = await Promise.all([
+        fetch(`/api/tasks/${task.id}/comments`),
+        fetch(`/api/tasks/${task.id}/attachments`),
+        fetch(`/api/tasks/${task.id}/subtasks`),
+        fetch(`/api/tasks/${task.id}/activity`),
+      ]);
+
+      if (commentsRes.ok) setComments(await commentsRes.json());
+      if (attachmentsRes.ok) setAttachments(await attachmentsRes.json());
+      if (subtasksRes.ok) setSubtasks(await subtasksRes.json());
+      if (activityRes.ok) setActivity(await activityRes.json());
+    } catch (e) {
+      console.error(e);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!newComment.trim()) return;
 
-    setCreating(true);
-    setError("");
     try {
-      const res = await fetch("/api/tasks", {
+      const res = await fetch(`/api/tasks/${task.id}/comments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: title.trim(),
-          description: description.trim() || null,
-          priority,
-          due_date: dueDate || null,
-        }),
+        body: JSON.stringify({ content: newComment.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not create task");
 
-      setTasks([data.task, ...tasks]);
-      setTitle("");
-      setDescription("");
-      setDueDate("");
-      setPriority("medium");
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setCreating(false);
+      if (res.ok) {
+        const comment = await res.json();
+        setComments([comment, ...comments]);
+        setNewComment("");
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
-  if (selectedTask) {
+  if (!expanded)
     return (
-      <div className="max-w-4xl mx-auto p-6">
-        <TaskDetail task={selectedTask} />
-        <button
-          onClick={() => setSelectedTask(null)}
-          className="mt-4 text-blue-400 hover:underline"
-        >
-          ← Back to tasks
-        </button>
+      <div
+        onClick={() => {
+          setExpanded(true);
+          loadTaskDetails();
+        }}
+        className="bg-slate-800 p-4 rounded border border-slate-700 cursor-pointer hover:border-blue-500"
+      >
+        <div className="flex justify-between items-start mb-2">
+          <h3 className="font-bold text-lg">{task.title}</h3>
+          <span className={`text-xs px-2 py-1 rounded ${getStatusColor(task.status)}`}>
+            {task.status}
+          </span>
+        </div>
+        {task.description && <p className="text-slate-400 text-sm mb-2">{task.description}</p>}
+        <div className="flex gap-4 text-xs text-slate-500 mb-2">
+          <span>Priority: {task.priority}</span>
+          <span>Progress: {task.progress_percent}%</span>
+          {task.due_date && <span>Due: {new Date(task.due_date).toLocaleDateString()}</span>}
+        </div>
+        <div className="w-full bg-slate-900 rounded h-2">
+          <div
+            className="bg-blue-600 h-2 rounded"
+            style={{ width: `${task.progress_percent}%` }}
+          />
+        </div>
       </div>
     );
-  }
 
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      <h1 className="text-3xl font-bold mb-6">Tasks</h1>
-
-      {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">
-          {error}
-        </div>
-      )}
-
-      <form
-        onSubmit={handleCreate}
-        className="bg-slate-800 p-4 rounded border border-slate-700 mb-6"
+    <div className="bg-slate-800 p-6 rounded border border-slate-700">
+      <button
+        onClick={() => setExpanded(false)}
+        className="text-slate-400 hover:text-white mb-4"
       >
-        <input
-          type="text"
-          placeholder="Task title..."
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500"
-          disabled={creating}
-        />
-        <textarea
-          placeholder="Description (optional)..."
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500 resize-none"
-          rows={2}
-          disabled={creating}
-        />
-        <div className="grid grid-cols-3 gap-3 mb-3">
-          <input
-            type="date"
-            value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
-            disabled={creating}
-          />
+        ← Back
+      </button>
+
+      {/* Task Header */}
+      <div className="mb-6">
+        <h2 className="text-2xl font-bold mb-2">{task.title}</h2>
+        <div className="flex gap-4 text-sm">
           <select
-            value={priority}
-            onChange={(e) => setPriority(e.target.value)}
-            className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
-            disabled={creating}
+            defaultValue={task.status}
+            onChange={(e) => {}}
+            className="bg-slate-900 border border-slate-600 rounded px-2 py-1"
+          >
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="done">Done</option>
+            <option value="need_help">Need Help</option>
+          </select>
+          <select
+            defaultValue={task.priority}
+            onChange={(e) => {}}
+            className="bg-slate-900 border border-slate-600 rounded px-2 py-1"
           >
             <option value="low">Low</option>
             <option value="medium">Medium</option>
             <option value="high">High</option>
             <option value="super_high">Super High</option>
           </select>
+          {task.due_date && (
+            <span className="text-slate-400">Due: {new Date(task.due_date).toLocaleDateString()}</span>
+          )}
+        </div>
+      </div>
+
+      {/* Description */}
+      {task.description && (
+        <div className="mb-6">
+          <h3 className="font-bold mb-2">Description</h3>
+          <p className="text-slate-300">{task.description}</p>
+        </div>
+      )}
+
+      {/* Progress */}
+      <div className="mb-6">
+        <h3 className="font-bold mb-2">Progress: {task.progress_percent}%</h3>
+        <div className="w-full bg-slate-900 rounded h-4">
+          <div
+            className="bg-blue-600 h-4 rounded"
+            style={{ width: `${task.progress_percent}%` }}
+          />
+        </div>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          defaultValue={task.progress_percent}
+          onChange={(e) => {}}
+          className="w-full mt-2"
+        />
+      </div>
+
+      {/* Subtasks */}
+      {subtasks.length > 0 && (
+        <div className="mb-6">
+          <h3 className="font-bold mb-3">Subtasks ({subtasks.filter((s) => s.done).length}/{subtasks.length})</h3>
+          <div className="space-y-2">
+            {subtasks.map((subtask) => (
+              <div key={subtask.id} className="flex items-center gap-3 bg-slate-900 p-3 rounded">
+                <input type="checkbox" defaultChecked={subtask.done} className="w-4 h-4" />
+                <span className={subtask.done ? "line-through text-slate-500" : ""}>{subtask.title}</span>
+                <span className="text-xs text-slate-500 ml-auto">{subtask.progress_percent}%</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Attachments */}
+      {attachments.length > 0 && (
+        <div className="mb-6">
+          <h3 className="font-bold mb-2">Attachments ({attachments.length})</h3>
+          <div className="space-y-1">
+            {attachments.map((att) => (
+              <a
+                key={att.id}
+                href={att.file_url}
+                target="_blank"
+                className="block text-blue-400 hover:underline text-sm truncate"
+              >
+                📎 {att.file_name}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Comments */}
+      <div className="mb-6">
+        <h3 className="font-bold mb-3">Comments ({comments.length})</h3>
+        <form onSubmit={handleAddComment} className="mb-4">
+          <textarea
+            value={newComment}
+            onChange={(e) => setNewComment(e.target.value)}
+            placeholder="Add a comment..."
+            className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-2 resize-none"
+            rows={3}
+          />
           <button
             type="submit"
-            disabled={creating || !title.trim()}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded"
+            disabled={!newComment.trim()}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded text-sm"
           >
-            {creating ? "Creating..." : "Add Task"}
+            Post Comment
           </button>
-        </div>
-      </form>
-
-      {loading ? (
-        <p className="text-slate-400">Loading...</p>
-      ) : tasks.length === 0 ? (
-        <p className="text-slate-400">No tasks yet. Create one above.</p>
-      ) : (
-        <div className="grid gap-4">
-          {tasks.map((task) => (
-            <div
-              key={task.id}
-              onClick={() => setSelectedTask(task)}
-              className="bg-slate-800 p-4 rounded border border-slate-700 cursor-pointer hover:border-blue-500"
-            >
-              <div className="flex justify-between items-start mb-2">
-                <h3 className="font-bold text-lg">{task.title}</h3>
-                <span className={`text-xs px-2 py-1 rounded ${getStatusColor(task.status)}`}>
-                  {task.status}
-                </span>
-              </div>
-              {task.description && (
-                <p className="text-slate-400 text-sm mb-2">{task.description}</p>
-              )}
-              <div className="flex gap-4 text-xs text-slate-500 mb-2">
-                <span>Priority: {task.priority}</span>
-                <span>Progress: {task.progress_percent}%</span>
-                {task.due_date && (
-                  <span>Due: {new Date(task.due_date).toLocaleDateString()}</span>
-                )}
-              </div>
-              <div className="w-full bg-slate-900 rounded h-2">
-                <div
-                  className="bg-blue-600 h-2 rounded"
-                  style={{ width: `${task.progress_percent}%` }}
-                />
-              </div>
+        </form>
+        <div className="space-y-3">
+          {comments.map((comment) => (
+            <div key={comment.id} className="bg-slate-900 p-3 rounded text-sm">
+              <p className="text-slate-300">{comment.content}</p>
+              <p className="text-slate-500 text-xs mt-1">
+                {new Date(comment.created_at).toLocaleString()}
+              </p>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Activity Log */}
+      {activity.length > 0 && (
+        <div>
+          <h3 className="font-bold mb-3">Activity</h3>
+          <div className="space-y-2 text-sm">
+            {activity.map((log) => (
+              <p key={log.id} className="text-slate-400">
+                {log.action} · {new Date(log.created_at).toLocaleString()}
+              </p>
+            ))}
+          </div>
         </div>
       )}
     </div>
