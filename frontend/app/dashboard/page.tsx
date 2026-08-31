@@ -37,7 +37,7 @@ export default function DashboardPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          desk_id: "333b6163-4a76-4544-ab80-db23a4a1ec54",
+          desk_id: "bff2d736-fb3e-428c-bcaf-a0fed49c7a05",
           project_id: null,
           stage_id: null,
           title: title.trim(),
