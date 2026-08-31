@@ -2,12 +2,21 @@
 
 import { useEffect, useState } from "react";
 
+type Task = {
+  id: string;
+  title: string;
+  description: string | null;
+  priority: string;
+  created_at: string;
+};
+
 export default function DashboardPage() {
-  const [tasks, setTasks] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     loadTasks();
@@ -15,13 +24,12 @@ export default function DashboardPage() {
 
   const loadTasks = async () => {
     try {
-      const r = await fetch("/api/tasks");
-      if (r.ok) {
-        const d = await r.json();
-        setTasks(d.tasks || []);
-      }
-    } catch (e) {
-      console.error(e);
+      const res = await fetch("/api/tasks");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not load tasks");
+      setTasks(data.tasks || []);
+    } catch (e: any) {
+      setError(e.message);
     } finally {
       setLoading(false);
     }
@@ -32,31 +40,24 @@ export default function DashboardPage() {
     if (!title.trim()) return;
 
     setCreating(true);
+    setError("");
     try {
-      const r = await fetch("/api/tasks", {
+      const res = await fetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          desk_id: "bff2d736-fb3e-428c-bcaf-a0fed49c7a05",
-          project_id: null,
-          stage_id: null,
           title: title.trim(),
           description: description.trim() || null,
         }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not create task");
 
-      if (r.ok) {
-        const d = await r.json();
-        setTasks([d.task, ...tasks]);
-        setTitle("");
-        setDescription("");
-      } else {
-        const err = await r.json();
-        alert(`Error: ${err.error}`);
-      }
-    } catch (e) {
-      console.error(e);
-      alert("Failed to create task");
+      setTasks([data.task, ...tasks]);
+      setTitle("");
+      setDescription("");
+    } catch (e: any) {
+      setError(e.message);
     } finally {
       setCreating(false);
     }
@@ -65,6 +66,12 @@ export default function DashboardPage() {
   return (
     <div className="max-w-4xl mx-auto p-6">
       <h1 className="text-3xl font-bold mb-6">Tasks</h1>
+
+      {error && (
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">
+          {error}
+        </div>
+      )}
 
       <form
         onSubmit={handleCreate}
@@ -75,21 +82,21 @@ export default function DashboardPage() {
           placeholder="Task title..."
           value={title}
           onChange={(e) => setTitle(e.target.value)}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 text-white placeholder-slate-500"
+          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500"
           disabled={creating}
         />
         <textarea
           placeholder="Description (optional)..."
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 text-white placeholder-slate-500 resize-none"
+          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500 resize-none"
           rows={2}
           disabled={creating}
         />
         <button
           type="submit"
           disabled={creating || !title.trim()}
-          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-4 py-2 rounded"
+          className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded"
         >
           {creating ? "Creating..." : "Add Task"}
         </button>
@@ -111,7 +118,7 @@ export default function DashboardPage() {
                 <p className="text-slate-400 text-sm mt-2">{task.description}</p>
               )}
               <p className="text-slate-500 text-xs mt-3">
-                {new Date(task.created_at).toLocaleDateString()}
+                {new Date(task.created_at).toLocaleString()}
               </p>
             </div>
           ))}

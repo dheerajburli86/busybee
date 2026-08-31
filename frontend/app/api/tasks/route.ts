@@ -2,12 +2,47 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 
-// GET /api/tasks - list tasks for current user's desks
-export async function GET(request: NextRequest) {
+// Resolve the user's desk, project and default stage so the client
+// never has to know any IDs.
+async function resolveContext(supabase: any, userId: string) {
+  const { data: membership } = await supabase
+    .from("desk_members")
+    .select("desk_id")
+    .eq("user_id", userId)
+    .limit(1)
+    .maybeSingle();
+
+  if (!membership) return null;
+
+  const { data: project } = await supabase
+    .from("projects")
+    .select("id")
+    .eq("desk_id", membership.desk_id)
+    .limit(1)
+    .maybeSingle();
+
+  if (!project) return null;
+
+  const { data: stage } = await supabase
+    .from("stages")
+    .select("id")
+    .eq("project_id", project.id)
+    .order("position", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (!stage) return null;
+
+  return {
+    desk_id: membership.desk_id,
+    project_id: project.id,
+    stage_id: stage.id,
+  };
+}
+
+export async function GET() {
   try {
     const supabase = await createServerSideClient();
-
-    // Get current user
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -16,30 +51,36 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get all tasks (no desk filter for now)
-    const { data: tasks, error: tasksError } = await supabase
+    const { data: memberships } = await supabase
+      .from("desk_members")
+      .select("desk_id")
+      .eq("user_id", user.id);
+
+    const deskIds = (memberships || []).map((m: any) => m.desk_id);
+    if (deskIds.length === 0) return NextResponse.json({ tasks: [] });
+
+    const { data: tasks, error } = await supabase
       .from("tasks")
-      .select(`*`)
+      .select("id, title, description, priority, created_at")
+      .in("desk_id", deskIds)
       .is("archived_at", null)
       .order("created_at", { ascending: false });
 
-    if (tasksError) throw tasksError;
+    if (error) throw error;
 
-    return NextResponse.json({ tasks });
-  } catch (error) {
-    console.error("Error fetching tasks:", error);
+    return NextResponse.json({ tasks: tasks || [] });
+  } catch (error: any) {
+    console.error("GET /api/tasks failed:", error);
     return NextResponse.json(
-      { error: "Failed to fetch tasks" },
+      { error: error?.message || "Failed to fetch tasks" },
       { status: 500 }
     );
   }
 }
 
-// POST /api/tasks - create a task
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
-
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -49,49 +90,57 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const {
-      desk_id,
-      project_id,
-      stage_id,
-      title,
-      description,
-      priority = "medium",
-      task_group_id = null,
-    } = body;
+    const { title, description, priority = "medium" } = body;
 
-    // Create task (anyone can create)
+    if (!title || !title.trim()) {
+      return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    }
+
+    const ctx = await resolveContext(supabase, user.id);
+    if (!ctx) {
+      return NextResponse.json(
+        { error: "No desk/project/stage set up for this account" },
+        { status: 400 }
+      );
+    }
+
     const { data: task, error } = await supabase
       .from("tasks")
       .insert({
-        desk_id,
-        project_id,
-        stage_id,
-        title,
-        description,
+        desk_id: ctx.desk_id,
+        project_id: ctx.project_id,
+        stage_id: ctx.stage_id,
+        title: title.trim(),
+        description: description || null,
         priority,
-        task_group_id,
         created_by: user.id,
       })
-      .select()
+      .select("id, title, description, priority, created_at")
       .single();
 
     if (error) throw error;
 
-    // Log to activity log
-    await supabase.from("activity_log").insert({
-      entity_type: "task",
-      entity_id: task.id,
-      action: "created",
-      performed_by: user.id,
-      desk_id,
-      changes: { created: true },
-    });
+    // Activity log is a nice-to-have; never fail the request over it.
+    await supabase
+      .from("activity_log")
+      .insert({
+        entity_type: "task",
+        entity_id: task.id,
+        action: "created",
+        performed_by: user.id,
+        desk_id: ctx.desk_id,
+        changes: { created: true },
+      })
+      .then(
+        () => {},
+        () => {}
+      );
 
     return NextResponse.json({ task });
-  } catch (error) {
-    console.error("Error creating task:", error);
+  } catch (error: any) {
+    console.error("POST /api/tasks failed:", error);
     return NextResponse.json(
-      { error: "Failed to create task" },
+      { error: error?.message || "Failed to create task" },
       { status: 500 }
     );
   }
