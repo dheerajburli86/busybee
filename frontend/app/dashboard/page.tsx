@@ -60,7 +60,14 @@ export default function DashboardPage() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [myTasksOnly, setMyTasksOnly] = useState(false);
+
+  const searchSuggestions = searchQuery.trim()
+    ? tasks.filter((t) =>
+        t.title.toLowerCase().includes(searchQuery.toLowerCase())
+      ).slice(0, 5)
+    : [];
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
@@ -306,13 +313,36 @@ return (
         </form>
 
         {/* Search bar */}
-        <input
-          type="text"
-          placeholder="Search tasks..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded mb-4 placeholder-slate-500"
-        />
+        <div className="relative mb-4">
+          <input
+            type="text"
+            placeholder="Search tasks..."
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setShowSuggestions(true);
+            }}
+            onFocus={() => searchQuery && setShowSuggestions(true)}
+            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+            className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded placeholder-slate-500"
+          />
+          {showSuggestions && searchSuggestions.length > 0 && (
+            <div className="absolute top-full left-0 right-0 bg-slate-800 border border-slate-600 rounded mt-1 z-40 max-h-48 overflow-y-auto">
+              {searchSuggestions.map((task) => (
+                <div
+                  key={task.id}
+                  onClick={() => {
+                    setSearchQuery(task.title);
+                    setShowSuggestions(false);
+                  }}
+                  className="px-4 py-2 hover:bg-slate-700 cursor-pointer text-sm"
+                >
+                  {task.title}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* View toggle buttons */}
         <div className="flex gap-2 mb-6">
@@ -414,6 +444,7 @@ return (
             onPatch={patchTask}
             onError={setError}
             teamMembers={teamMembers}
+            onDuplicate={duplicateTask}
           />
         )}
       </div>
@@ -627,15 +658,6 @@ function TaskCard({
             />
           </div>
 
-          {onDuplicate && (
-            <button
-              onClick={() => onDuplicate(task.id)}
-              className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
-            >
-              Duplicate this task
-            </button>
-          )}
-
           <div>
             <p className="text-sm font-bold mb-2">Attachments ({attachments.length})</p>
             {attachments.length > 0 && (
@@ -731,6 +753,7 @@ function TaskDetail({
   onPatch,
   onError,
   teamMembers,
+  onDuplicate,
 }: {
   taskId: string;
   tasks: Task[];
@@ -738,6 +761,7 @@ function TaskDetail({
   onPatch: (id: string, patch: Partial<Task>) => void;
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
+  onDuplicate?: (id: string) => void;
 }) {
   const task = tasks.find((t) => t.id === taskId);
   if (!task) return null;
@@ -745,11 +769,24 @@ function TaskDetail({
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
       <div className="bg-slate-800 rounded border border-slate-700 max-w-2xl w-full max-h-96 overflow-y-auto">
-        <div className="p-4 border-b border-slate-700 flex justify-between items-start">
-          <h2 className="text-xl font-bold">{task.title}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">
-            ✕
-          </button>
+        <div className="p-4 border-b border-slate-700">
+          <div className="flex justify-between items-start mb-3">
+            <h2 className="text-xl font-bold">{task.title}</h2>
+            <button onClick={onClose} className="text-slate-400 hover:text-white">
+              ✕
+            </button>
+          </div>
+          {onDuplicate && (
+            <button
+              onClick={() => {
+                onDuplicate(task.id);
+                onClose();
+              }}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+            >
+              📋 Duplicate this task
+            </button>
+          )}
         </div>
         <TaskCard
           task={task}
