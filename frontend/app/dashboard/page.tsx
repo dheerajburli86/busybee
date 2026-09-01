@@ -11,6 +11,7 @@ type Task = {
   progress_percent: number;
   due_date: string | null;
   assigned_to: string | null;
+  milestone: string | null;
   created_at: string;
 };
 
