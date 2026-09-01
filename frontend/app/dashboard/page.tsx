@@ -12,6 +12,7 @@ type Task = {
   due_date: string | null;
   assigned_to: string | null;
   milestone: string | null;
+  project_id: string | null;
   created_at: string;
 };
 
@@ -70,6 +71,7 @@ export default function DashboardPage() {
     : [];
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [taskDeps, setTaskDeps] = useState<Record<string, string[]>>({});
+  const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<{ name: string; description: string | null } | null>(null);
 
   const [title, setTitle] = useState("");
@@ -121,6 +123,26 @@ export default function DashboardPage() {
           /* silently fail */
         }
       })();
+    })();
+  }, []);
+
+  // Read ?project=<id> from the URL and resolve it to a project.
+  // window.location avoids useSearchParams, which would need a Suspense boundary.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const pid = params.get("project");
+    if (!pid) return;
+    setProjectFilter(pid);
+    (async () => {
+      try {
+        const res = await fetch("/api/projects");
+        if (!res.ok) return;
+        const data = await res.json();
+        const match = (data.projects || []).find((p: any) => p.id === pid);
+        if (match) setCurrentProject(match);
+      } catch {
+        /* leave the header off if this fails */
+      }
     })();
   }, []);
 
@@ -221,7 +243,8 @@ export default function DashboardPage() {
       t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false)
     )
-    .filter((t) => (myTasksOnly ? t.assigned_to === currentUserId : true));
+    .filter((t) => (myTasksOnly ? t.assigned_to === currentUserId : true))
+    .filter((t) => (projectFilter ? t.project_id === projectFilter : true));
 
   const groupedByStatus = searchedTasks.reduce((acc, task) => {
     const status = task.status || "pending";
@@ -277,12 +300,22 @@ return (
         <div className="mb-6">
           <h2 className="text-3xl font-bold">Tasks</h2>
           {currentProject && (
-            <p className="text-slate-400 mt-2">
-              Project: <span className="text-blue-400 font-semibold">{currentProject.name}</span>
-              {currentProject.description && (
-                <span className="ml-4 text-sm">{currentProject.description}</span>
-              )}
-            </p>
+            <div className="mt-3 bg-slate-800 border border-slate-700 rounded p-4">
+              <div className="flex justify-between items-start gap-4">
+                <div>
+                  <p className="text-blue-400 font-semibold">{currentProject.name}</p>
+                  {currentProject.description && (
+                    <p className="text-slate-400 text-sm mt-1">{currentProject.description}</p>
+                  )}
+                </div>
+                <a
+                  href="/dashboard"
+                  className="text-sm text-slate-400 hover:text-white whitespace-nowrap"
+                >
+                  Show all tasks
+                </a>
+              </div>
+            </div>
           )}
         </div>
 
