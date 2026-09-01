@@ -14,6 +14,9 @@ type Task = {
   created_at: string;
 };
 
+type TeamMember = { id: string; name: string; email: string };
+type Notification = { id: string; message: string; read: boolean; created_at: string };
+
 const STATUSES = [
   { value: "pending", label: "Pending" },
   { value: "in_progress", label: "In Progress" },
@@ -38,25 +41,15 @@ function statusClass(status: string) {
   return map[status] || "bg-slate-700 text-slate-300";
 }
 
-function priorityClass(priority: string) {
-  const map: Record<string, string> = {
-    low: "text-slate-400",
-    medium: "text-slate-300",
-    high: "text-orange-400",
-    super_high: "text-red-400",
-  };
-  return map[priority] || "text-slate-300";
-}
-
-function labelFor(list: { value: string; label: string }[], value: string) {
-  return list.find((x) => x.value === value)?.label ?? value;
-}
-
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"list" | "board">("list");
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -67,10 +60,20 @@ export default function DashboardPage() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch("/api/tasks");
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Could not load tasks");
-        setTasks(data.tasks || []);
+        const [tasksRes, membersRes, notifRes] = await Promise.all([
+          fetch("/api/tasks"),
+          fetch("/api/team/members"),
+          fetch("/api/notifications"),
+        ]);
+        const tasksData = await tasksRes.json();
+        if (!tasksRes.ok) throw new Error(tasksData.error || "Could not load tasks");
+        setTasks(tasksData.tasks || []);
+
+        const membersData = await membersRes.json();
+        if (membersRes.ok) setTeamMembers(membersData.members || []);
+
+        const notifData = await notifRes.json();
+        if (notifRes.ok) setNotifications(notifData || []);
       } catch (e: any) {
         setError(e.message);
       } finally {
@@ -125,104 +128,219 @@ export default function DashboardPage() {
     }
   };
 
+  const markNotificationRead = async (id: string) => {
+    try {
+      await fetch("/api/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const groupedByStatus = tasks.reduce((acc, task) => {
+    const status = task.status || "pending";
+    if (!acc[status]) acc[status] = [];
+    acc[status].push(task);
+    return acc;
+  }, {} as Record<string, Task[]>);
+
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      <h1 className="text-3xl font-bold mb-6">Tasks</h1>
-
-      {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-4">
-          <span>{error}</span>
-          <button onClick={() => setError("")} className="text-red-400 shrink-0">
-            dismiss
-          </button>
-        </div>
-      )}
-
-      <form
-        onSubmit={createTask}
-        className="bg-slate-800 p-4 rounded border border-slate-700 mb-8"
-      >
-        <input
-          type="text"
-          placeholder="Task title..."
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          disabled={creating}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500"
-        />
-        <textarea
-          placeholder="Description (optional)..."
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          disabled={creating}
-          rows={2}
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500 resize-none"
-        />
-        <div className="flex flex-wrap gap-3">
-          <input
-            type="date"
-            value={dueDate}
-            onChange={(e) => setDueDate(e.target.value)}
-            disabled={creating}
-            className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
-          />
-          <select
-            value={priority}
-            onChange={(e) => setPriority(e.target.value)}
-            disabled={creating}
-            className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
-          >
-            {PRIORITIES.map((p) => (
-              <option key={p.value} value={p.value}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+    <div className="min-h-screen bg-slate-950">
+      {/* Header with notification bell */}
+      <div className="bg-slate-900 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
+        <h1 className="text-2xl font-bold">BusyBee</h1>
+        <div className="relative">
           <button
-            type="submit"
-            disabled={creating || !title.trim()}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto"
+            onClick={() => setShowNotifications(!showNotifications)}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded text-sm relative"
           >
-            {creating ? "Creating..." : "Add Task"}
+            🔔 {unreadCount > 0 && <span className="ml-1">{unreadCount}</span>}
+          </button>
+          {showNotifications && (
+            <div className="absolute right-0 mt-2 w-80 bg-slate-800 border border-slate-700 rounded shadow-lg z-10 max-h-64 overflow-y-auto">
+              {notifications.length === 0 ? (
+                <p className="p-4 text-slate-400 text-sm">No notifications</p>
+              ) : (
+                notifications.map((n) => (
+                  <div
+                    key={n.id}
+                    className={`p-3 border-b border-slate-700 text-sm cursor-pointer hover:bg-slate-700 ${
+                      n.read ? "text-slate-500" : "text-slate-200 font-bold"
+                    }`}
+                    onClick={() => markNotificationRead(n.id)}
+                  >
+                    <p>{n.message}</p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {new Date(n.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto p-6">
+        <h2 className="text-3xl font-bold mb-6">Tasks</h2>
+
+        {error && (
+          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
+            <span>{error}</span>
+            <button onClick={() => setError("")} className="text-red-400">
+              dismiss
+            </button>
+          </div>
+        )}
+
+        <form onSubmit={createTask} className="bg-slate-800 p-4 rounded border border-slate-700 mb-8">
+          <input
+            type="text"
+            placeholder="Task title..."
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            disabled={creating}
+            className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500"
+          />
+          <textarea
+            placeholder="Description (optional)..."
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            disabled={creating}
+            rows={2}
+            className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-3 placeholder-slate-500 resize-none"
+          />
+          <div className="flex flex-wrap gap-3">
+            <input
+              type="date"
+              value={dueDate}
+              onChange={(e) => setDueDate(e.target.value)}
+              disabled={creating}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
+            />
+            <select
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              disabled={creating}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
+            >
+              {PRIORITIES.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              disabled={creating || !title.trim()}
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto"
+            >
+              {creating ? "Creating..." : "Add Task"}
+            </button>
+          </div>
+        </form>
+
+        {/* View toggle buttons */}
+        <div className="flex gap-2 mb-6">
+          <button
+            onClick={() => setViewMode("list")}
+            className={`px-4 py-2 rounded ${
+              viewMode === "list"
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            📋 List
+          </button>
+          <button
+            onClick={() => setViewMode("board")}
+            className={`px-4 py-2 rounded ${
+              viewMode === "board"
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            📊 Board
           </button>
         </div>
-      </form>
 
-      {loading ? (
-        <p className="text-slate-400">Loading...</p>
-      ) : tasks.length === 0 ? (
-        <p className="text-slate-400">No tasks yet. Create one above.</p>
-      ) : (
-        <div className="grid gap-4">
-          {tasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              task={task}
-              open={openId === task.id}
-              onToggle={() => setOpenId(openId === task.id ? null : task.id)}
-              onPatch={(patch) => patchTask(task.id, patch)}
-              onError={setError}
-            />
-          ))}
-        </div>
-      )}
+        {loading ? (
+          <p className="text-slate-400">Loading...</p>
+        ) : tasks.length === 0 ? (
+          <p className="text-slate-400">No tasks yet. Create one above.</p>
+        ) : viewMode === "list" ? (
+          <div className="grid gap-4">
+            {tasks.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                open={openId === task.id}
+                onToggle={() => setOpenId(openId === task.id ? null : task.id)}
+                onPatch={(patch) => patchTask(task.id, patch)}
+                onError={setError}
+                teamMembers={teamMembers}
+              />
+            ))}
+          </div>
+        ) : (
+          /* Board view */
+          <div className="grid grid-cols-4 gap-4">
+            {["pending", "in_progress", "done", "need_help"].map((status) => (
+              <div key={status} className="bg-slate-800 rounded p-4 border border-slate-700">
+                <h3 className="font-bold mb-4 capitalize text-slate-300">
+                  {status.replace(/_/g, " ")}
+                </h3>
+                <div className="space-y-3">
+                  {(groupedByStatus[status] || []).map((task) => (
+                    <div
+                      key={task.id}
+                      onClick={() => setOpenId(task.id)}
+                      className="bg-slate-900 p-3 rounded border border-slate-700 cursor-pointer hover:border-blue-500 text-sm"
+                    >
+                      <p className="font-bold mb-1">{task.title}</p>
+                      <div className="flex justify-between text-xs text-slate-500 mb-2">
+                        <span>{task.priority}</span>
+                        <span>{task.progress_percent}%</span>
+                      </div>
+                      <div className="w-full bg-slate-800 rounded h-1.5">
+                        <div
+                          className="bg-blue-600 h-1.5 rounded"
+                          style={{ width: `${task.progress_percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Task detail modal */}
+        {openId && (
+          <TaskDetail
+            taskId={openId}
+            tasks={tasks}
+            onClose={() => setOpenId(null)}
+            onPatch={patchTask}
+            onError={setError}
+            teamMembers={teamMembers}
+          />
+        )}
+      </div>
     </div>
   );
 }
 
 type Comment = { id: string; content: string; created_at: string };
-type Attachment = {
-  id: string;
-  file_name: string;
-  file_url: string;
-  created_at: string;
-};
-type Subtask = {
-  id: string;
-  title: string;
-  done: boolean;
-  progress_percent: number;
-};
+type Attachment = { id: string; file_name: string; file_url: string; file_size: number | null; created_at: string };
+type Subtask = { id: string; title: string; done: boolean; progress_percent: number };
 type Activity = { id: string; action: string; created_at: string };
 
 function TaskCard({
@@ -231,12 +349,14 @@ function TaskCard({
   onToggle,
   onPatch,
   onError,
+  teamMembers,
 }: {
   task: Task;
   open: boolean;
   onToggle: () => void;
   onPatch: (patch: Partial<Task>) => void;
   onError: (msg: string) => void;
+  teamMembers: TeamMember[];
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -245,6 +365,7 @@ function TaskCard({
   const [loaded, setLoaded] = useState(false);
   const [newComment, setNewComment] = useState("");
   const [posting, setPosting] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   useEffect(() => {
     if (!open || loaded) return;
@@ -288,50 +409,50 @@ function TaskCard({
     }
   };
 
-  const doneCount = subtasks.filter((s) => s.done).length;
+  const uploadFile = async (file: File) => {
+    setUploading(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch(`/api/tasks/${task.id}/attachments`, {
+        method: "POST",
+        body,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      setAttachments([data, ...attachments]);
+    } catch (e: any) {
+      onError(e.message);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const assigneeLabel = teamMembers.find((m) => m.id === task.assigned_to)?.name || "Unassigned";
 
   return (
     <div className="bg-slate-800 rounded border border-slate-700">
-      <div
-        onClick={onToggle}
-        className="p-4 cursor-pointer hover:border-blue-500"
-      >
+      <div onClick={onToggle} className="p-4 cursor-pointer hover:border-blue-500">
         <div className="flex justify-between items-start gap-3 mb-2">
           <h3 className="font-bold text-lg">{task.title}</h3>
-          <span
-            className={`text-xs px-2 py-1 rounded shrink-0 ${statusClass(
-              task.status
-            )}`}
-          >
-            {labelFor(STATUSES, task.status)}
+          <span className={`text-xs px-2 py-1 rounded ${statusClass(task.status)}`}>
+            {STATUSES.find((s) => s.value === task.status)?.label}
           </span>
         </div>
-        {task.description && (
-          <p className="text-slate-400 text-sm mb-2 whitespace-pre-wrap">
-            {task.description}
-          </p>
-        )}
-        <div className="flex flex-wrap gap-4 text-xs mb-2">
-          <span className={priorityClass(task.priority)}>
-            {labelFor(PRIORITIES, task.priority)}
-          </span>
-          <span className="text-slate-500">{task.progress_percent}%</span>
-          {task.due_date && (
-            <span className="text-slate-500">
-              Due {new Date(task.due_date).toLocaleDateString()}
-            </span>
-          )}
+        {task.description && <p className="text-slate-400 text-sm mb-2">{task.description}</p>}
+        <div className="flex flex-wrap gap-4 text-xs text-slate-500 mb-2">
+          <span>{PRIORITIES.find((p) => p.value === task.priority)?.label}</span>
+          <span>{task.progress_percent}%</span>
+          {task.due_date && <span>Due {new Date(task.due_date).toLocaleDateString()}</span>}
+          <span className="ml-auto">👤 {assigneeLabel}</span>
         </div>
         <div className="w-full bg-slate-900 rounded h-2">
-          <div
-            className="bg-blue-600 h-2 rounded transition-all"
-            style={{ width: `${task.progress_percent}%` }}
-          />
+          <div className="bg-blue-600 h-2 rounded" style={{ width: `${task.progress_percent}%` }} />
         </div>
       </div>
 
       {open && (
-        <div className="border-t border-slate-700 p-4 space-y-6">
+        <div className="border-t border-slate-700 p-4 space-y-6 max-h-96 overflow-y-auto">
           <div className="flex flex-wrap gap-3">
             <select
               value={task.status}
@@ -361,69 +482,66 @@ function TaskCard({
               onChange={(e) => onPatch({ due_date: e.target.value || null })}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
             />
+            {/* Feature 13: Assignee dropdown */}
+            <select
+              value={task.assigned_to || ""}
+              onChange={(e) => onPatch({ assigned_to: e.target.value || null })}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+            >
+              <option value="">Assign to...</option>
+              {teamMembers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
-            <p className="text-sm font-bold mb-2">
-              Progress: {task.progress_percent}%
-            </p>
+            <p className="text-sm font-bold mb-2">Progress: {task.progress_percent}%</p>
             <input
               type="range"
               min={0}
               max={100}
               step={5}
               value={task.progress_percent}
-              onChange={(e) =>
-                onPatch({ progress_percent: Number(e.target.value) })
-              }
+              onChange={(e) => onPatch({ progress_percent: Number(e.target.value) })}
               className="w-full"
             />
           </div>
 
-          {subtasks.length > 0 && (
-            <div>
-              <p className="text-sm font-bold mb-2">
-                Subtasks ({doneCount}/{subtasks.length})
-              </p>
-              <div className="space-y-2">
-                {subtasks.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-center gap-3 bg-slate-900 px-3 py-2 rounded text-sm"
-                  >
-                    <span className={s.done ? "line-through text-slate-500" : ""}>
-                      {s.title}
-                    </span>
-                    <span className="ml-auto text-xs text-slate-500">
-                      {s.progress_percent}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           <div>
-            <p className="text-sm font-bold mb-2">
-              Attachments ({attachments.length})
-            </p>
-            {attachments.length === 0 ? (
-              <p className="text-slate-500 text-sm">None yet.</p>
-            ) : (
-              <div className="space-y-1">
+            <p className="text-sm font-bold mb-2">Attachments ({attachments.length})</p>
+            {attachments.length > 0 && (
+              <div className="space-y-1 mb-3">
                 {attachments.map((a) => (
                   <a
                     key={a.id}
                     href={a.file_url}
                     target="_blank"
                     rel="noreferrer"
-                    className="block text-blue-400 hover:underline text-sm truncate"
+                    className="block text-blue-400 hover:underline text-sm"
                   >
                     {a.file_name}
                   </a>
                 ))}
               </div>
             )}
+            <label className="inline-block">
+              <input
+                type="file"
+                className="hidden"
+                disabled={uploading}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) uploadFile(f);
+                  e.target.value = "";
+                }}
+              />
+              <span className="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded text-sm cursor-pointer inline-block">
+                {uploading ? "Uploading..." : "Upload"}
+              </span>
+            </label>
           </div>
 
           <div>
@@ -434,7 +552,7 @@ function TaskCard({
                 onChange={(e) => setNewComment(e.target.value)}
                 placeholder="Add a comment..."
                 rows={2}
-                className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-2 resize-none text-sm placeholder-slate-500"
+                className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded mb-2 resize-none text-sm"
               />
               <button
                 type="submit"
@@ -447,10 +565,8 @@ function TaskCard({
             <div className="space-y-2">
               {comments.map((c) => (
                 <div key={c.id} className="bg-slate-900 px-3 py-2 rounded text-sm">
-                  <p className="text-slate-300 whitespace-pre-wrap">{c.content}</p>
-                  <p className="text-slate-500 text-xs mt-1">
-                    {new Date(c.created_at).toLocaleString()}
-                  </p>
+                  <p className="text-slate-300">{c.content}</p>
+                  <p className="text-slate-500 text-xs mt-1">{new Date(c.created_at).toLocaleString()}</p>
                 </div>
               ))}
             </div>
@@ -470,6 +586,46 @@ function TaskCard({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function TaskDetail({
+  taskId,
+  tasks,
+  onClose,
+  onPatch,
+  onError,
+  teamMembers,
+}: {
+  taskId: string;
+  tasks: Task[];
+  onClose: () => void;
+  onPatch: (id: string, patch: Partial<Task>) => void;
+  onError: (msg: string) => void;
+  teamMembers: TeamMember[];
+}) {
+  const task = tasks.find((t) => t.id === taskId);
+  if (!task) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 rounded border border-slate-700 max-w-2xl w-full max-h-96 overflow-y-auto">
+        <div className="p-4 border-b border-slate-700 flex justify-between items-start">
+          <h2 className="text-xl font-bold">{task.title}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-white">
+            ✕
+          </button>
+        </div>
+        <TaskCard
+          task={task}
+          open={true}
+          onToggle={() => {}}
+          onPatch={(patch) => onPatch(task.id, patch)}
+          onError={onError}
+          teamMembers={teamMembers}
+        />
+      </div>
     </div>
   );
 }
