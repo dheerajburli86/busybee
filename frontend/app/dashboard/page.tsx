@@ -801,6 +801,16 @@ function TaskCard({
             </div>
           </div>
 
+          {/* Dependencies */}
+          <div className="mt-6 pt-4 border-t border-slate-700">
+            <h4 className="text-sm font-semibold text-slate-300 mb-3">Dependencies (what this task depends on)</h4>
+            <p className="text-sm text-slate-400">
+              {taskDependencies.length > 0
+                ? `🔗 ${taskDependencies.length} dependency link${taskDependencies.length !== 1 ? 's' : ''}`
+                : 'No dependencies'}
+            </p>
+          </div>
+
         </div>
       )}
     </div>
