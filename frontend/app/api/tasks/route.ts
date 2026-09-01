@@ -164,6 +164,30 @@ export async function PUT(request: NextRequest) {
       changes: patch,
     }).then(() => {}, () => {});
 
+    // Real notifications: assignment and completion.
+    // Fire-and-forget so a notifications-table problem can never break the save.
+    if (Object.prototype.hasOwnProperty.call(body, "assigned_to") && body.assigned_to) {
+      await supabase.from("notifications").insert({
+        user_id: body.assigned_to,
+        entity_type: "task",
+        entity_id: id,
+        action: "assigned",
+        message: `You were assigned: ${task.title}`,
+        read: false,
+      }).then(() => {}, () => {});
+    }
+
+    if (patch.status === "done" && task.assigned_to) {
+      await supabase.from("notifications").insert({
+        user_id: task.assigned_to,
+        entity_type: "task",
+        entity_id: id,
+        action: "completed",
+        message: `Task marked done: ${task.title}`,
+        read: false,
+      }).then(() => {}, () => {});
+    }
+
     return NextResponse.json({ task });
   } catch (error: any) {
     console.error("PUT /api/tasks failed:", error);
