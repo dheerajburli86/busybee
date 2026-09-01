@@ -106,23 +106,8 @@ export default function DashboardPage() {
         setLoading(false);
       }
 
-      // Fetch task dependencies
-      (async () => {
-        try {
-          const res = await fetch("/api/tasks/dependencies");
-          if (res.ok) {
-            const data = await res.json();
-            const deps: Record<string, string[]> = {};
-            (data || []).forEach((dep: any) => {
-              if (!deps[dep.dependent_id]) deps[dep.dependent_id] = [];
-              deps[dep.dependent_id].push(dep.dependency_id);
-            });
-            setTaskDeps(deps);
-          }
-        } catch {
-          /* silently fail */
-        }
-      })();
+      // Dependencies are now fetched per-task when opening the modal
+      // so we don't need to fetch all at once here
     })();
   }, []);
 
@@ -549,21 +534,28 @@ function TaskCard({
   const [posting, setPosting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [pendingChanges, setPendingChanges] = useState<Record<string, any>>({});
+  const [taskDependencies, setTaskDependencies] = useState<string[]>([]);
+  const [depsLoading, setDepsLoading] = useState(false);
 
   useEffect(() => {
     if (!open || loaded) return;
     (async () => {
       try {
-        const [c, a, s, l] = await Promise.all([
+        const [c, a, s, l, d] = await Promise.all([
           fetch(`/api/tasks/${task.id}/comments`),
           fetch(`/api/tasks/${task.id}/attachments`),
           fetch(`/api/tasks/${task.id}/subtasks`),
           fetch(`/api/tasks/${task.id}/activity`),
+          fetch(`/api/tasks/${task.id}/dependencies`),
         ]);
         if (c.ok) setComments(await c.json());
         if (a.ok) setAttachments(await a.json());
         if (s.ok) setSubtasks(await s.json());
         if (l.ok) setActivity(await l.json());
+        if (d.ok) {
+          const deps = await d.json();
+          setTaskDependencies((deps || []).map((x: any) => x.depends_on_task_id));
+        }
         setLoaded(true);
       } catch {
         onError("Could not load task details");
