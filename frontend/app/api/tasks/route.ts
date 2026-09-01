@@ -127,32 +127,41 @@ export async function PUT(request: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await request.json();
-    const { id, title, description, priority, status, progress_percent, due_date } = body;
+    const { id } = body;
 
     if (!id) return NextResponse.json({ error: "Task ID is required" }, { status: 400 });
 
+    // Only send fields that were actually included in the request, so a
+    // cleared date or a zero progress value is saved instead of skipped.
+    const patch: Record<string, any> = {};
+    for (const field of ["title", "description", "priority", "status", "progress_percent", "due_date", "assigned_to", "milestone"]) {
+      if (Object.prototype.hasOwnProperty.call(body, field)) {
+        patch[field] = body[field];
+      }
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+    }
+
+    patch.updated_at = new Date().toISOString();
+
     const { data: task, error } = await supabase
       .from("tasks")
-      .update({
-        title: title || undefined,
-        description: description || undefined,
-        priority: priority || undefined,
-        status: status || undefined,
-        progress_percent: progress_percent !== undefined ? progress_percent : undefined,
-        due_date: due_date || undefined,
-      })
+      .update(patch)
       .eq("id", id)
       .select("id, title, description, priority, status, progress_percent, due_date, created_at")
       .single();
 
     if (error) throw error;
+    if (!task) return NextResponse.json({ error: "Task not found" }, { status: 404 });
 
     await supabase.from("activity_log").insert({
       entity_type: "task",
       entity_id: id,
-      action: "updated",
+      action: "updated " + Object.keys(patch).filter((k) => k !== "updated_at").join(", "),
       performed_by: user.id,
-      changes: { updated: true },
+      changes: patch,
     }).then(() => {}, () => {});
 
     return NextResponse.json({ task });

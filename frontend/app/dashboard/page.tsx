@@ -522,6 +522,18 @@ function TaskCard({
                 </option>
               ))}
             </select>
+            <select
+              value={task.milestone || ""}
+              onChange={(e) => onPatch({ milestone: e.target.value || null })}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+            >
+              <option value="">Milestone...</option>
+              <option value="phase1">Phase 1</option>
+              <option value="phase2">Phase 2</option>
+              <option value="phase3">Phase 3</option>
+              <option value="launch">Launch</option>
+              <option value="review">Review</option>
+            </select>
 
 
           </div>
