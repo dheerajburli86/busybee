@@ -32,9 +32,12 @@ const PRIORITIES = [
   { value: "super_high", label: "Super High" },
 ];
 
-function isOverdue(dueDate: string | null): boolean {
-  if (!dueDate) return false;
-  return new Date(dueDate) < new Date();
+function isOverdue(task: { due_date: string | null; status: string }): boolean {
+  if (!task.due_date || task.status === "done") return false;
+  const due = new Date(task.due_date);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return due < today;
 }
 
 function statusClass(status: string) {
@@ -57,6 +60,8 @@ export default function DashboardPage() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [myTasksOnly, setMyTasksOnly] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -77,7 +82,10 @@ export default function DashboardPage() {
         setTasks(tasksData.tasks || []);
 
         const membersData = await membersRes.json();
-        if (membersRes.ok) setTeamMembers(membersData.members || []);
+        if (membersRes.ok) {
+          setTeamMembers(membersData.members || []);
+          setCurrentUserId(membersData.me || null);
+        }
 
         const notifData = await notifRes.json();
         if (notifRes.ok) setNotifications(Array.isArray(notifData) ? notifData : []);
@@ -157,6 +165,17 @@ export default function DashboardPage() {
     }
   };
 
+  const duplicateTask = async (id: string) => {
+    try {
+      const res = await fetch(`/api/tasks/${id}/duplicate`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not duplicate task");
+      setTasks((prev) => [data.task, ...prev]);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
   const markNotificationRead = async (id: string) => {
     try {
       await fetch("/api/notifications", {
@@ -170,10 +189,12 @@ export default function DashboardPage() {
     }
   };
 
-  const searchedTasks = tasks.filter((t) =>
-    t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    (t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false)
-  );
+  const searchedTasks = tasks
+    .filter((t) =>
+      t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false)
+    )
+    .filter((t) => (myTasksOnly ? t.assigned_to === currentUserId : true));
 
   const groupedByStatus = searchedTasks.reduce((acc, task) => {
     const status = task.status || "pending";
@@ -306,6 +327,16 @@ return (
             📋 List
           </button>
           <button
+            onClick={() => setMyTasksOnly(!myTasksOnly)}
+            className={`px-4 py-2 rounded ${
+              myTasksOnly
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            My Tasks
+          </button>
+          <button
             onClick={() => setViewMode("board")}
             className={`px-4 py-2 rounded ${
               viewMode === "board"
@@ -319,11 +350,15 @@ return (
 
         {loading ? (
           <p className="text-slate-400">Loading...</p>
-        ) : tasks.length === 0 ? (
-          <p className="text-slate-400">No tasks yet. Create one above.</p>
+        ) : searchedTasks.length === 0 ? (
+          <p className="text-slate-400">
+            {searchQuery || myTasksOnly
+              ? "No tasks match the current filter."
+              : "No tasks yet. Create one above."}
+          </p>
         ) : viewMode === "list" ? (
           <div className="grid gap-4">
-            {tasks.map((task) => (
+            {searchedTasks.map((task) => (
               <TaskCard
                 key={task.id}
                 task={task}
@@ -332,6 +367,7 @@ return (
                 onPatch={(patch) => patchTask(task.id, patch)}
                 onError={setError}
                 teamMembers={teamMembers}
+                onDuplicate={duplicateTask}
               />
             ))}
           </div>
@@ -397,6 +433,7 @@ function TaskCard({
   onPatch,
   onError,
   teamMembers,
+  onDuplicate,
 }: {
   task: Task;
   open: boolean;
@@ -404,6 +441,7 @@ function TaskCard({
   onPatch: (patch: Partial<Task>) => void;
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
+  onDuplicate?: (id: string) => void;
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -481,9 +519,14 @@ function TaskCard({
 
   return (
     <div className="bg-slate-800 rounded border border-slate-700">
-      <div onClick={onToggle} className={`p-4 cursor-pointer hover:border-blue-500 ${isOverdue(task.due_date) ? "border-red-600 bg-red-950 bg-opacity-20" : ""}`}>
+      <div onClick={onToggle} className={`p-4 cursor-pointer hover:border-blue-500 ${isOverdue(task) ? "border-l-4 border-red-500 bg-red-950 bg-opacity-20" : ""}`}>
         <div className="flex justify-between items-start gap-3 mb-2">
-          <h3 className={`font-bold text-lg ${isOverdue(task.due_date) ? "text-red-400" : ""}`}>{task.title}</h3>
+          <h3 className={`font-bold text-lg ${isOverdue(task) ? "text-red-400" : ""}`}>
+            {task.title}
+            {isOverdue(task) && (
+              <span className="ml-2 text-xs text-red-400 font-normal">OVERDUE</span>
+            )}
+          </h3>
           <span className={`text-xs px-2 py-1 rounded ${statusClass(task.status)}`}>
             {STATUSES.find((s) => s.value === task.status)?.label}
           </span>
@@ -583,6 +626,15 @@ function TaskCard({
               className="w-full"
             />
           </div>
+
+          {onDuplicate && (
+            <button
+              onClick={() => onDuplicate(task.id)}
+              className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+            >
+              Duplicate this task
+            </button>
+          )}
 
           <div>
             <p className="text-sm font-bold mb-2">Attachments ({attachments.length})</p>

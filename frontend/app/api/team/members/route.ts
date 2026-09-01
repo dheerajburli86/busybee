@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
       .eq("user_id", user.id);
 
     const deskIds = (memberships || []).map((m: any) => m.desk_id);
-    if (deskIds.length === 0) return NextResponse.json({ members: [] });
+    if (deskIds.length === 0) return NextResponse.json({ members: [], me: user.id });
 
     const { data, error } = await supabase
       .from("desk_members")
@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
       name: dm.users?.full_name || dm.users?.email,
     })) || [];
 
-    return NextResponse.json({ members });
+    return NextResponse.json({ members, me: user.id });
   } catch (error: any) {
     console.error("GET /api/team/members failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });
