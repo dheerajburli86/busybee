@@ -428,6 +428,7 @@ return (
                 onError={setError}
                 teamMembers={teamMembers}
                 onDuplicate={duplicateTask}
+                taskDeps={taskDeps}
               />
             ))}
           </div>
@@ -495,6 +496,7 @@ function TaskCard({
   onError,
   teamMembers,
   onDuplicate,
+  taskDeps,
 }: {
   task: Task;
   open: boolean;
@@ -503,6 +505,7 @@ function TaskCard({
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
   onDuplicate?: (id: string) => void;
+  taskDeps?: Record<string, string[]>;
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -598,7 +601,7 @@ function TaskCard({
           <span>{task.progress_percent}%</span>
           {task.due_date && <span>Due {new Date(task.due_date).toLocaleDateString()}</span>}
           {task.milestone && <span>📍 {task.milestone}</span>}
-          {taskDeps[task.id] && taskDeps[task.id].length > 0 && (
+          {taskDeps && taskDeps[task.id] && taskDeps[task.id].length > 0 && (
             <span className="text-yellow-500">🔗 {taskDeps[task.id].length} dep</span>
           )}
           <span className="ml-auto">👤 {assigneeLabel}</span>
