@@ -580,7 +580,7 @@ function TaskCard({
               <div className="space-y-1 mt-3 max-h-32 overflow-y-auto">
                 {activity.slice(0, 5).map((a) => (
                   <p key={a.id} className="text-slate-400 text-xs">
-                    {a.action} · {new Date(a.created_at).toLocaleString()}
+                    {a.action}
                   </p>
                 ))}
                 {activity.length > 5 && (
