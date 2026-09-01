@@ -55,7 +55,7 @@ export async function GET() {
 
     const { data: tasks, error } = await supabase
       .from("tasks")
-      .select("id, title, description, priority, status, progress_percent, due_date, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, created_at")
       .in("desk_id", deskIds)
       .is("archived_at", null)
       .order("created_at", { ascending: false });
@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
         progress_percent,
         created_by: user.id,
       })
-      .select("id, title, description, priority, status, progress_percent, due_date, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, created_at")
       .single();
 
     if (error) throw error;
@@ -150,7 +150,7 @@ export async function PUT(request: NextRequest) {
       .from("tasks")
       .update(patch)
       .eq("id", id)
-      .select("id, title, description, priority, status, progress_percent, due_date, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, created_at")
       .single();
 
     if (error) throw error;
