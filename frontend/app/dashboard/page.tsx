@@ -572,23 +572,6 @@ function TaskCard({
             </div>
           </div>
 
-          {activity.length > 0 && (
-            <details className="border-t border-slate-700 pt-4">
-              <summary className="text-sm font-bold cursor-pointer hover:text-slate-200">
-                Activity ({activity.length})
-              </summary>
-              <div className="space-y-1 mt-3 max-h-32 overflow-y-auto">
-                {activity.slice(0, 5).map((a) => (
-                  <p key={a.id} className="text-slate-400 text-xs">
-                    {a.action}
-                  </p>
-                ))}
-                {activity.length > 5 && (
-                  <p className="text-slate-500 text-xs italic">... and {activity.length - 5} more</p>
-                )}
-              </div>
-            </details>
-          )}
         </div>
       )}
     </div>
