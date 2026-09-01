@@ -535,8 +535,18 @@ function TaskCard({
               <option value="launch">Launch</option>
               <option value="review">Review</option>
             </select>
-
-
+            
+            {Object.keys(pendingChanges).length > 0 && (
+              <button
+                onClick={() => {
+                  onPatch(pendingChanges);
+                  setPendingChanges({});
+                }}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded text-sm font-bold"
+              >
+                💾 Save Changes
+              </button>
+            )}
           </div>
 
           <div>
