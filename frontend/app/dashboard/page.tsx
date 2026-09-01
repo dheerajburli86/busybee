@@ -147,19 +147,10 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error(data.error || "Could not update task");
       setTasks((prev) => prev.map((t) => (t.id === id ? data.task : t)));
       
-      // Notify on task completion
-      if (patch.status === "done") {
-        fetch("/api/notifications", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: `Task completed: ${data.task.title}`,
-            action: "completed",
-            entity_type: "task",
-            entity_id: id,
-          }),
-        }).catch(() => {});
-      }
+      // Notify on task completion (disabled - use API directly if needed)
+      // if (patch.status === "done") {
+      //   fetch notification endpoint
+      // }
     } catch (e: any) {
       setError(e.message);
     }
@@ -465,7 +456,7 @@ function TaskCard({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not post comment");
       setComments([data, ...comments]);
-      parseAndNotifyMentions(newComment, task.id, task.id);
+      // parseAndNotifyMentions(newComment, task.id, task.id);
       setNewComment("");
     } catch (e: any) {
       onError(e.message);
@@ -562,7 +553,7 @@ function TaskCard({
             </select>
             <select
               value={task.milestone || ""}
-              onChange={(e) => onPatch({ milestone: e.target.value || null })}
+              onChange={(e) => onPatch({ milestone: e.target.value.trim() ? e.target.value : null })}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
             >
               <option value="">Milestone...</option>
