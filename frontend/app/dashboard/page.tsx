@@ -80,13 +80,30 @@ export default function DashboardPage() {
         if (membersRes.ok) setTeamMembers(membersData.members || []);
 
         const notifData = await notifRes.json();
-        if (notifRes.ok) setNotifications(notifData || []);
+        if (notifRes.ok) setNotifications(Array.isArray(notifData) ? notifData : []);
       } catch (e: any) {
         setError(e.message);
       } finally {
         setLoading(false);
       }
     })();
+  }, []);
+
+  // Keep the bell fresh without needing a page reload.
+  const loadNotifications = async () => {
+    try {
+      const res = await fetch("/api/notifications", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setNotifications(Array.isArray(data) ? data : []);
+    } catch {
+      /* keep whatever is already on screen */
+    }
+  };
+
+  useEffect(() => {
+    const timer = setInterval(loadNotifications, 30000);
+    return () => clearInterval(timer);
   }, []);
 
   const createTask = async (e: React.FormEvent) => {
@@ -130,11 +147,11 @@ export default function DashboardPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not update task");
       setTasks((prev) => prev.map((t) => (t.id === id ? data.task : t)));
-      
-      // Notify on task completion (disabled - use API directly if needed)
-      // if (patch.status === "done") {
-      //   fetch notification endpoint
-      // }
+
+      // An assignment or a completion may have written a notification server-side.
+      if (Object.prototype.hasOwnProperty.call(patch, "assigned_to") || patch.status === "done") {
+        loadNotifications();
+      }
     } catch (e: any) {
       setError(e.message);
     }
@@ -174,7 +191,11 @@ return (
         <h1 className="text-2xl font-bold">BusyBee</h1>
         <div className="relative">
           <button
-            onClick={() => setShowNotifications(!showNotifications)}
+            onClick={() => {
+              const opening = !showNotifications;
+              setShowNotifications(opening);
+              if (opening) loadNotifications();
+            }}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded text-sm relative"
           >
             🔔 {unreadCount > 0 && <span className="ml-1">{unreadCount}</span>}
