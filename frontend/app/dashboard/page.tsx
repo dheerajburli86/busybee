@@ -32,22 +32,6 @@ const PRIORITIES = [
   { value: "super_high", label: "Super High" },
 ];
 
-function parseAndNotifyMentions(content: string, userId: string, taskId: string): void {
-  const mentions = content.match(/@[\w.]+/g) || [];
-  mentions.forEach((mention) => {
-    fetch("/api/notifications", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: `You were mentioned in a comment: ${mention} on task ${taskId}`,
-        action: "mention",
-        entity_type: "task",
-        entity_id: taskId,
-      }),
-    }).catch(() => {});
-  });
-}
-
 function isOverdue(dueDate: string | null): boolean {
   if (!dueDate) return false;
   return new Date(dueDate) < new Date();
@@ -183,18 +167,7 @@ export default function DashboardPage() {
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
-  const duplicateTask = async (id: string) => {
-    try {
-      const res = await fetch(`/api/tasks/${id}/duplicate`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Could not duplicate");
-      setTasks([data.task, ...tasks]);
-    } catch (e: any) {
-      setError(e.message);
-    }
-  };
-
-  return (
+return (
     <div className="min-h-screen bg-slate-950">
       {/* Header with notification bell */}
       <div className="bg-slate-900 border-b border-slate-700 px-6 py-4 flex justify-between items-center">
@@ -403,7 +376,6 @@ function TaskCard({
   onPatch,
   onError,
   teamMembers,
-  onDuplicate,
 }: {
   task: Task;
   open: boolean;
@@ -411,7 +383,6 @@ function TaskCard({
   onPatch: (patch: Partial<Task>) => void;
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
-  onDuplicate?: (id: string) => void;
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
