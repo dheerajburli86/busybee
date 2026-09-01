@@ -169,9 +169,9 @@ export async function PUT(request: NextRequest) {
     if (Object.prototype.hasOwnProperty.call(body, "assigned_to") && body.assigned_to) {
       await supabase.from("notifications").insert({
         user_id: body.assigned_to,
-        entity_type: "task",
-        entity_id: id,
-        action: "assigned",
+        task_id: id,
+        type: "assigned",
+        title: "New task assigned",
         message: `You were assigned: ${task.title}`,
         read: false,
       }).then(() => {}, () => {});
@@ -180,9 +180,9 @@ export async function PUT(request: NextRequest) {
     if (patch.status === "done" && task.assigned_to) {
       await supabase.from("notifications").insert({
         user_id: task.assigned_to,
-        entity_type: "task",
-        entity_id: id,
-        action: "completed",
+        task_id: id,
+        type: "completed",
+        title: "Task completed",
         message: `Task marked done: ${task.title}`,
         read: false,
       }).then(() => {}, () => {});

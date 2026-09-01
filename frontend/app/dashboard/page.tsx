@@ -16,7 +16,7 @@ type Task = {
 };
 
 type TeamMember = { id: string; name: string; email: string };
-type Notification = { id: string; message: string; read: boolean; created_at: string };
+type Notification = { id: string; title: string; message: string | null; read: boolean; created_at: string };
 
 const STATUSES = [
   { value: "pending", label: "Pending" },
@@ -192,7 +192,7 @@ return (
                     }`}
                     onClick={() => markNotificationRead(n.id)}
                   >
-                    <p>{n.message}</p>
+                    <p>{n.message || n.title}</p>
                     <p className="text-xs text-slate-500 mt-1">
                       {new Date(n.created_at).toLocaleString()}
                     </p>
