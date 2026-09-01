@@ -10,6 +10,7 @@ type Task = {
   status: string;
   progress_percent: number;
   due_date: string | null;
+  assigned_to: string | null;
   created_at: string;
 };
 
@@ -57,7 +58,6 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
 
-  // create form
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [dueDate, setDueDate] = useState("");
