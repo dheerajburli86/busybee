@@ -392,6 +392,7 @@ function TaskCard({
   const [newComment, setNewComment] = useState("");
   const [posting, setPosting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState<Record<string, any>>({});
 
   useEffect(() => {
     if (!open || loaded) return;
@@ -523,8 +524,8 @@ function TaskCard({
               ))}
             </select>
             <select
-              value={task.milestone || ""}
-              onChange={(e) => onPatch({ milestone: e.target.value || null })}
+              value={pendingChanges.milestone !== undefined ? (pendingChanges.milestone || "") : (task.milestone || "")}
+              onChange={(e) => setPendingChanges({ ...pendingChanges, milestone: e.target.value || null })}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
             >
               <option value="">Milestone...</option>
