@@ -605,9 +605,29 @@ function TaskCard({
             </form>
             <div className="space-y-2">
               {comments.map((c) => (
-                <div key={c.id} className="bg-slate-900 px-3 py-2 rounded text-sm">
-                  <p className="text-slate-300">{c.content}</p>
-                  <p className="text-slate-500 text-xs mt-1">{new Date(c.created_at).toLocaleString()}</p>
+                <div key={c.id} className="bg-slate-900 px-3 py-2 rounded text-sm flex justify-between gap-2">
+                  <div className="flex-1">
+                    <p className="text-slate-300">{c.content}</p>
+                    <p className="text-slate-500 text-xs mt-1">{new Date(c.created_at).toLocaleString()}</p>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const res = await fetch(`/api/tasks/${task.id}/comments/delete`, {
+                          method: "DELETE",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ commentId: c.id }),
+                        });
+                        if (!res.ok) throw new Error("Could not delete");
+                        setComments((prev) => prev.filter((x) => x.id !== c.id));
+                      } catch (e: any) {
+                        onError(e.message);
+                      }
+                    }}
+                    className="text-slate-500 hover:text-red-400 text-xs shrink-0"
+                  >
+                    ✕
+                  </button>
                 </div>
               ))}
             </div>
