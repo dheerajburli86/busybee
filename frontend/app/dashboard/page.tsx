@@ -11,6 +11,7 @@ type Task = {
   progress_percent: number;
   due_date: string | null;
   assigned_to: string | null;
+  milestone: string | null;
   created_at: string;
 };
 
@@ -31,6 +32,27 @@ const PRIORITIES = [
   { value: "super_high", label: "Super High" },
 ];
 
+function parseAndNotifyMentions(content: string, userId: string, taskId: string): void {
+  const mentions = content.match(/@[\w.]+/g) || [];
+  mentions.forEach((mention) => {
+    fetch("/api/notifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `You were mentioned in a comment: ${mention} on task ${taskId}`,
+        action: "mention",
+        entity_type: "task",
+        entity_id: taskId,
+      }),
+    }).catch(() => {});
+  });
+}
+
+function isOverdue(dueDate: string | null): boolean {
+  if (!dueDate) return false;
+  return new Date(dueDate) < new Date();
+}
+
 function statusClass(status: string) {
   const map: Record<string, string> = {
     pending: "bg-slate-700 text-slate-300",
@@ -50,6 +72,7 @@ export default function DashboardPage() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -123,6 +146,20 @@ export default function DashboardPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not update task");
       setTasks((prev) => prev.map((t) => (t.id === id ? data.task : t)));
+      
+      // Notify on task completion
+      if (patch.status === "done") {
+        fetch("/api/notifications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: `Task completed: ${data.task.title}`,
+            action: "completed",
+            entity_type: "task",
+            entity_id: id,
+          }),
+        }).catch(() => {});
+      }
     } catch (e: any) {
       setError(e.message);
     }
@@ -141,7 +178,12 @@ export default function DashboardPage() {
     }
   };
 
-  const groupedByStatus = tasks.reduce((acc, task) => {
+  const searchedTasks = tasks.filter((t) =>
+    t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false)
+  );
+
+  const groupedByStatus = searchedTasks.reduce((acc, task) => {
     const status = task.status || "pending";
     if (!acc[status]) acc[status] = [];
     acc[status].push(task);
@@ -149,6 +191,17 @@ export default function DashboardPage() {
   }, {} as Record<string, Task[]>);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
+
+  const duplicateTask = async (id: string) => {
+    try {
+      const res = await fetch(`/api/tasks/${id}/duplicate`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not duplicate");
+      setTasks([data.task, ...tasks]);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-950">
@@ -245,6 +298,15 @@ export default function DashboardPage() {
             </button>
           </div>
         </form>
+
+        {/* Search bar */}
+        <input
+          type="text"
+          placeholder="Search tasks..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded mb-4 placeholder-slate-500"
+        />
 
         {/* View toggle buttons */}
         <div className="flex gap-2 mb-6">
@@ -350,6 +412,7 @@ function TaskCard({
   onPatch,
   onError,
   teamMembers,
+  onDuplicate,
 }: {
   task: Task;
   open: boolean;
@@ -357,6 +420,7 @@ function TaskCard({
   onPatch: (patch: Partial<Task>) => void;
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
+  onDuplicate?: (id: string) => void;
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -401,6 +465,7 @@ function TaskCard({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not post comment");
       setComments([data, ...comments]);
+      parseAndNotifyMentions(newComment, task.id, task.id);
       setNewComment("");
     } catch (e: any) {
       onError(e.message);
@@ -432,9 +497,9 @@ function TaskCard({
 
   return (
     <div className="bg-slate-800 rounded border border-slate-700">
-      <div onClick={onToggle} className="p-4 cursor-pointer hover:border-blue-500">
+      <div onClick={onToggle} className={`p-4 cursor-pointer hover:border-blue-500 ${isOverdue(task.due_date) ? "border-red-600 bg-red-950 bg-opacity-20" : ""}`}>
         <div className="flex justify-between items-start gap-3 mb-2">
-          <h3 className="font-bold text-lg">{task.title}</h3>
+          <h3 className={`font-bold text-lg ${isOverdue(task.due_date) ? "text-red-400" : ""}`}>{task.title}</h3>
           <span className={`text-xs px-2 py-1 rounded ${statusClass(task.status)}`}>
             {STATUSES.find((s) => s.value === task.status)?.label}
           </span>
@@ -495,6 +560,19 @@ function TaskCard({
                 </option>
               ))}
             </select>
+            <select
+              value={task.milestone || ""}
+              onChange={(e) => onPatch({ milestone: e.target.value || null })}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+            >
+              <option value="">Milestone...</option>
+              <option value="phase1">Phase 1</option>
+              <option value="phase2">Phase 2</option>
+              <option value="phase3">Phase 3</option>
+              <option value="launch">Launch</option>
+              <option value="review">Review</option>
+            </select>
+
           </div>
 
           <div>
