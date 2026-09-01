@@ -8,6 +8,15 @@ export async function POST(
   const { id: taskId } = await params;
 
   try {
+    // SOW #16: optionally copy the task into a different project.
+    let targetProjectId: string | null = null;
+    try {
+      const body = await request.json();
+      targetProjectId = body?.project_id ?? null;
+    } catch {
+      // no body sent - copy into the same project
+    }
+
     const supabase = await createServerSideClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -24,7 +33,7 @@ export async function POST(
       .from("tasks")
       .insert({
         desk_id: original.desk_id,
-        project_id: original.project_id,
+        project_id: targetProjectId || original.project_id,
         stage_id: original.stage_id,
         title: `${original.title} (copy)`,
         description: original.description,

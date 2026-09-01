@@ -55,7 +55,7 @@ export async function GET() {
 
     const { data: tasks, error } = await supabase
       .from("tasks")
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
       .in("desk_id", deskIds)
       .is("archived_at", null)
       .order("created_at", { ascending: false });
@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await request.json();
-    const { title, description, priority = "medium", status = "pending", due_date, progress_percent = 0 } = body;
+    const { title, description, priority = "medium", status = "pending", due_date, progress_percent = 0, project_id } = body;
 
     if (!title || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
 
@@ -87,7 +87,7 @@ export async function POST(request: NextRequest) {
       .from("tasks")
       .insert({
         desk_id: ctx.desk_id,
-        project_id: ctx.project_id,
+        project_id: project_id || ctx.project_id,
         stage_id: ctx.stage_id,
         title: title.trim(),
         description: description || null,
@@ -97,7 +97,7 @@ export async function POST(request: NextRequest) {
         progress_percent,
         created_by: user.id,
       })
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
       .single();
 
     if (error) throw error;
@@ -134,7 +134,7 @@ export async function PUT(request: NextRequest) {
     // Only send fields that were actually included in the request, so a
     // cleared date or a zero progress value is saved instead of skipped.
     const patch: Record<string, any> = {};
-    for (const field of ["title", "description", "priority", "status", "progress_percent", "due_date", "assigned_to", "milestone"]) {
+    for (const field of ["title", "description", "priority", "status", "progress_percent", "due_date", "assigned_to", "milestone", "archived_at", "team_id", "department_id", "task_manager_id", "key_result_id"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) {
         patch[field] = body[field];
       }
@@ -150,7 +150,7 @@ export async function PUT(request: NextRequest) {
       .from("tasks")
       .update(patch)
       .eq("id", id)
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
       .single();
 
     if (error) throw error;
@@ -177,13 +177,56 @@ export async function PUT(request: NextRequest) {
       }).then(() => {}, () => {});
     }
 
-    if (patch.status === "done" && task.assigned_to) {
+    // SOW #20: on completion, notify everyone connected to the task, not just
+    // the assignee - the creator and anyone who commented on it.
+    if (patch.status === "done") {
+      try {
+        const recipients = new Set<string>();
+        if (task.assigned_to) recipients.add(task.assigned_to);
+
+        const { data: full } = await supabase
+          .from("tasks")
+          .select("created_by")
+          .eq("id", id)
+          .single();
+        if (full?.created_by) recipients.add(full.created_by);
+
+        const { data: commenters } = await supabase
+          .from("comments")
+          .select("author_id")
+          .eq("task_id", id);
+        (commenters || []).forEach((c: any) => c.author_id && recipients.add(c.author_id));
+
+        recipients.delete(user.id); // no need to tell the person who just did it
+
+        if (recipients.size > 0) {
+          await supabase.from("notifications").insert(
+            Array.from(recipients).map((uid) => ({
+              user_id: uid,
+              task_id: id,
+              type: "completed",
+              title: "Task completed",
+              message: `Task marked done: ${task.title}`,
+              read: false,
+            }))
+          );
+        }
+      } catch {
+        /* never block the save on a notification problem */
+      }
+    }
+
+    // SOW #2: tell the assignee when someone else changes their task.
+    const meaningful = Object.keys(patch).filter(
+      (k) => !["updated_at", "assigned_to", "status"].includes(k)
+    );
+    if (meaningful.length > 0 && task.assigned_to && task.assigned_to !== user.id) {
       await supabase.from("notifications").insert({
         user_id: task.assigned_to,
         task_id: id,
-        type: "completed",
-        title: "Task completed",
-        message: `Task marked done: ${task.title}`,
+        type: "updated",
+        title: "Task updated",
+        message: `${meaningful.join(", ")} changed on: ${task.title}`,
         read: false,
       }).then(() => {}, () => {});
     }

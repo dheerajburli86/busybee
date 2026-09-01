@@ -1,353 +1,210 @@
-#!/usr/bin/env python3
-# scheduler/main.py
+"""
+BusyBee scheduler.
+
+Runs the notifications that need a clock rather than a user action:
+  SOW #24 - reminders at 24, 8 and 6 hours before a deadline
+  SOW #25 - a start-of-day and end-of-day summary for every user
+
+Deploy on Railway with these environment variables:
+  SUPABASE_URL          - https://<project>.supabase.co
+  SUPABASE_SERVICE_KEY  - the service_role key (not the anon key)
+  BOD_HOUR              - optional, defaults to 9
+  EOD_HOUR              - optional, defaults to 18
+  TZ_OFFSET_HOURS       - optional, defaults to 5.5 for IST
+"""
 
 import os
-import logging
-from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-from supabase import create_client, Client
-import google.generativeai as genai
-import json
-import time
+import sys
+from datetime import datetime, timedelta, timezone
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from apscheduler.schedulers.blocking import BlockingScheduler
+from supabase import create_client
 
-# Initialize Supabase
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+BOD_HOUR = int(os.environ.get("BOD_HOUR", "9"))
+EOD_HOUR = int(os.environ.get("EOD_HOUR", "18"))
+TZ_OFFSET_HOURS = float(os.environ.get("TZ_OFFSET_HOURS", "5.5"))
 
-# Initialize Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    print("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set", file=sys.stderr)
+    sys.exit(1)
 
-# ============================================================================
-# REMINDER FUNCTIONS
-# ============================================================================
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+LOCAL_TZ = timezone(timedelta(hours=TZ_OFFSET_HOURS))
 
-def check_and_send_reminders():
-    """Check for tasks that need reminders and send them."""
+# Reminder thresholds, in hours before the deadline.
+THRESHOLDS = [24, 8, 6]
+
+
+def already_sent(task_id: str, marker: str) -> bool:
+    """A reminder is only sent once per task per threshold."""
     try:
-        logger.info("Checking for reminders...")
-        now = datetime.utcnow()
-        
-        # Get all approved deadlines that haven't been archived
-        response = supabase.table("approved_deadlines").select(
-            "*, tasks(id, title, assigned_to, desk_id, created_by)"
+        res = (
+            supabase.table("notifications")
+            .select("id")
+            .eq("task_id", task_id)
+            .eq("type", marker)
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as exc:
+        print(f"dedupe check failed for {task_id}: {exc}", file=sys.stderr)
+        # Fail closed so a database blip cannot cause a burst of duplicates.
+        return True
+
+
+def notify(user_id: str, task_id, ntype: str, title: str, message: str) -> None:
+    try:
+        supabase.table("notifications").insert(
+            {
+                "user_id": user_id,
+                "task_id": task_id,
+                "type": ntype,
+                "title": title,
+                "message": message,
+                "read": False,
+            }
         ).execute()
-        
-        deadlines = response.data
-        
-        for deadline in deadlines:
-            task = deadline['tasks']
-            if not task:
-                continue
-            
-            approved_datetime = datetime.fromisoformat(deadline['approved_datetime'].replace('Z', '+00:00'))
-            
-            # 24 hours before
-            if approved_datetime - timedelta(hours=24) <= now < approved_datetime - timedelta(hours=23):
-                send_reminder(task['id'], task['assigned_to'], task['created_by'], task['desk_id'], "24h")
-            
-            # 8 hours before
-            elif approved_datetime - timedelta(hours=8) <= now < approved_datetime - timedelta(hours=7):
-                send_reminder(task['id'], task['assigned_to'], task['created_by'], task['desk_id'], "8h")
-            
-            # 6 hours before
-            elif approved_datetime - timedelta(hours=6) <= now < approved_datetime - timedelta(hours=5):
-                send_reminder(task['id'], task['assigned_to'], task['created_by'], task['desk_id'], "6h")
-            
-            # At deadline (within 5-min window)
-            elif approved_datetime <= now < approved_datetime + timedelta(minutes=5):
-                send_at_deadline_reminder(task['id'], task['assigned_to'], task['created_by'], task['desk_id'])
-            
-            # Overdue (24 hours after)
-            elif approved_datetime + timedelta(hours=24) <= now < approved_datetime + timedelta(hours=25):
-                send_overdue_reminder(task['id'], task['assigned_to'], task['created_by'], task['desk_id'])
-        
-        logger.info("Reminder check completed")
-    except Exception as e:
-        logger.error(f"Error checking reminders: {e}")
+    except Exception as exc:
+        print(f"could not write notification for {user_id}: {exc}", file=sys.stderr)
 
-def send_reminder(task_id, assigned_to, created_by, desk_id, reminder_type):
-    """Send a reminder notification."""
+
+def deadline_reminders() -> None:
+    """SOW #24: warn the assignee at 24, 8 and 6 hours out."""
+    now = datetime.now(timezone.utc)
     try:
-        # Check if already sent
-        existing = supabase.table("notification_log").select(
-            "id"
-        ).eq("task_id", task_id).eq("user_id", assigned_to).eq("reminder_type", reminder_type).execute()
-        
-        if existing.data:
-            logger.info(f"Reminder already sent for task {task_id} - {reminder_type}")
-            return
-        
-        # Send to assigned person
-        if assigned_to:
-            supabase.table("notifications").insert({
-                "user_id": assigned_to,
-                "task_id": task_id,
-                "type": "deadline_reminder",
-                "title": f"Reminder: {reminder_type} until deadline",
-                "message": f"You have {reminder_type} until your deadline",
-                "action_url": f"/tasks/{task_id}"
-            }).execute()
-            
-            supabase.table("notification_log").insert({
-                "user_id": assigned_to,
-                "task_id": task_id,
-                "type": "deadline_reminder",
-                "reminder_type": reminder_type,
-            }).execute()
-        
-        # Send to supervisor
-        supabase.table("notifications").insert({
-            "user_id": created_by,
-            "task_id": task_id,
-            "type": "deadline_reminder",
-            "title": f"Task reminder: {reminder_type} until deadline",
-            "message": f"Task has {reminder_type} until deadline",
-            "action_url": f"/tasks/{task_id}"
-        }).execute()
-        
-        supabase.table("notification_log").insert({
-            "user_id": created_by,
-            "task_id": task_id,
-            "type": "deadline_reminder",
-            "reminder_type": reminder_type,
-        }).execute()
-        
-        logger.info(f"Reminder sent for task {task_id} - {reminder_type}")
-    except Exception as e:
-        logger.error(f"Error sending reminder for task {task_id}: {e}")
+        res = (
+            supabase.table("tasks")
+            .select("id, title, due_date, assigned_to, status")
+            .not_.is_("due_date", "null")
+            .not_.is_("assigned_to", "null")
+            .neq("status", "done")
+            .execute()
+        )
+    except Exception as exc:
+        print(f"could not read tasks: {exc}", file=sys.stderr)
+        return
 
-def send_at_deadline_reminder(task_id, assigned_to, created_by, desk_id):
-    """Send dual reminders at deadline."""
+    for task in res.data or []:
+        try:
+            due = datetime.fromisoformat(str(task["due_date"]).replace("Z", "+00:00"))
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        hours_left = (due - now).total_seconds() / 3600
+        if hours_left <= 0:
+            continue
+
+        for threshold in THRESHOLDS:
+            # Fire once when the task first falls inside the window.
+            if threshold - 0.5 < hours_left <= threshold:
+                marker = f"reminder_{threshold}h"
+                if already_sent(task["id"], marker):
+                    continue
+                notify(
+                    task["assigned_to"],
+                    task["id"],
+                    marker,
+                    f"Due in {threshold} hours",
+                    f"{task['title']} is due at {due.astimezone(LOCAL_TZ):%d %b %H:%M}",
+                )
+                print(f"sent {threshold}h reminder for {task['id']}")
+                break
+
+
+def _open_tasks_by_user() -> dict:
     try:
-        # Check if already sent
-        existing = supabase.table("notification_log").select("id").eq(
-            "task_id", task_id
-        ).eq("reminder_type", "at_deadline").execute()
-        
-        if existing.data:
-            logger.info(f"Deadline reminder already sent for task {task_id}")
-            return
-        
-        # Supervisor: collect report
-        supabase.table("notifications").insert({
-            "user_id": created_by,
-            "task_id": task_id,
-            "type": "deadline_due",
-            "title": "Deadline reached - Collect report",
-            "message": "Deadline has passed. Time to collect the report from your team member.",
-            "action_url": f"/tasks/{task_id}"
-        }).execute()
-        
-        # Assignee: submit report
-        if assigned_to:
-            supabase.table("notifications").insert({
-                "user_id": assigned_to,
-                "task_id": task_id,
-                "type": "deadline_due",
-                "title": "Deadline reached - Submit report",
-                "message": "Your deadline has passed. Please submit your completion report now.",
-                "action_url": f"/tasks/{task_id}"
-            }).execute()
-        
-        # Log both
-        supabase.table("notification_log").insert({
-            "user_id": created_by,
-            "task_id": task_id,
-            "type": "deadline_due",
-            "reminder_type": "at_deadline",
-        }).execute()
-        
-        if assigned_to:
-            supabase.table("notification_log").insert({
-                "user_id": assigned_to,
-                "task_id": task_id,
-                "type": "deadline_due",
-                "reminder_type": "at_deadline",
-            }).execute()
-        
-        logger.info(f"At-deadline reminder sent for task {task_id}")
-    except Exception as e:
-        logger.error(f"Error sending at-deadline reminder for task {task_id}: {e}")
+        res = (
+            supabase.table("tasks")
+            .select("id, title, due_date, assigned_to, status")
+            .not_.is_("assigned_to", "null")
+            .neq("status", "done")
+            .execute()
+        )
+    except Exception as exc:
+        print(f"could not read tasks: {exc}", file=sys.stderr)
+        return {}
 
-def send_overdue_reminder(task_id, assigned_to, created_by, desk_id):
-    """Send overdue reminders (daily nudge)."""
-    try:
-        if assigned_to:
-            supabase.table("notifications").insert({
-                "user_id": assigned_to,
-                "task_id": task_id,
-                "type": "task_overdue",
-                "title": "Task overdue - Submit report",
-                "message": "Your task is overdue. Please submit your report immediately.",
-                "action_url": f"/tasks/{task_id}"
-            }).execute()
-        
-        supabase.table("notifications").insert({
-            "user_id": created_by,
-            "task_id": task_id,
-            "type": "task_overdue",
-            "title": "Task overdue - Follow up",
-            "message": "A task is overdue. Check on your team member's progress.",
-            "action_url": f"/tasks/{task_id}"
-        }).execute()
-        
-        logger.info(f"Overdue reminder sent for task {task_id}")
-    except Exception as e:
-        logger.error(f"Error sending overdue reminder for task {task_id}: {e}")
+    grouped: dict = {}
+    for task in res.data or []:
+        grouped.setdefault(task["assigned_to"], []).append(task)
+    return grouped
 
-# ============================================================================
-# DAR ANALYSIS
-# ============================================================================
 
-def analyze_daily_reports():
-    """Analyze all daily reports submitted today."""
-    try:
-        logger.info("Analyzing daily reports...")
-        
-        today = datetime.utcnow().date()
-        
-        # Get all daily reports for today that haven't been analyzed
-        response = supabase.table("daily_reports").select(
-            "id, user_id, desk_id, content, hours_worked"
-        ).eq("report_date", today.isoformat()).execute()
-        
-        reports = response.data or []
-        
-        for report in reports:
-            # Check if already analyzed
-            existing = supabase.table("ai_analyses").select("id").eq(
-                "daily_report_id", report['id']
-            ).execute()
-            
-            if existing.data:
-                continue
-            
-            # Get user's active tasks
-            tasks_response = supabase.table("tasks").select(
-                "id, title, approved_deadlines(approved_datetime)"
-            ).eq("assigned_to", report['user_id']).is_("archived_at", None).execute()
-            
-            tasks = tasks_response.data or []
-            
-            # Prepare prompt for Gemini
-            prompt = f"""
-            Analyze this daily activity report:
-            
-            Report content: {report['content']}
-            Hours worked: {report['hours_worked'] or 'Not specified'}
-            
-            Active tasks for this user:
-            {json.dumps([{'title': t['title'], 'deadline': t['approved_deadlines'][0]['approved_datetime'] if t['approved_deadlines'] else 'No deadline'} for t in tasks[:5]], indent=2)}
-            
-            Provide a JSON response with:
-            {{
-              "adequacy_signal": "adequate" | "borderline" | "inadequate",
-              "reasoning": "Brief explanation",
-              "risk_flags": ["flag1", "flag2"] or []
-            }}
-            """
-            
-            try:
-                response = gemini_model.generate_content(prompt)
-                analysis_text = response.text
-                
-                # Try to parse JSON from response
-                try:
-                    # Extract JSON from response
-                    start_idx = analysis_text.find('{')
-                    end_idx = analysis_text.rfind('}') + 1
-                    if start_idx != -1 and end_idx > start_idx:
-                        json_str = analysis_text[start_idx:end_idx]
-                        analysis = json.loads(json_str)
-                    else:
-                        analysis = {
-                            "adequacy_signal": "borderline",
-                            "reasoning": analysis_text,
-                            "risk_flags": []
-                        }
-                except json.JSONDecodeError:
-                    analysis = {
-                        "adequacy_signal": "borderline",
-                        "reasoning": analysis_text,
-                        "risk_flags": []
-                    }
-                
-                # Store analysis
-                supabase.table("ai_analyses").insert({
-                    "daily_report_id": report['id'],
-                    "adequacy_signal": analysis.get("adequacy_signal", "borderline"),
-                    "reasoning": analysis.get("reasoning", ""),
-                    "risk_flags": analysis.get("risk_flags", []),
-                    "raw_response": analysis
-                }).execute()
-                
-                # Notify supervisor
-                desk = supabase.table("desks").select("*").eq("id", report['desk_id']).single().execute().data
-                supervisors = supabase.table("desk_members").select("user_id").eq(
-                    "desk_id", report['desk_id']
-                ).in_("role", ["supervisor", "owner"]).execute().data or []
-                
-                for sup in supervisors:
-                    supabase.table("notifications").insert({
-                        "user_id": sup['user_id'],
-                        "type": "dar_analyzed",
-                        "title": "Daily report analyzed",
-                        "message": f"Daily report analyzed - Signal: {analysis.get('adequacy_signal', 'unknown')}",
-                        "action_url": f"/desk/{report['desk_id']}"
-                    }).execute()
-                
-                logger.info(f"Analyzed DAR {report['id']}")
-            except Exception as e:
-                logger.error(f"Error analyzing with Gemini: {e}")
-    
-    except Exception as e:
-        logger.error(f"Error in analyze_daily_reports: {e}")
+def _due_counts(tasks: list) -> tuple:
+    now = datetime.now(timezone.utc)
+    today = now.astimezone(LOCAL_TZ).date()
+    due_today = 0
+    overdue = 0
 
-# ============================================================================
-# SCHEDULER SETUP
-# ============================================================================
+    for task in tasks:
+        if not task.get("due_date"):
+            continue
+        try:
+            due = datetime.fromisoformat(str(task["due_date"]).replace("Z", "+00:00"))
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
 
-def start_scheduler():
-    """Start the background scheduler."""
-    scheduler = BackgroundScheduler()
-    
-    # Check reminders every 5 minutes
-    scheduler.add_job(
-        check_and_send_reminders,
-        IntervalTrigger(minutes=5),
-        id='check_reminders',
-        name='Check and send reminders'
-    )
-    
-    # Analyze DARs every hour
-    scheduler.add_job(
-        analyze_daily_reports,
-        IntervalTrigger(hours=1),
-        id='analyze_dars',
-        name='Analyze daily reports'
-    )
-    
-    scheduler.start()
-    logger.info("Scheduler started")
-    
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        scheduler.shutdown()
-        logger.info("Scheduler stopped")
+        local_due = due.astimezone(LOCAL_TZ).date()
+        if local_due < today:
+            overdue += 1
+        elif local_due == today:
+            due_today += 1
+
+    return due_today, overdue
+
+
+def start_of_day() -> None:
+    """SOW #25: what each person has on today."""
+    for user_id, tasks in _open_tasks_by_user().items():
+        due_today, overdue = _due_counts(tasks)
+        message = f"{len(tasks)} open, {due_today} due today"
+        if overdue:
+            message += f", {overdue} overdue"
+        notify(user_id, None, "bod_summary", "Your day", message)
+    print("sent start-of-day summaries")
+
+
+def end_of_day() -> None:
+    """SOW #25: what is still outstanding at the end of the day."""
+    for user_id, tasks in _open_tasks_by_user().items():
+        due_today, overdue = _due_counts(tasks)
+        if due_today == 0 and overdue == 0:
+            message = f"{len(tasks)} open, nothing overdue. Good stopping point."
+        else:
+            message = f"{due_today} still due today, {overdue} overdue"
+        notify(user_id, None, "eod_summary", "End of day", message)
+    print("sent end-of-day summaries")
+
 
 if __name__ == "__main__":
-    logger.info("BusyBee Scheduler initializing...")
-    start_scheduler()
+    scheduler = BlockingScheduler(timezone="UTC")
+
+    # Every 30 minutes is frequent enough for the 0.5h windows above.
+    scheduler.add_job(deadline_reminders, "interval", minutes=30, id="deadline_reminders")
+
+    # BOD and EOD are configured in local time, converted to UTC for the cron.
+    bod_utc = int((BOD_HOUR - TZ_OFFSET_HOURS) % 24)
+    eod_utc = int((EOD_HOUR - TZ_OFFSET_HOURS) % 24)
+    scheduler.add_job(start_of_day, "cron", hour=bod_utc, minute=0, id="bod")
+    scheduler.add_job(end_of_day, "cron", hour=eod_utc, minute=0, id="eod")
+
+    print(
+        f"scheduler up: reminders every 30m, "
+        f"BOD {BOD_HOUR}:00 local ({bod_utc}:00 UTC), "
+        f"EOD {EOD_HOUR}:00 local ({eod_utc}:00 UTC)"
+    )
+
+    # Run once at boot so a deploy does not wait for the first tick.
+    deadline_reminders()
+
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        print("scheduler stopped")

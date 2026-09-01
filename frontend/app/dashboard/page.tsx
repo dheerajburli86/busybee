@@ -13,6 +13,10 @@ type Task = {
   assigned_to: string | null;
   milestone: string | null;
   project_id: string | null;
+  archived_at: string | null;
+  team_id: string | null;
+  task_manager_id: string | null;
+  key_result_id: string | null;
   created_at: string;
 };
 
@@ -32,6 +36,38 @@ const PRIORITIES = [
   { value: "high", label: "High" },
   { value: "super_high", label: "Super High" },
 ];
+
+const PRIORITY_RANK: Record<string, number> = {
+  super_high: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+const SORT_OPTIONS = [
+  { value: "created_at", label: "Newest first" },
+  { value: "due_date", label: "By due date" },
+  { value: "priority", label: "By priority" },
+  { value: "progress", label: "By progress" },
+];
+
+// datetime-local needs YYYY-MM-DDTHH:mm in local time, not an ISO string.
+function toLocalInput(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// SOW #10: show the time alongside the date once one is set.
+function formatDue(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const hasTime = d.getHours() !== 0 || d.getMinutes() !== 0;
+  return hasTime
+    ? d.toLocaleString([], { dateStyle: "short", timeStyle: "short" })
+    : d.toLocaleDateString();
+}
 
 function isOverdue(task: { due_date: string | null; status: string }): boolean {
   if (!task.due_date || task.status === "done") return false;
@@ -56,7 +92,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"list" | "board">("list");
+  const [viewMode, setViewMode] = useState<"list" | "board" | "gantt">("list");
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -72,6 +108,13 @@ export default function DashboardPage() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [taskDeps, setTaskDeps] = useState<Record<string, string[]>>({});
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState("created_at");
+  const [showArchived, setShowArchived] = useState(false);
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const [keyResults, setKeyResults] = useState<{ id: string; title: string }[]>([]);
+  const [templates, setTemplates] = useState<{ id: string; name: string }[]>([]);
+  const [newTaskProject, setNewTaskProject] = useState("");
   const [currentProject, setCurrentProject] = useState<{ name: string; description: string | null } | null>(null);
 
   const [title, setTitle] = useState("");
@@ -114,6 +157,25 @@ export default function DashboardPage() {
   // Read ?project=<id> from the URL and resolve it to a project.
   // window.location avoids useSearchParams, which would need a Suspense boundary.
   useEffect(() => {
+    // SOW #4/#16: every project is needed for the create picker and duplicate target.
+    // SOW #41/#36: teams and key results feed the assignment selectors.
+    (async () => {
+      try {
+        const [pr, tm, ok] = await Promise.all([
+          fetch("/api/projects"),
+          fetch("/api/teams"),
+          fetch("/api/okr"),
+        ]);
+        if (pr.ok) setProjects((await pr.json()).projects || []);
+        if (tm.ok) setTeams((await tm.json()).teams || []);
+        if (ok.ok) setKeyResults((await ok.json()).keyResults || []);
+        const tp = await fetch("/api/templates");
+        if (tp.ok) setTemplates((await tp.json()).templates || []);
+      } catch {
+        /* selectors fall back to empty lists */
+      }
+    })();
+
     const params = new URLSearchParams(window.location.search);
     const pid = params.get("project");
     if (!pid) return;
@@ -162,6 +224,7 @@ export default function DashboardPage() {
           description: description.trim() || null,
           priority,
           due_date: dueDate || null,
+          project_id: newTaskProject || projectFilter || null,
         }),
       });
       const data = await res.json();
@@ -199,9 +262,13 @@ export default function DashboardPage() {
     }
   };
 
-  const duplicateTask = async (id: string) => {
+  const duplicateTask = async (id: string, targetProjectId?: string) => {
     try {
-      const res = await fetch(`/api/tasks/${id}/duplicate`, { method: "POST" });
+      const res = await fetch(`/api/tasks/${id}/duplicate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: targetProjectId || null }),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not duplicate task");
       setTasks((prev) => [data.task, ...prev]);
@@ -224,12 +291,39 @@ export default function DashboardPage() {
   };
 
   const searchedTasks = tasks
-    .filter((t) =>
-      t.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (t.description?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false)
-    )
+    .filter((t) => {
+      const q = searchQuery.toLowerCase().trim();
+      if (!q) return true;
+      // SOW #38: search task, milestone, and the assigned person's name/email.
+      const assignee = teamMembers.find((m) => m.id === t.assigned_to);
+      return (
+        t.title.toLowerCase().includes(q) ||
+        (t.description?.toLowerCase().includes(q) ?? false) ||
+        (t.milestone?.toLowerCase().includes(q) ?? false) ||
+        (assignee?.name?.toLowerCase().includes(q) ?? false) ||
+        (assignee?.email?.toLowerCase().includes(q) ?? false)
+      );
+    })
     .filter((t) => (myTasksOnly ? t.assigned_to === currentUserId : true))
-    .filter((t) => (projectFilter ? t.project_id === projectFilter : true));
+    .filter((t) => (projectFilter ? t.project_id === projectFilter : true))
+    // SOW #12: archived tasks are hidden until you ask for them.
+    .filter((t) => (showArchived ? !!t.archived_at : !t.archived_at))
+    .sort((a, b) => {
+      // SOW #8: sort by date, priority, progress, or completion date.
+      if (sortBy === "due_date") {
+        if (!a.due_date && !b.due_date) return 0;
+        if (!a.due_date) return 1;
+        if (!b.due_date) return -1;
+        return a.due_date.localeCompare(b.due_date);
+      }
+      if (sortBy === "priority") {
+        return (PRIORITY_RANK[b.priority] ?? 0) - (PRIORITY_RANK[a.priority] ?? 0);
+      }
+      if (sortBy === "progress") {
+        return b.progress_percent - a.progress_percent;
+      }
+      return b.created_at.localeCompare(a.created_at);
+    });
 
   const groupedByStatus = searchedTasks.reduce((acc, task) => {
     const status = task.status || "pending";
@@ -281,7 +375,7 @@ return (
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto p-6">
+      <div className="max-w-7xl mx-auto p-4 sm:p-6">
         <div className="mb-6">
           <h2 className="text-3xl font-bold">Tasks</h2>
           {currentProject && (
@@ -332,12 +426,59 @@ return (
           />
           <div className="flex flex-wrap gap-3">
             <input
-              type="date"
+              type="datetime-local"
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
               disabled={creating}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
             />
+            {/* SOW #11: start from a saved template */}
+            {templates.length > 0 && (
+              <select
+                value=""
+                onChange={async (e) => {
+                  if (!e.target.value) return;
+                  try {
+                    const res = await fetch("/api/templates", {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        template_id: e.target.value,
+                        project_id: newTaskProject || projectFilter || null,
+                      }),
+                    });
+                    const body = await res.json();
+                    if (!res.ok) throw new Error(body?.error || "Could not use template");
+                    setTasks((prev) => [body.task, ...prev]);
+                  } catch (err: any) {
+                    setError(err.message);
+                  }
+                }}
+                disabled={creating}
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
+              >
+                <option value="">Use a template...</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    📄 {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            {/* SOW #4: choose which project the task belongs to */}
+            <select
+              value={newTaskProject}
+              onChange={(e) => setNewTaskProject(e.target.value)}
+              disabled={creating}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
+            >
+              <option value="">Default project</option>
+              {projects.map((pr) => (
+                <option key={pr.id} value={pr.id}>
+                  {pr.name}
+                </option>
+              ))}
+            </select>
             <select
               value={priority}
               onChange={(e) => setPriority(e.target.value)}
@@ -424,6 +565,83 @@ return (
           >
             📊 Board
           </button>
+          {/* SOW #9: timeline view */}
+          <button
+            onClick={() => setViewMode("gantt")}
+            className={`px-4 py-2 rounded text-sm ${
+              viewMode === "gantt"
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            📅 Timeline
+          </button>
+          <a
+            href="/todo"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            ✅ My To-Do
+          </a>
+          <a
+            href="/projects"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            📁 Projects
+          </a>
+          <a
+            href="/reports"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            📈 Reports
+          </a>
+          <a
+            href="/chat"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            💬 Chat
+          </a>
+          <a
+            href="/okr"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            🎯 OKR
+          </a>
+          <a
+            href="/teams"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            👥 Teams
+          </a>
+          <a
+            href="/timesheet"
+            className="px-4 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700"
+          >
+            ⏱️ Timesheet
+          </a>
+          {/* SOW #12: browse archived tasks */}
+          <button
+            onClick={() => setShowArchived(!showArchived)}
+            className={`px-4 py-2 rounded text-sm ${
+              showArchived
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            🗄️ Archive
+          </button>
+
+          {/* SOW #8: sort options */}
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm text-slate-300"
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
         </div>
 
         {loading ? (
@@ -447,12 +665,19 @@ return (
                 teamMembers={teamMembers}
                 onDuplicate={duplicateTask}
                 taskDeps={taskDeps}
+                allTasks={tasks}
+                teams={teams}
+                keyResults={keyResults}
               />
             ))}
           </div>
+        ) : viewMode === "gantt" ? (
+          /* SOW #9: GANTT-style timeline. Bars span creation date to due date,
+             coloured by status, with today marked. */
+          <GanttView tasks={searchedTasks} onOpen={(id) => setOpenId(id)} />
         ) : (
           /* Board view */
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {["pending", "in_progress", "done", "need_help"].map((status) => (
               <div key={status} className="bg-slate-800 rounded p-4 border border-slate-700">
                 <h3 className="font-bold mb-4 capitalize text-slate-300">
@@ -494,6 +719,10 @@ return (
             onError={setError}
             teamMembers={teamMembers}
             onDuplicate={duplicateTask}
+            projects={projects}
+            taskDeps={taskDeps}
+            teams={teams}
+            keyResults={keyResults}
           />
         )}
       </div>
@@ -502,8 +731,8 @@ return (
 }
 
 type Comment = { id: string; content: string; created_at: string };
-type Attachment = { id: string; file_name: string; file_url: string; file_size: number | null; created_at: string };
-type Subtask = { id: string; title: string; done: boolean; progress_percent: number };
+type Attachment = { id: string; file_name: string; file_url: string; file_size: number | null; visibility: string | null; uploaded_by: string | null; created_at: string };
+type Subtask = { id: string; title: string; done: boolean; progress_percent: number; assigned_to: string | null };
 type Activity = { id: string; action: string; created_at: string };
 
 function TaskCard({
@@ -515,6 +744,9 @@ function TaskCard({
   teamMembers,
   onDuplicate,
   taskDeps,
+  allTasks,
+  teams,
+  keyResults,
 }: {
   task: Task;
   open: boolean;
@@ -524,6 +756,9 @@ function TaskCard({
   teamMembers: TeamMember[];
   onDuplicate?: (id: string) => void;
   taskDeps?: Record<string, string[]>;
+  allTasks?: Task[];
+  teams?: { id: string; name: string }[];
+  keyResults?: { id: string; title: string }[];
 }) {
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -535,18 +770,23 @@ function TaskCard({
   const [uploading, setUploading] = useState(false);
   const [pendingChanges, setPendingChanges] = useState<Record<string, any>>({});
   const [taskDependencies, setTaskDependencies] = useState<string[]>([]);
+  const [newSubtask, setNewSubtask] = useState("");
+  const [extensions, setExtensions] = useState<any[]>([]);
+  const [extReason, setExtReason] = useState("");
+  const [extDate, setExtDate] = useState("");
   const [depsLoading, setDepsLoading] = useState(false);
 
   useEffect(() => {
     if (!open || loaded) return;
     (async () => {
       try {
-        const [c, a, s, l, d] = await Promise.all([
+        const [c, a, s, l, d, x] = await Promise.all([
           fetch(`/api/tasks/${task.id}/comments`),
           fetch(`/api/tasks/${task.id}/attachments`),
           fetch(`/api/tasks/${task.id}/subtasks`),
           fetch(`/api/tasks/${task.id}/activity`),
           fetch(`/api/tasks/${task.id}/dependencies`),
+          fetch(`/api/tasks/${task.id}/extension`),
         ]);
         if (c.ok) setComments(await c.json());
         if (a.ok) setAttachments(await a.json());
@@ -554,8 +794,9 @@ function TaskCard({
         if (l.ok) setActivity(await l.json());
         if (d.ok) {
           const deps = await d.json();
-          setTaskDependencies((deps || []).map((x: any) => x.depends_on_task_id));
+          setTaskDependencies((deps || []).map((r: any) => r.depends_on_task_id));
         }
+        if (x.ok) setExtensions(await x.json());
         setLoaded(true);
       } catch {
         onError("Could not load task details");
@@ -624,7 +865,7 @@ function TaskCard({
         <div className="flex flex-wrap gap-4 text-xs text-slate-500 mb-2">
           <span>{PRIORITIES.find((p) => p.value === task.priority)?.label}</span>
           <span>{task.progress_percent}%</span>
-          {task.due_date && <span>Due {new Date(task.due_date).toLocaleDateString()}</span>}
+          {task.due_date && <span>Due {formatDue(task.due_date)}</span>}
           {task.milestone && <span>📍 {task.milestone}</span>}
           {taskDeps && taskDeps[task.id] && taskDeps[task.id].length > 0 && (
             <span className="text-yellow-500">🔗 {taskDeps[task.id].length} dep</span>
@@ -662,11 +903,61 @@ function TaskCard({
               ))}
             </select>
             <input
-              type="date"
-              value={task.due_date ? task.due_date.slice(0, 10) : ""}
+              type="datetime-local"
+              value={task.due_date ? toLocalInput(task.due_date) : ""}
               onChange={(e) => onPatch({ due_date: e.target.value || null })}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
             />
+            {/* SOW #41: assign to a whole team, not just a person */}
+            {teams && teams.length > 0 && (
+              <select
+                value={task.team_id || ""}
+                onChange={(e) => onPatch({ team_id: e.target.value || null } as Partial<Task>)}
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+              >
+                <option value="">No team</option>
+                {teams.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    👥 {t.name}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {/* SOW #13: name a task manager for work given to a team */}
+            <select
+              value={task.task_manager_id || ""}
+              onChange={(e) =>
+                onPatch({ task_manager_id: e.target.value || null } as Partial<Task>)
+              }
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+            >
+              <option value="">No task manager</option>
+              {teamMembers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  ⭐ {m.name || m.email}
+                </option>
+              ))}
+            </select>
+
+            {/* SOW #36: link this task to a key result */}
+            {keyResults && keyResults.length > 0 && (
+              <select
+                value={task.key_result_id || ""}
+                onChange={(e) =>
+                  onPatch({ key_result_id: e.target.value || null } as Partial<Task>)
+                }
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+              >
+                <option value="">Not linked to an OKR</option>
+                {keyResults.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    🎯 {k.title}
+                  </option>
+                ))}
+              </select>
+            )}
+
             {/* Feature 13: Assignee dropdown */}
             <select
               value={task.assigned_to || ""}
@@ -801,14 +1092,338 @@ function TaskCard({
             </div>
           </div>
 
-          {/* Dependencies */}
+          {/* SOW #45: overdue module - reason for delay and extension approval */}
+          {(isOverdue(task) || extensions.length > 0) && (
+            <div className="mt-6 pt-4 border-t border-slate-700">
+              <h4 className="text-sm font-semibold text-slate-300 mb-3">
+                Deadline extension
+              </h4>
+
+              {extensions.map((x) => (
+                <div key={x.id} className="bg-slate-700 rounded p-3 mb-3 text-sm">
+                  <div className="flex justify-between items-start gap-2 mb-1">
+                    <span className="text-slate-300">{x.reason}</span>
+                    <span
+                      className={`text-xs shrink-0 ${
+                        x.status === "approved"
+                          ? "text-green-400"
+                          : x.status === "rejected"
+                          ? "text-red-400"
+                          : "text-yellow-400"
+                      }`}
+                    >
+                      {x.status}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    Asked for {new Date(x.requested_date).toLocaleString()}
+                    {x.approved_date &&
+                      ` - granted ${new Date(x.approved_date).toLocaleString()}`}
+                  </p>
+
+                  {x.status === "pending" && (
+                    <div className="flex gap-2 mt-2">
+                      <button
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`/api/tasks/${task.id}/extension`, {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                request_id: x.id,
+                                status: "approved",
+                              }),
+                            });
+                            const b = await res.json();
+                            if (!res.ok) throw new Error(b?.error || "Could not approve");
+                            setExtensions((prev) =>
+                              prev.map((r) =>
+                                r.id === x.id
+                                  ? { ...r, status: "approved", approved_date: r.requested_date }
+                                  : r
+                              )
+                            );
+                            onPatch({ due_date: x.requested_date });
+                          } catch (err: any) {
+                            onError(err.message);
+                          }
+                        }}
+                        className="px-3 py-1 bg-green-700 hover:bg-green-600 rounded text-xs"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`/api/tasks/${task.id}/extension`, {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                request_id: x.id,
+                                status: "rejected",
+                              }),
+                            });
+                            const b = await res.json();
+                            if (!res.ok) throw new Error(b?.error || "Could not reject");
+                            setExtensions((prev) =>
+                              prev.map((r) =>
+                                r.id === x.id ? { ...r, status: "rejected" } : r
+                              )
+                            );
+                          } catch (err: any) {
+                            onError(err.message);
+                          }
+                        }}
+                        className="px-3 py-1 bg-slate-600 hover:bg-slate-500 rounded text-xs"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {isOverdue(task) && (
+                <div className="space-y-2">
+                  <input
+                    value={extReason}
+                    onChange={(e) => setExtReason(e.target.value)}
+                    placeholder="Reason for the delay..."
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm placeholder-slate-500"
+                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="datetime-local"
+                      value={extDate}
+                      onChange={(e) => setExtDate(e.target.value)}
+                      className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                    />
+                    <button
+                      onClick={async () => {
+                        if (!extReason.trim() || !extDate) {
+                          onError("Give a reason and a new date");
+                          return;
+                        }
+                        try {
+                          const res = await fetch(`/api/tasks/${task.id}/extension`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              reason: extReason.trim(),
+                              requested_date: extDate,
+                            }),
+                          });
+                          const b = await res.json();
+                          if (!res.ok) throw new Error(b?.error || "Could not send request");
+                          setExtensions((prev) => [b, ...prev]);
+                          setExtReason("");
+                          setExtDate("");
+                        } catch (err: any) {
+                          onError(err.message);
+                        }
+                      }}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm"
+                    >
+                      Request extension
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SOW #14: subtasks, each assignable to a team member */}
           <div className="mt-6 pt-4 border-t border-slate-700">
-            <h4 className="text-sm font-semibold text-slate-300 mb-3">Dependencies (what this task depends on)</h4>
-            <p className="text-sm text-slate-400">
-              {taskDependencies.length > 0
-                ? `🔗 ${taskDependencies.length} dependency link${taskDependencies.length !== 1 ? 's' : ''}`
-                : 'No dependencies'}
-            </p>
+            <h4 className="text-sm font-semibold text-slate-300 mb-3">
+              Subtasks ({subtasks.filter((st) => st.done).length}/{subtasks.length})
+            </h4>
+
+            {subtasks.length > 0 && (
+              <div className="space-y-2 mb-3">
+                {subtasks.map((st) => (
+                  <div
+                    key={st.id}
+                    className="bg-slate-700 px-3 py-2 rounded flex items-center gap-2 flex-wrap"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={st.done}
+                      onChange={async () => {
+                        const next = !st.done;
+                        setSubtasks((prev) =>
+                          prev.map((x) => (x.id === st.id ? { ...x, done: next } : x))
+                        );
+                        try {
+                          await fetch(`/api/tasks/${task.id}/subtasks`, {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ subtask_id: st.id, done: next }),
+                          });
+                        } catch {
+                          onError("Could not update subtask");
+                        }
+                      }}
+                    />
+                    <span
+                      className={`text-sm flex-1 min-w-32 ${
+                        st.done ? "line-through text-slate-500" : "text-slate-300"
+                      }`}
+                    >
+                      {st.title}
+                    </span>
+
+                    <select
+                      value={st.assigned_to || ""}
+                      onChange={async (e) => {
+                        const val = e.target.value || null;
+                        setSubtasks((prev) =>
+                          prev.map((x) => (x.id === st.id ? { ...x, assigned_to: val } : x))
+                        );
+                        try {
+                          await fetch(`/api/tasks/${task.id}/subtasks`, {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ subtask_id: st.id, assigned_to: val }),
+                          });
+                        } catch {
+                          onError("Could not assign subtask");
+                        }
+                      }}
+                      className="px-2 py-1 bg-slate-900 border border-slate-600 rounded text-xs"
+                    >
+                      <option value="">Unassigned</option>
+                      {teamMembers.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.name || m.email}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      onClick={async () => {
+                        setSubtasks((prev) => prev.filter((x) => x.id !== st.id));
+                        try {
+                          await fetch(`/api/tasks/${task.id}/subtasks`, {
+                            method: "DELETE",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ subtask_id: st.id }),
+                          });
+                        } catch {
+                          onError("Could not delete subtask");
+                        }
+                      }}
+                      className="text-slate-500 hover:text-red-400 text-xs"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <input
+                value={newSubtask}
+                onChange={(e) => setNewSubtask(e.target.value)}
+                placeholder="Add a subtask..."
+                className="flex-1 px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm placeholder-slate-500"
+              />
+              <button
+                onClick={async () => {
+                  if (!newSubtask.trim()) return;
+                  try {
+                    const res = await fetch(`/api/tasks/${task.id}/subtasks`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ title: newSubtask.trim() }),
+                    });
+                    const body = await res.json();
+                    if (!res.ok) throw new Error(body?.error || "Could not add subtask");
+                    setSubtasks((prev) => [...prev, body]);
+                    setNewSubtask("");
+                  } catch (err: any) {
+                    onError(err.message);
+                  }
+                }}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          {/* SOW #15: dependencies with picker */}
+          <div className="mt-6 pt-4 border-t border-slate-700">
+            <h4 className="text-sm font-semibold text-slate-300 mb-3">
+              Dependencies (what this task depends on)
+            </h4>
+
+            {taskDependencies.length > 0 ? (
+              <div className="space-y-2 mb-3">
+                {taskDependencies.map((depId) => {
+                  const depTask = (allTasks || []).find((t) => t.id === depId);
+                  return (
+                    <div
+                      key={depId}
+                      className="bg-slate-700 px-3 py-2 rounded text-sm text-slate-300 flex justify-between items-center gap-2"
+                    >
+                      <span>🔗 {depTask ? depTask.title : "Task not in current view"}</span>
+                      <button
+                        onClick={async () => {
+                          try {
+                            const res = await fetch(`/api/tasks/${task.id}/dependencies`, {
+                              method: "DELETE",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ depends_on_task_id: depId }),
+                            });
+                            const body = await res.json();
+                            if (!res.ok) throw new Error(body?.error || "Could not remove");
+                            setTaskDependencies((prev) => prev.filter((x) => x !== depId));
+                          } catch (err: any) {
+                            onError(err.message);
+                          }
+                        }}
+                        className="text-slate-500 hover:text-red-400 text-xs shrink-0"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-500 mb-3">No dependencies</p>
+            )}
+
+            <select
+              value=""
+              onChange={async (e) => {
+                const depId = e.target.value;
+                if (!depId) return;
+                try {
+                  const res = await fetch(`/api/tasks/${task.id}/dependencies`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ depends_on_task_id: depId }),
+                  });
+                  const body = await res.json();
+                  if (!res.ok) throw new Error(body?.error || "Could not add dependency");
+                  setTaskDependencies((prev) => [...prev, depId]);
+                } catch (err: any) {
+                  onError(err.message);
+                }
+              }}
+              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm w-full"
+            >
+              <option value="">+ Add a dependency...</option>
+              {(allTasks || [])
+                .filter((t) => t.id !== task.id && !taskDependencies.includes(t.id))
+                .map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.title}
+                  </option>
+                ))}
+            </select>
           </div>
 
         </div>
@@ -825,6 +1440,10 @@ function TaskDetail({
   onError,
   teamMembers,
   onDuplicate,
+  projects,
+  taskDeps,
+  teams,
+  keyResults,
 }: {
   taskId: string;
   tasks: Task[];
@@ -832,14 +1451,18 @@ function TaskDetail({
   onPatch: (id: string, patch: Partial<Task>) => void;
   onError: (msg: string) => void;
   teamMembers: TeamMember[];
-  onDuplicate?: (id: string) => void;
+  onDuplicate?: (id: string, targetProjectId?: string) => void;
+  projects?: { id: string; name: string }[];
+  taskDeps?: Record<string, string[]>;
+  teams?: { id: string; name: string }[];
+  keyResults?: { id: string; title: string }[];
 }) {
   const task = tasks.find((t) => t.id === taskId);
   if (!task) return null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-slate-800 rounded border border-slate-700 max-w-2xl w-full max-h-96 overflow-y-auto">
+      <div className="bg-slate-800 rounded border border-slate-700 max-w-2xl w-full max-h-[85vh] sm:max-h-96 overflow-y-auto">
         <div className="p-4 border-b border-slate-700">
           <div className="flex justify-between items-start mb-3">
             <h2 className="text-xl font-bold">{task.title}</h2>
@@ -848,15 +1471,110 @@ function TaskDetail({
             </button>
           </div>
           {onDuplicate && (
-            <button
-              onClick={() => {
-                onDuplicate(task.id);
-                onClose();
-              }}
-              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
-            >
-              📋 Duplicate this task
-            </button>
+            <div className="flex flex-wrap gap-2 items-center">
+              <button
+                onClick={() => {
+                  onDuplicate(task.id);
+                  onClose();
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+              >
+                📋 Duplicate here
+              </button>
+              {/* SOW #24: ask the assignee for a progress update */}
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/tasks/${task.id}/remind`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ kind: "update_request" }),
+                    });
+                    const body = await res.json();
+                    if (!res.ok) throw new Error(body?.error || "Could not send");
+                    onError("Update request sent to the assignee.");
+                  } catch (err: any) {
+                    onError(err.message);
+                  }
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+              >
+                🔔 Request update
+              </button>
+              {/* SOW #39: manual reminder */}
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/tasks/${task.id}/remind`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ kind: "reminder" }),
+                    });
+                    const body = await res.json();
+                    if (!res.ok) throw new Error(body?.error || "Could not send");
+                    onError("Reminder sent to the assignee.");
+                  } catch (err: any) {
+                    onError(err.message);
+                  }
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+              >
+                ⏰ Send reminder
+              </button>
+              {/* SOW #11/#12: keep this task as a reusable template */}
+              <button
+                onClick={async () => {
+                  try {
+                    const res = await fetch("/api/templates", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ from_task_id: task.id }),
+                    });
+                    const b = await res.json();
+                    if (!res.ok) throw new Error(b?.error || "Could not save template");
+                    onError("Saved as a template.");
+                  } catch (err: any) {
+                    onError(err.message);
+                  }
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+              >
+                📄 Save as template
+              </button>
+              {/* SOW #12: archive a finished task, or restore it as a template */}
+              <button
+                onClick={() => {
+                  onPatch(task.id, {
+                    archived_at: task.archived_at ? null : new Date().toISOString(),
+                  } as Partial<Task>);
+                  onClose();
+                }}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm"
+              >
+                {task.archived_at ? "♻️ Restore" : "🗄️ Archive"}
+              </button>
+              {/* SOW #16: copy this task into a different project */}
+              {projects && projects.length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    onDuplicate(task.id, e.target.value);
+                    onClose();
+                  }}
+                  className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                >
+                  <option value="">Copy into another project...</option>
+                  {projects
+                    .filter((pr) => pr.id !== task.project_id)
+                    .map((pr) => (
+                      <option key={pr.id} value={pr.id}>
+                        {pr.name}
+                      </option>
+                    ))}
+                </select>
+              )}
+            </div>
           )}
         </div>
         <TaskCard
@@ -866,7 +1584,89 @@ function TaskDetail({
           onPatch={(patch) => onPatch(task.id, patch)}
           onError={onError}
           teamMembers={teamMembers}
+          taskDeps={taskDeps}
+          allTasks={tasks}
+          teams={teams}
+          keyResults={keyResults}
         />
+      </div>
+    </div>
+  );
+}
+
+function GanttView({ tasks, onOpen }: { tasks: Task[]; onOpen: (id: string) => void }) {
+  const dated = tasks.filter((t) => t.due_date);
+  if (dated.length === 0) {
+    return <p className="text-slate-400">No tasks with due dates to plot.</p>;
+  }
+
+  // Work out the window the chart has to cover.
+  const times: number[] = [];
+  dated.forEach((t) => {
+    times.push(new Date(t.created_at).getTime());
+    if (t.due_date) times.push(new Date(t.due_date).getTime());
+  });
+  const now = Date.now();
+  times.push(now);
+
+  const min = Math.min(...times);
+  const max = Math.max(...times);
+  const span = Math.max(max - min, 1);
+
+  const pct = (ms: number) => ((ms - min) / span) * 100;
+
+  const statusColor: Record<string, string> = {
+    done: "bg-green-600",
+    in_progress: "bg-blue-600",
+    need_help: "bg-yellow-600",
+    pending: "bg-slate-600",
+  };
+
+  return (
+    <div className="bg-slate-800 border border-slate-700 rounded p-4 overflow-x-auto">
+      <div className="flex justify-between text-xs text-slate-500 mb-3">
+        <span>{new Date(min).toLocaleDateString()}</span>
+        <span>{new Date(max).toLocaleDateString()}</span>
+      </div>
+
+      <div className="space-y-2 relative">
+        {/* today marker */}
+        <div
+          className="absolute top-0 bottom-0 w-px bg-red-500 z-10"
+          style={{ left: `${pct(now)}%` }}
+          title="Today"
+        />
+
+        {dated.map((t) => {
+          const start = new Date(t.created_at).getTime();
+          const end = new Date(t.due_date as string).getTime();
+          const left = pct(Math.min(start, end));
+          const width = Math.max(pct(Math.max(start, end)) - left, 1.5);
+          return (
+            <div
+              key={t.id}
+              onClick={() => onOpen(t.id)}
+              className="cursor-pointer group"
+            >
+              <p className="text-xs text-slate-400 mb-1 truncate">{t.title}</p>
+              <div className="relative h-5 bg-slate-900 rounded">
+                <div
+                  className={`absolute h-5 rounded ${statusColor[t.status] || "bg-slate-600"} group-hover:opacity-80`}
+                  style={{ left: `${left}%`, width: `${width}%` }}
+                  title={`${t.title} - due ${new Date(t.due_date as string).toLocaleDateString()}`}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-wrap gap-4 mt-4 pt-3 border-t border-slate-700 text-xs text-slate-400">
+        <span><span className="inline-block w-3 h-3 bg-slate-600 rounded mr-1" />Pending</span>
+        <span><span className="inline-block w-3 h-3 bg-blue-600 rounded mr-1" />In progress</span>
+        <span><span className="inline-block w-3 h-3 bg-yellow-600 rounded mr-1" />Need help</span>
+        <span><span className="inline-block w-3 h-3 bg-green-600 rounded mr-1" />Done</span>
+        <span><span className="inline-block w-px h-3 bg-red-500 mr-1" />Today</span>
       </div>
     </div>
   );
