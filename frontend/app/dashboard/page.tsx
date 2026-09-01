@@ -472,6 +472,7 @@ function TaskCard({
           <span>{PRIORITIES.find((p) => p.value === task.priority)?.label}</span>
           <span>{task.progress_percent}%</span>
           {task.due_date && <span>Due {new Date(task.due_date).toLocaleDateString()}</span>}
+          {task.milestone && <span>📍 {task.milestone}</span>}
           <span className="ml-auto">👤 {assigneeLabel}</span>
         </div>
         <div className="w-full bg-slate-900 rounded h-2">
