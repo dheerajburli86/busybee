@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { DragDropContext, Droppable, Draggable, DropResult } from "react-beautiful-dnd";
 
 type Task = {
   id: string;
@@ -404,8 +403,7 @@ return (
           </div>
         ) : (
           /* Board view */
-          <DragDropContext onDragEnd={handleDragEnd}>
-            <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-4 gap-4">
             {["pending", "in_progress", "done", "need_help"].map((status) => (
               <div key={status} className="bg-slate-800 rounded p-4 border border-slate-700">
                 <h3 className="font-bold mb-4 capitalize text-slate-300">
@@ -434,8 +432,7 @@ return (
                 </div>
               </div>
             ))}
-            </div>
-          </DragDropContext>
+          </div>
         )}
 
         {/* Task detail modal */}
