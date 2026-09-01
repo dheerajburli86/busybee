@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { DragDropContext, Droppable, Draggable, DropResult } from "react-beautiful-dnd";
 
 type Task = {
   id: string;
@@ -69,6 +70,8 @@ export default function DashboardPage() {
       ).slice(0, 5)
     : [];
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [taskDeps, setTaskDeps] = useState<Record<string, string[]>>({});
+  const [currentProject, setCurrentProject] = useState<{ name: string; description: string | null } | null>(null);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -101,6 +104,24 @@ export default function DashboardPage() {
       } finally {
         setLoading(false);
       }
+
+      // Fetch task dependencies
+      (async () => {
+        try {
+          const res = await fetch("/api/tasks/dependencies");
+          if (res.ok) {
+            const data = await res.json();
+            const deps: Record<string, string[]> = {};
+            (data || []).forEach((dep: any) => {
+              if (!deps[dep.dependent_id]) deps[dep.dependent_id] = [];
+              deps[dep.dependent_id].push(dep.dependency_id);
+            });
+            setTaskDeps(deps);
+          }
+        } catch {
+          /* silently fail */
+        }
+      })();
     })();
   }, []);
 
@@ -254,7 +275,17 @@ return (
       </div>
 
       <div className="max-w-7xl mx-auto p-6">
-        <h2 className="text-3xl font-bold mb-6">Tasks</h2>
+        <div className="mb-6">
+          <h2 className="text-3xl font-bold">Tasks</h2>
+          {currentProject && (
+            <p className="text-slate-400 mt-2">
+              Project: <span className="text-blue-400 font-semibold">{currentProject.name}</span>
+              {currentProject.description && (
+                <span className="ml-4 text-sm">{currentProject.description}</span>
+              )}
+            </p>
+          )}
+        </div>
 
         {error && (
           <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
@@ -403,7 +434,8 @@ return (
           </div>
         ) : (
           /* Board view */
-          <div className="grid grid-cols-4 gap-4">
+          <DragDropContext onDragEnd={handleDragEnd}>
+            <div className="grid grid-cols-4 gap-4">
             {["pending", "in_progress", "done", "need_help"].map((status) => (
               <div key={status} className="bg-slate-800 rounded p-4 border border-slate-700">
                 <h3 className="font-bold mb-4 capitalize text-slate-300">
@@ -432,7 +464,8 @@ return (
                 </div>
               </div>
             ))}
-          </div>
+            </div>
+          </DragDropContext>
         )}
 
         {/* Task detail modal */}
@@ -568,6 +601,9 @@ function TaskCard({
           <span>{task.progress_percent}%</span>
           {task.due_date && <span>Due {new Date(task.due_date).toLocaleDateString()}</span>}
           {task.milestone && <span>📍 {task.milestone}</span>}
+          {taskDeps[task.id] && taskDeps[task.id].length > 0 && (
+            <span className="text-yellow-500">🔗 {taskDeps[task.id].length} dep</span>
+          )}
           <span className="ml-auto">👤 {assigneeLabel}</span>
         </div>
         <div className="w-full bg-slate-900 rounded h-2">
