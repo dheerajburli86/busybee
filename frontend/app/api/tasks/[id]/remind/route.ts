@@ -1,5 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
+import { sendMail } from "@/lib/email";
 
 // SOW #24 (supervisor seeks an update) and #39 (manual reminder).
 // Both are the same action: send a notification about this task to someone.
@@ -57,7 +58,25 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     });
 
     if (error) throw error;
-    return NextResponse.json({ success: true });
+
+    // SOW #39: the reminder also goes out by email when mail is configured.
+    // A failed or unconfigured send must not fail the request, so the result
+    // is reported rather than thrown.
+    const message =
+      note ||
+      (isUpdateRequest
+        ? `An update was requested on: ${task.title}`
+        : `Reminder about: ${task.title}`);
+
+    const emailed = await sendMail({
+      userIds: [target],
+      subject: isUpdateRequest
+        ? `Update requested: ${task.title}`
+        : `Reminder: ${task.title}`,
+      body: message,
+    });
+
+    return NextResponse.json({ success: true, emailed });
   } catch (error: any) {
     console.error("POST /api/tasks/[id]/remind failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

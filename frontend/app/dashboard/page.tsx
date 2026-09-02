@@ -833,11 +833,6 @@ function TaskCard({
 }) {
   // DOCX #2: only the assignor or the named task manager may move a deadline.
   // Everyone else files an extension request instead.
-  const canChangeDueDate =
-    !currentUserId ||
-    task.created_by === currentUserId ||
-    task.task_manager_id === currentUserId;
-
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [subtasks, setSubtasks] = useState<Subtask[]>([]);
@@ -853,18 +848,29 @@ function TaskCard({
   const [extReason, setExtReason] = useState("");
   const [extDate, setExtDate] = useState("");
   const [depsLoading, setDepsLoading] = useState(false);
+  // SOW #44: more than one person can be an assignor on a task.
+  const [assignors, setAssignors] = useState<{ id: string; user_id: string }[]>([]);
+
+  // DOCX #2: only the assignor, a named task manager, or anyone added as an
+  // extra assignor (SOW #44) may move a deadline.
+  const canChangeDueDate =
+    !currentUserId ||
+    task.created_by === currentUserId ||
+    task.task_manager_id === currentUserId ||
+    assignors.some((x) => x.user_id === currentUserId);
 
   useEffect(() => {
     if (!open || loaded) return;
     (async () => {
       try {
-        const [c, a, s, l, d, x] = await Promise.all([
+        const [c, a, s, l, d, x, g] = await Promise.all([
           fetch(`/api/tasks/${task.id}/comments`),
           fetch(`/api/tasks/${task.id}/attachments`),
           fetch(`/api/tasks/${task.id}/subtasks`),
           fetch(`/api/tasks/${task.id}/activity`),
           fetch(`/api/tasks/${task.id}/dependencies`),
           fetch(`/api/tasks/${task.id}/extension`),
+          fetch(`/api/tasks/${task.id}/assignors`),
         ]);
         if (c.ok) setComments(await c.json());
         if (a.ok) setAttachments(await a.json());
@@ -875,6 +881,7 @@ function TaskCard({
           setTaskDependencies((deps || []).map((r: any) => r.depends_on_task_id));
         }
         if (x.ok) setExtensions(await x.json());
+        if (g.ok) setAssignors(await g.json());
         setLoaded(true);
       } catch {
         onError("Could not load task details");
@@ -1162,6 +1169,79 @@ function TaskCard({
           </div>
 
           <div>
+            {/* SOW #44: several people can hold assignor rights on one task. */}
+            <p className="text-sm font-bold mb-2">
+              Assignors ({assignors.length + 1})
+            </p>
+            <div className="mb-4">
+              <div className="flex flex-wrap gap-2 mb-2">
+                <span className="px-2 py-1 bg-slate-700 rounded text-xs">
+                  {teamMembers.find((m) => m.id === task.created_by)?.name ||
+                    "Creator"}{" "}
+                  <span className="text-slate-400">(created)</span>
+                </span>
+                {assignors.map((x) => (
+                  <span
+                    key={x.id}
+                    className="px-2 py-1 bg-slate-700 rounded text-xs flex items-center gap-2"
+                  >
+                    {teamMembers.find((m) => m.id === x.user_id)?.name || "Someone"}
+                    <button
+                      onClick={async () => {
+                        const removed = x;
+                        setAssignors((prev) => prev.filter((y) => y.id !== x.id));
+                        try {
+                          await sendJSON(
+                            `/api/tasks/${task.id}/assignors`,
+                            "DELETE",
+                            { user_id: x.user_id }
+                          );
+                        } catch (err: any) {
+                          setAssignors((prev) => [...prev, removed]);
+                          onError(err.message || "Could not remove assignor");
+                        }
+                      }}
+                      className="text-slate-400 hover:text-red-400"
+                      title="Remove assignor"
+                    >
+                      x
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <select
+                value=""
+                onChange={async (e) => {
+                  const userId = e.target.value;
+                  if (!userId) return;
+                  try {
+                    const added = await sendJSON(
+                      `/api/tasks/${task.id}/assignors`,
+                      "POST",
+                      { user_id: userId }
+                    );
+                    setAssignors((prev) => [...prev, added]);
+                  } catch (err: any) {
+                    onError(err.message || "Could not add assignor");
+                  }
+                }}
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+              >
+                <option value="">Add an assignor...</option>
+                {teamMembers
+                  .filter(
+                    (m) =>
+                      m.id !== task.created_by &&
+                      !assignors.some((x) => x.user_id === m.id)
+                  )
+                  .map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
             <p className="text-sm font-bold mb-2">Attachments ({attachments.length})</p>
             {attachments.length > 0 && (
               <div className="space-y-1 mb-3">

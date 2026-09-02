@@ -1,6 +1,7 @@
 // app/api/tasks/route.ts
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
+import { sendMail } from "@/lib/email";
 
 async function resolveContext(supabase: any, userId: string) {
   const { data: membership } = await supabase
@@ -165,9 +166,16 @@ export async function PUT(request: NextRequest) {
         .limit(1)
         .single();
 
+      // SOW #44: anyone added as an extra assignor holds the same right.
+      const { data: extraAssignors } = await supabase
+        .from("task_assignors")
+        .select("user_id")
+        .eq("task_id", id);
+
       const privileged =
         current?.created_by === user.id ||
         current?.task_manager_id === user.id ||
+        (extraAssignors || []).some((a: any) => a.user_id === user.id) ||
         ["supervisor", "manager", "admin"].includes(membership?.role ?? "");
 
       if (!privileged) {
@@ -212,6 +220,13 @@ export async function PUT(request: NextRequest) {
         message: `You were assigned: ${task.title}`,
         read: false,
       }).then(() => {}, () => {});
+
+      // SOW #30: mirror it by email. No-ops when mail is unconfigured.
+      await sendMail({
+        userIds: [body.assigned_to],
+        subject: `New task assigned: ${task.title}`,
+        body: `You were assigned: ${task.title}`,
+      });
     }
 
     // SOW #20: on completion, notify everyone connected to the task, not just
@@ -247,6 +262,12 @@ export async function PUT(request: NextRequest) {
               read: false,
             }))
           );
+
+          await sendMail({
+            userIds: Array.from(recipients),
+            subject: `Task ${patch.status === "closed" ? "closed" : "completed"}: ${task.title}`,
+            body: `${task.title} was marked ${patch.status === "closed" ? "closed" : "completed"}.`,
+          });
         }
       } catch {
         /* never block the save on a notification problem */

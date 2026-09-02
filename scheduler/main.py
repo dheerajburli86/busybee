@@ -17,6 +17,10 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import urllib.error
+import urllib.request
+import json as _json
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from supabase import create_client
 
@@ -55,6 +59,52 @@ def already_sent(task_id: str, marker: str) -> bool:
         return True
 
 
+# SOW #30: email alongside the in-app notification. Uses Resend's REST API
+# through the standard library so the container needs no extra package. When
+# RESEND_API_KEY is unset this is a no-op and only in-app notifications go out.
+MAIL_FROM = os.environ.get("MAIL_FROM", "BusyBee <onboarding@resend.dev>")
+
+
+def _email_for(user_id: str):
+    try:
+        res = supabase.table("users").select("email").eq("id", user_id).single().execute()
+        return (res.data or {}).get("email")
+    except Exception:
+        return None
+
+
+def send_mail(user_id: str, subject: str, body: str) -> bool:
+    key = os.environ.get("RESEND_API_KEY")
+    if not key:
+        return False
+
+    address = _email_for(user_id)
+    if not address:
+        return False
+
+    payload = _json.dumps(
+        {"from": MAIL_FROM, "to": [address], "subject": subject, "text": body}
+    ).encode()
+
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except Exception as exc:
+        # A mail failure must never stop the scheduler loop.
+        print(f"email to {user_id} failed: {exc}", file=sys.stderr)
+        return False
+
+
 def notify(user_id: str, task_id, ntype: str, title: str, message: str) -> None:
     try:
         supabase.table("notifications").insert(
@@ -69,6 +119,9 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str) -> None:
         ).execute()
     except Exception as exc:
         print(f"could not write notification for {user_id}: {exc}", file=sys.stderr)
+
+    # SOW #30 / #39: mirror it by email when configured.
+    send_mail(user_id, title, message)
 
 
 def deadline_reminders() -> None:

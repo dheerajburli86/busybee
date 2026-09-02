@@ -13,7 +13,7 @@ type Team = {
   manager_id: string | null;
 };
 type TeamMember = { id: string; team_id: string; user_id: string; role: string };
-type Member = { id: string; name: string; email: string };
+type Member = { id: string; name: string; email: string; role?: string };
 
 export default function TeamsPage() {
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -25,7 +25,42 @@ export default function TeamsPage() {
   const [newDept, setNewDept] = useState("");
   const [newTeam, setNewTeam] = useState("");
   const [newTeamDept, setNewTeamDept] = useState("");
+  // SOW #27 / #28: desk-level roles decide who can move deadlines and manage
+  // people. Only a privileged member sees the controls.
+  const [myRole, setMyRole] = useState("member");
   const router = useRouter();
+
+  const DESK_ROLES = [
+    { value: "member", label: "Member" },
+    { value: "manager", label: "Manager" },
+    { value: "supervisor", label: "Supervisor" },
+    { value: "admin", label: "Admin" },
+  ];
+
+  const canManageRoles =
+    ["supervisor", "manager", "admin"].includes(myRole) ||
+    // A new desk has nobody privileged yet; the server allows the first change.
+    !people.some((m) =>
+      ["supervisor", "manager", "admin"].includes(m.role || "member")
+    );
+
+  const changeRole = async (person: Member, role: string) => {
+    const before = person.role || "member";
+    setPeople((prev) =>
+      prev.map((m) => (m.id === person.id ? { ...m, role } : m))
+    );
+    try {
+      await sendJSON("/api/team/members", "PUT", { user_id: person.id, role });
+      // Your own promotion changes what you are allowed to do next.
+      const me = await fetch("/api/team/members");
+      if (me.ok) setMyRole((await me.json()).myRole || "member");
+    } catch (e: any) {
+      setPeople((prev) =>
+        prev.map((m) => (m.id === person.id ? { ...m, role: before } : m))
+      );
+      setError(e.message || "Could not change that role");
+    }
+  };
 
   const load = async () => {
     try {
@@ -35,7 +70,11 @@ export default function TeamsPage() {
       setDepartments(data.departments || []);
       setTeams(data.teams || []);
       setTeamMembers(data.teamMembers || []);
-      if (m.ok) setPeople((await m.json()).members || []);
+      if (m.ok) {
+        const body = await m.json();
+        setPeople(body.members || []);
+        setMyRole(body.myRole || "member");
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -98,6 +137,50 @@ export default function TeamsPage() {
             {error}
           </div>
         )}
+
+        {/* SOW #27 / #28: desk roles. A supervisor or admin can move any
+            task's deadline; everyone else has to request an extension. */}
+        <h2 className="text-lg font-semibold mb-3">People &amp; permissions</h2>
+        <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-6">
+          <p className="text-xs text-slate-400 mb-3">
+            Supervisors, managers and admins can change any task&apos;s due date
+            and edit these roles. Members request an extension instead.
+          </p>
+          {people.length === 0 ? (
+            <p className="text-sm text-slate-500">Nobody on this desk yet.</p>
+          ) : (
+            <div className="space-y-2">
+              {people.map((person) => (
+                <div
+                  key={person.id}
+                  className="flex items-center justify-between gap-3 bg-slate-900 rounded px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm truncate">{person.name}</p>
+                    <p className="text-xs text-slate-500 truncate">{person.email}</p>
+                  </div>
+                  {canManageRoles ? (
+                    <select
+                      value={person.role || "member"}
+                      onChange={(e) => changeRole(person, e.target.value)}
+                      className="px-2 py-1 bg-slate-800 border border-slate-600 rounded text-xs shrink-0"
+                    >
+                      {DESK_ROLES.map((r) => (
+                        <option key={r.value} value={r.value}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-xs text-slate-400 shrink-0">
+                      {DESK_ROLES.find((r) => r.value === (person.role || "member"))?.label}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <h2 className="text-lg font-semibold mb-3">Departments</h2>
         <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-4 flex gap-2">
