@@ -160,7 +160,7 @@ export async function PUT(req: Request) {
         milestone: tpl.milestone,
         created_by: user.id,
       })
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, progress_type, progress_target, progress_current, created_by, created_at")
       .single();
 
     if (error) throw error;

@@ -106,3 +106,54 @@ export async function POST(
     );
   }
 }
+
+// SOW #32: change who can see a document. Only the uploader or the person who
+// created the task may change this.
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: taskId } = await params;
+
+  try {
+    const supabase = await createServerSideClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { attachment_id, visibility } = await request.json();
+    if (!attachment_id) {
+      return NextResponse.json({ error: "attachment_id required" }, { status: 400 });
+    }
+    if (!["all", "restricted"].includes(visibility)) {
+      return NextResponse.json({ error: "visibility must be all or restricted" }, { status: 400 });
+    }
+
+    const [{ data: attachment }, { data: task }] = await Promise.all([
+      supabase.from("attachments").select("uploaded_by").eq("id", attachment_id).single(),
+      supabase.from("tasks").select("created_by").eq("id", taskId).single(),
+    ]);
+
+    const allowed =
+      attachment?.uploaded_by === user.id || task?.created_by === user.id;
+
+    if (!allowed) {
+      return NextResponse.json(
+        { error: "Only the uploader or the assignor can change file access" },
+        { status: 403 }
+      );
+    }
+
+    const { data, error } = await supabase
+      .from("attachments")
+      .update({ visibility })
+      .eq("id", attachment_id)
+      .select("id, file_name, file_url, file_type, file_size, visibility, uploaded_by, created_at")
+      .single();
+
+    if (error) throw error;
+    return NextResponse.json(data);
+  } catch (error: any) {
+    console.error("PUT /api/tasks/[id]/attachments failed:", error);
+    return NextResponse.json({ error: error?.message }, { status: 500 });
+  }
+}

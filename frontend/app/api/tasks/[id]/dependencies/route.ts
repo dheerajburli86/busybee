@@ -54,3 +54,30 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: error?.message }, { status: 500 });
   }
 }
+
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const { depends_on_task_id } = await req.json();
+
+    if (!depends_on_task_id) {
+      return NextResponse.json({ error: "depends_on_task_id required" }, { status: 400 });
+    }
+
+    const supabase = await createServerSideClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { error } = await supabase
+      .from("task_dependencies")
+      .delete()
+      .eq("task_id", id)
+      .eq("depends_on_task_id", depends_on_task_id);
+
+    if (error) throw error;
+    return NextResponse.json({ success: true });
+  } catch (error: any) {
+    console.error("DELETE /api/tasks/[id]/dependencies failed:", error);
+    return NextResponse.json({ error: error?.message }, { status: 500 });
+  }
+}

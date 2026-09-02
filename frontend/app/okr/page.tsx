@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { sendJSON } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 type Objective = {
@@ -93,17 +94,20 @@ export default function OkrPage() {
   };
 
   const updateKr = async (kr: KeyResult, value: number) => {
+    const before = kr.current_value;
     setKeyResults((prev) =>
       prev.map((k) => (k.id === kr.id ? { ...k, current_value: value } : k))
     );
     try {
-      await fetch("/api/okr", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key_result_id: kr.id, current_value: value }),
+      await sendJSON("/api/okr", "PUT", {
+        key_result_id: kr.id,
+        current_value: value,
       });
-    } catch {
-      setError("Could not save that value");
+    } catch (err: any) {
+      setKeyResults((prev) =>
+        prev.map((k) => (k.id === kr.id ? { ...k, current_value: before } : k))
+      );
+      setError(err.message || "Could not save that value");
     }
   };
 

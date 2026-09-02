@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { isFinished, isOverdue } from "@/lib/status";
 import { useRouter } from "next/navigation";
 
 type Task = {
@@ -59,12 +60,9 @@ export default function ReportsPage() {
 
   const inPeriod = tasks.filter((t) => new Date(t.created_at) >= cutoff);
   const completed = tasks.filter(
-    (t) => t.status === "done" && new Date(t.created_at) >= cutoff
+    (t) => isFinished(t.status) && new Date(t.created_at) >= cutoff
   );
-  const overdue = tasks.filter((t) => {
-    if (!t.due_date || t.status === "done") return false;
-    return new Date(t.due_date) < new Date();
-  });
+  const overdue = tasks.filter(isOverdue);
 
   const avgProgress =
     tasks.length > 0
@@ -74,7 +72,7 @@ export default function ReportsPage() {
   // Per-person breakdown for the selected window.
   const byMember = members.map((m) => {
     const assigned = tasks.filter((t) => t.assigned_to === m.id);
-    const doneCount = assigned.filter((t) => t.status === "done").length;
+    const doneCount = assigned.filter((t) => isFinished(t.status)).length;
     return {
       name: m.name || m.email,
       assigned: assigned.length,
@@ -87,7 +85,7 @@ export default function ReportsPage() {
   // Per-project breakdown.
   const byProject = projects.map((pr) => {
     const list = tasks.filter((t) => t.project_id === pr.id);
-    const doneCount = list.filter((t) => t.status === "done").length;
+    const doneCount = list.filter((t) => isFinished(t.status)).length;
     return {
       name: pr.name,
       total: list.length,

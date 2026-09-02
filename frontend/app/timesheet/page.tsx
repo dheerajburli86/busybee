@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { sendJSON } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 type Entry = {
@@ -72,13 +73,9 @@ export default function TimesheetPage() {
   const removeEntry = async (id: string) => {
     setEntries((prev) => prev.filter((e) => e.id !== id));
     try {
-      await fetch("/api/timesheet", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entry_id: id }),
-      });
-    } catch {
-      setError("Could not delete that entry");
+      await sendJSON("/api/timesheet", "DELETE", { entry_id: id });
+    } catch (err: any) {
+      setError(err.message || "Could not delete that entry");
       load();
     }
   };

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { sendJSON } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 type Department = { id: string; name: string; description: string | null };
@@ -63,11 +64,7 @@ export default function TeamsPage() {
 
   const remove = async (kind: string, id: string) => {
     try {
-      await fetch("/api/teams", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, id }),
-      });
+      await sendJSON("/api/teams", "DELETE", { kind, id });
       if (kind === "department") setDepartments((p) => p.filter((d) => d.id !== id));
       else if (kind === "member") setTeamMembers((p) => p.filter((m) => m.id !== id));
       else setTeams((p) => p.filter((t) => t.id !== id));

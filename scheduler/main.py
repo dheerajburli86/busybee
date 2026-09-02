@@ -77,10 +77,10 @@ def deadline_reminders() -> None:
     try:
         res = (
             supabase.table("tasks")
-            .select("id, title, due_date, assigned_to, status")
+            .select("id, title, due_date, assigned_to, created_by, status")
             .not_.is_("due_date", "null")
             .not_.is_("assigned_to", "null")
-            .neq("status", "done")
+            .not_.in_("status", ["done", "closed"])
             .execute()
         )
     except Exception as exc:
@@ -105,15 +105,63 @@ def deadline_reminders() -> None:
                 marker = f"reminder_{threshold}h"
                 if already_sent(task["id"], marker):
                     continue
-                notify(
-                    task["assigned_to"],
-                    task["id"],
-                    marker,
-                    f"Due in {threshold} hours",
-                    f"{task['title']} is due at {due.astimezone(LOCAL_TZ):%d %b %H:%M}",
-                )
-                print(f"sent {threshold}h reminder for {task['id']}")
+
+                # Both parties are warned, not just the person doing the work.
+                recipients = {task["assigned_to"], task.get("created_by")}
+                recipients.discard(None)
+
+                for recipient in recipients:
+                    notify(
+                        recipient,
+                        task["id"],
+                        marker,
+                        f"Due in {threshold} hours",
+                        f"{task['title']} is due at {due.astimezone(LOCAL_TZ):%d %b %H:%M}",
+                    )
+                print(f"sent {threshold}h reminder for {task['id']} to {len(recipients)}")
                 break
+
+
+def recurring_update_requests() -> None:
+    """SOW #24: ask for a progress update every few days on open work."""
+    interval_days = int(os.environ.get("UPDATE_REQUEST_DAYS", "3"))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=interval_days)
+
+    try:
+        res = (
+            supabase.table("tasks")
+            .select("id, title, assigned_to, status, updated_at, created_at")
+            .not_.is_("assigned_to", "null")
+            .not_.in_("status", ["done", "closed"])
+            .execute()
+        )
+    except Exception as exc:
+        print(f"could not read tasks: {exc}", file=sys.stderr)
+        return
+
+    for task in res.data or []:
+        stamp = task.get("updated_at") or task.get("created_at")
+        if not stamp:
+            continue
+        try:
+            last = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        # Only chase work that has gone quiet for the whole interval.
+        if last > cutoff:
+            continue
+
+        notify(
+            task["assigned_to"],
+            task["id"],
+            "update_request",
+            "Update requested",
+            f"No movement on {task['title']} for {interval_days} days. How is it going?",
+        )
+    print("sent recurring update requests")
 
 
 def _open_tasks_by_user() -> dict:
@@ -122,7 +170,7 @@ def _open_tasks_by_user() -> dict:
             supabase.table("tasks")
             .select("id, title, due_date, assigned_to, status")
             .not_.is_("assigned_to", "null")
-            .neq("status", "done")
+            .not_.in_("status", ["done", "closed"])
             .execute()
         )
     except Exception as exc:
@@ -193,6 +241,14 @@ if __name__ == "__main__":
     bod_utc = int((BOD_HOUR - TZ_OFFSET_HOURS) % 24)
     eod_utc = int((EOD_HOUR - TZ_OFFSET_HOURS) % 24)
     scheduler.add_job(start_of_day, "cron", hour=bod_utc, minute=0, id="bod")
+    # SOW #24: recurring nudge at midnight local time.
+    scheduler.add_job(
+        recurring_update_requests,
+        "cron",
+        hour=int((0 - TZ_OFFSET_HOURS) % 24),
+        minute=0,
+        id="update_requests",
+    )
     scheduler.add_job(end_of_day, "cron", hour=eod_utc, minute=0, id="eod")
 
     print(

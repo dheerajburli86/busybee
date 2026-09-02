@@ -71,6 +71,54 @@ export async function POST(
             read: false,
           }).then(() => {}, () => {});
         }
+
+        // SOW #23: @team and @department tag everyone inside them, not just
+        // individuals. A name that matched a person above is skipped here.
+        const [{ data: teams }, { data: departments }] = await Promise.all([
+          supabase.from("teams").select("id, name").in("desk_id", deskIds),
+          supabase.from("departments").select("id, name").in("desk_id", deskIds),
+        ]);
+
+        const slug = (name: string) => (name || "").toLowerCase().replace(/\s+/g, "");
+
+        const hitTeamIds = (teams || [])
+          .filter((t: any) => mentions.includes(slug(t.name)))
+          .map((t: any) => t.id);
+
+        // A department is tagged by fanning out to every team inside it.
+        const hitDeptIds = (departments || [])
+          .filter((d: any) => mentions.includes(slug(d.name)))
+          .map((d: any) => d.id);
+
+        if (hitDeptIds.length > 0) {
+          const { data: deptTeams } = await supabase
+            .from("teams")
+            .select("id")
+            .in("department_id", hitDeptIds);
+          for (const t of deptTeams || []) {
+            if (!hitTeamIds.includes(t.id)) hitTeamIds.push(t.id);
+          }
+        }
+
+        if (hitTeamIds.length > 0) {
+          const { data: members } = await supabase
+            .from("team_members")
+            .select("user_id")
+            .in("team_id", hitTeamIds);
+
+          for (const m of members || []) {
+            if (!m.user_id || seen.has(m.user_id) || m.user_id === user.id) continue;
+            seen.add(m.user_id);
+            await supabase.from("notifications").insert({
+              user_id: m.user_id,
+              task_id: taskId,
+              type: "mention",
+              title: "Your team was mentioned",
+              message: content.trim().slice(0, 140),
+              read: false,
+            }).then(() => {}, () => {});
+          }
+        }
       }
     }
 

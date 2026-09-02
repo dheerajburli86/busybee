@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { isFinished, isOverdue } from "@/lib/status";
+import { sendJSON } from "@/lib/api";
 
 type Task = {
   id: string;
@@ -24,13 +26,6 @@ const PRIORITY_LABEL: Record<string, string> = {
   low: "Low",
 };
 
-function isOverdue(t: Task): boolean {
-  if (!t.due_date || t.status === "done") return false;
-  const due = new Date(t.due_date);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return due < today;
-}
 
 export default function TodoPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -86,11 +81,11 @@ export default function TodoPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not add item");
 
-      // Assign it to yourself so it lands on this list.
-      await fetch("/api/tasks", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: data.task.id, assigned_to: meId }),
+      // Assign it to yourself so it lands on this list. If this step fails the
+      // task exists but is unassigned, so say so rather than showing nothing.
+      await sendJSON("/api/tasks", "PUT", {
+        id: data.task.id,
+        assigned_to: meId,
       });
 
       setNewTitle("");
@@ -104,24 +99,23 @@ export default function TodoPage() {
   };
 
   const toggleDone = async (t: Task) => {
-    const next = t.status === "done" ? "pending" : "done";
+    const next = isFinished(t.status) ? "pending" : "done";
+    const before = t.status;
     setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, status: next } : x)));
     try {
-      await fetch("/api/tasks", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: t.id, status: next }),
-      });
-    } catch {
-      setError("Could not update that item");
-      load();
+      await sendJSON("/api/tasks", "PUT", { id: t.id, status: next });
+    } catch (err: any) {
+      setTasks((prev) =>
+        prev.map((x) => (x.id === t.id ? { ...x, status: before } : x))
+      );
+      setError(err.message || "Could not update that item");
     }
   };
 
   // SOW #18: everything assigned to me shows up here automatically.
   const mine = tasks.filter((t) => meId && t.assigned_to === meId);
-  const open = mine.filter((t) => t.status !== "done");
-  const done = mine.filter((t) => t.status === "done");
+  const open = mine.filter((t) => !isFinished(t.status));
+  const done = mine.filter((t) => isFinished(t.status));
   const overdue = open.filter(isOverdue);
   const dueToday = open.filter((t) => {
     if (!t.due_date) return false;

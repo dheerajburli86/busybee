@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { STATUSES, isFinished, isOverdue, statusClass } from "@/lib/status";
+import { sendJSON } from "@/lib/api";
 
 type Task = {
   id: string;
@@ -17,18 +19,17 @@ type Task = {
   team_id: string | null;
   task_manager_id: string | null;
   key_result_id: string | null;
+  progress_type: string | null;
+  progress_target: number | null;
+  progress_current: number | null;
+  created_by: string | null;
   created_at: string;
 };
 
 type TeamMember = { id: string; name: string; email: string };
 type Notification = { id: string; title: string; message: string | null; read: boolean; created_at: string };
 
-const STATUSES = [
-  { value: "pending", label: "Pending" },
-  { value: "in_progress", label: "In Progress" },
-  { value: "done", label: "Done" },
-  { value: "need_help", label: "Need Help" },
-];
+
 
 const PRIORITIES = [
   { value: "low", label: "Low" },
@@ -69,30 +70,13 @@ function formatDue(iso: string): string {
     : d.toLocaleDateString();
 }
 
-function isOverdue(task: { due_date: string | null; status: string }): boolean {
-  if (!task.due_date || task.status === "done") return false;
-  const due = new Date(task.due_date);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return due < today;
-}
-
-function statusClass(status: string) {
-  const map: Record<string, string> = {
-    pending: "bg-slate-700 text-slate-300",
-    in_progress: "bg-blue-900 text-blue-300",
-    done: "bg-green-900 text-green-300",
-    need_help: "bg-red-900 text-red-300",
-  };
-  return map[status] || "bg-slate-700 text-slate-300";
-}
 
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<"list" | "board" | "gantt">("list");
+  const [viewMode, setViewMode] = useState<"list" | "board" | "gantt" | "priority">("list");
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -110,6 +94,8 @@ export default function DashboardPage() {
   const [projectFilter, setProjectFilter] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState("created_at");
   const [showArchived, setShowArchived] = useState(false);
+  // SOW #26: dragging a card changes its status or priority.
+  const [draggedTask, setDraggedTask] = useState<string | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [keyResults, setKeyResults] = useState<{ id: string; title: string }[]>([]);
@@ -213,6 +199,10 @@ export default function DashboardPage() {
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    if (!dueDate) {
+      setError("A due date and time is required before a task can be created.");
+      return;
+    }
     setCreating(true);
     setError("");
     try {
@@ -242,6 +232,11 @@ export default function DashboardPage() {
   };
 
   const patchTask = async (id: string, patch: Partial<Task>) => {
+    // Keep the pre-edit copy so a rejected change can be undone. The server can
+    // legitimately refuse a due-date edit, and the screen must not keep showing
+    // a value that was never saved.
+    const previous = tasks.find((t) => t.id === id);
+
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     try {
       const res = await fetch("/api/tasks", {
@@ -254,10 +249,13 @@ export default function DashboardPage() {
       setTasks((prev) => prev.map((t) => (t.id === id ? data.task : t)));
 
       // An assignment or a completion may have written a notification server-side.
-      if (Object.prototype.hasOwnProperty.call(patch, "assigned_to") || patch.status === "done") {
+      if (Object.prototype.hasOwnProperty.call(patch, "assigned_to") || isFinished(patch.status)) {
         loadNotifications();
       }
     } catch (e: any) {
+      if (previous) {
+        setTasks((prev) => prev.map((t) => (t.id === id ? previous : t)));
+      }
       setError(e.message);
     }
   };
@@ -279,11 +277,7 @@ export default function DashboardPage() {
 
   const markNotificationRead = async (id: string) => {
     try {
-      await fetch("/api/notifications", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
+      await sendJSON("/api/notifications", "PATCH", { id });
       setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
     } catch (e) {
       console.error(e);
@@ -430,6 +424,8 @@ return (
               value={dueDate}
               onChange={(e) => setDueDate(e.target.value)}
               disabled={creating}
+              required
+              title="Due date and time is required"
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"
             />
             {/* SOW #11: start from a saved template */}
@@ -565,6 +561,17 @@ return (
           >
             📊 Board
           </button>
+          {/* SOW #26: reprioritise by dragging */}
+          <button
+            onClick={() => setViewMode("priority")}
+            className={`px-4 py-2 rounded text-sm ${
+              viewMode === "priority"
+                ? "bg-blue-600 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+          >
+            🎚️ Priority
+          </button>
           {/* SOW #9: timeline view */}
           <button
             onClick={() => setViewMode("gantt")}
@@ -668,7 +675,52 @@ return (
                 allTasks={tasks}
                 teams={teams}
                 keyResults={keyResults}
+                currentUserId={currentUserId}
               />
+            ))}
+          </div>
+        ) : viewMode === "priority" ? (
+          /* SOW #26: drag a task between priority lanes to reprioritise it. */
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {PRIORITIES.map((p) => (
+              <div
+                key={p.value}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (draggedTask) {
+                    patchTask(draggedTask, { priority: p.value } as Partial<Task>);
+                    setDraggedTask(null);
+                  }
+                }}
+                className="bg-slate-800 rounded p-4 border border-slate-700"
+              >
+                <h3 className="font-bold mb-4 text-slate-300">{p.label}</h3>
+                <div className="space-y-3">
+                  {searchedTasks
+                    .filter((t) => t.priority === p.value)
+                    .map((task) => (
+                      <div
+                        key={task.id}
+                        draggable
+                        onDragStart={() => setDraggedTask(task.id)}
+                        onDragEnd={() => setDraggedTask(null)}
+                        onClick={() => setOpenId(task.id)}
+                        className={`bg-slate-900 p-3 rounded border border-slate-700 cursor-pointer hover:border-blue-500 text-sm ${
+                          draggedTask === task.id ? "opacity-40" : ""
+                        }`}
+                      >
+                        <p className="font-bold mb-1">{task.title}</p>
+                        <div className="flex justify-between text-xs text-slate-500">
+                          <span>
+                            {STATUSES.find((s) => s.value === task.status)?.label}
+                          </span>
+                          <span>{task.progress_percent}%</span>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
             ))}
           </div>
         ) : viewMode === "gantt" ? (
@@ -677,18 +729,34 @@ return (
           <GanttView tasks={searchedTasks} onOpen={(id) => setOpenId(id)} />
         ) : (
           /* Board view */
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {["pending", "in_progress", "done", "need_help"].map((status) => (
-              <div key={status} className="bg-slate-800 rounded p-4 border border-slate-700">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            {["pending", "in_progress", "need_help", "done", "closed"].map((status) => (
+              <div
+                key={status}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (draggedTask) {
+                    patchTask(draggedTask, { status } as Partial<Task>);
+                    setDraggedTask(null);
+                  }
+                }}
+                className="bg-slate-800 rounded p-4 border border-slate-700"
+              >
                 <h3 className="font-bold mb-4 capitalize text-slate-300">
-                  {status.replace(/_/g, " ")}
+                  {STATUSES.find((s) => s.value === status)?.label ?? status.replace(/_/g, " ")}
                 </h3>
                 <div className="space-y-3">
                   {(groupedByStatus[status] || []).map((task) => (
                     <div
                       key={task.id}
+                      draggable
+                      onDragStart={() => setDraggedTask(task.id)}
+                      onDragEnd={() => setDraggedTask(null)}
                       onClick={() => setOpenId(task.id)}
-                      className="bg-slate-900 p-3 rounded border border-slate-700 cursor-pointer hover:border-blue-500 text-sm"
+                      className={`bg-slate-900 p-3 rounded border border-slate-700 cursor-pointer hover:border-blue-500 text-sm ${
+                        draggedTask === task.id ? "opacity-40" : ""
+                      }`}
                     >
                       <p className="font-bold mb-1">{task.title}</p>
                       <div className="flex justify-between text-xs text-slate-500 mb-2">
@@ -723,6 +791,7 @@ return (
             taskDeps={taskDeps}
             teams={teams}
             keyResults={keyResults}
+            currentUserId={currentUserId}
           />
         )}
       </div>
@@ -732,7 +801,7 @@ return (
 
 type Comment = { id: string; content: string; created_at: string };
 type Attachment = { id: string; file_name: string; file_url: string; file_size: number | null; visibility: string | null; uploaded_by: string | null; created_at: string };
-type Subtask = { id: string; title: string; done: boolean; progress_percent: number; assigned_to: string | null };
+type Subtask = { id: string; title: string; done: boolean; progress_percent: number; position: number | null; assigned_to: string | null };
 type Activity = { id: string; action: string; created_at: string };
 
 function TaskCard({
@@ -747,6 +816,7 @@ function TaskCard({
   allTasks,
   teams,
   keyResults,
+  currentUserId,
 }: {
   task: Task;
   open: boolean;
@@ -759,7 +829,15 @@ function TaskCard({
   allTasks?: Task[];
   teams?: { id: string; name: string }[];
   keyResults?: { id: string; title: string }[];
+  currentUserId?: string | null;
 }) {
+  // DOCX #2: only the assignor or the named task manager may move a deadline.
+  // Everyone else files an extension request instead.
+  const canChangeDueDate =
+    !currentUserId ||
+    task.created_by === currentUserId ||
+    task.task_manager_id === currentUserId;
+
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [subtasks, setSubtasks] = useState<Subtask[]>([]);
@@ -906,7 +984,15 @@ function TaskCard({
               type="datetime-local"
               value={task.due_date ? toLocalInput(task.due_date) : ""}
               onChange={(e) => onPatch({ due_date: e.target.value || null })}
-              className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+              disabled={!canChangeDueDate}
+              title={
+                canChangeDueDate
+                  ? "Due date and time"
+                  : "Only the assignor can change this. Request an extension below."
+              }
+              className={`px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm ${
+                canChangeDueDate ? "" : "opacity-50 cursor-not-allowed"
+              }`}
             />
             {/* SOW #41: assign to a whole team, not just a person */}
             {teams && teams.length > 0 && (
@@ -1010,20 +1096,132 @@ function TaskCard({
             />
           </div>
 
+          {/* SOW #34: measure progress as a count or an amount, and let the
+              percentage follow from what the assignee actually reports. */}
+          <div className="mt-4">
+            <p className="text-sm font-bold mb-2">Quantified target</p>
+            <div className="flex flex-wrap gap-2 items-center">
+              <select
+                value={task.progress_type || "percent"}
+                onChange={(e) =>
+                  onPatch({ progress_type: e.target.value } as Partial<Task>)
+                }
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+              >
+                <option value="percent">Percentage</option>
+                <option value="number">Number of units</option>
+                <option value="amount">Amount</option>
+              </select>
+
+              {(task.progress_type === "number" || task.progress_type === "amount") && (
+                <>
+                  <input
+                    type="number"
+                    min="0"
+                    value={task.progress_current ?? 0}
+                    placeholder="Done"
+                    onChange={(e) => {
+                      const current = Number(e.target.value);
+                      const target = Number(task.progress_target) || 0;
+                      // Keep the headline percentage in step with the count.
+                      const pct = target > 0
+                        ? Math.min(Math.round((current / target) * 100), 100)
+                        : task.progress_percent;
+                      onPatch({
+                        progress_current: current,
+                        progress_percent: pct,
+                      } as Partial<Task>);
+                    }}
+                    className="w-24 px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                  />
+                  <span className="text-slate-400 text-sm">of</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={task.progress_target ?? 0}
+                    placeholder="Target"
+                    onChange={(e) => {
+                      const target = Number(e.target.value);
+                      const current = Number(task.progress_current) || 0;
+                      const pct = target > 0
+                        ? Math.min(Math.round((current / target) * 100), 100)
+                        : task.progress_percent;
+                      onPatch({
+                        progress_target: target,
+                        progress_percent: pct,
+                      } as Partial<Task>);
+                    }}
+                    className="w-24 px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                  />
+                  <span className="text-xs text-slate-500">
+                    {task.progress_type === "amount" ? "amount" : "units"}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+
           <div>
             <p className="text-sm font-bold mb-2">Attachments ({attachments.length})</p>
             {attachments.length > 0 && (
               <div className="space-y-1 mb-3">
                 {attachments.map((a) => (
-                  <a
-                    key={a.id}
-                    href={a.file_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block text-blue-400 hover:underline text-sm"
-                  >
-                    {a.file_name}
-                  </a>
+                  <div key={a.id} className="flex items-center gap-2">
+                    <a
+                      href={a.file_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex-1 text-blue-400 hover:underline text-sm truncate"
+                    >
+                      {a.visibility === "restricted" && "🔒 "}
+                      {a.file_name}
+                    </a>
+                    {/* SOW #32: restrict a document to the uploader and assignor. */}
+                    <select
+                      value={a.visibility || "all"}
+                      onChange={async (e) => {
+                        const val = e.target.value;
+                        const before = a.visibility || "all";
+                        setAttachments((prev) =>
+                          prev.map((x) =>
+                            x.id === a.id ? { ...x, visibility: val } : x
+                          )
+                        );
+                        try {
+                          const res = await fetch(
+                            `/api/tasks/${task.id}/attachments`,
+                            {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                attachment_id: a.id,
+                                visibility: val,
+                              }),
+                            }
+                          );
+                          // fetch only rejects on network failure, so a 403
+                          // from the server has to be checked explicitly.
+                          if (!res.ok) {
+                            const body = await res.json().catch(() => ({}));
+                            throw new Error(
+                              body?.error || "Could not change file access"
+                            );
+                          }
+                        } catch (err: any) {
+                          setAttachments((prev) =>
+                            prev.map((x) =>
+                              x.id === a.id ? { ...x, visibility: before } : x
+                            )
+                          );
+                          onError(err.message || "Could not change file access");
+                        }
+                      }}
+                      className="px-2 py-1 bg-slate-900 border border-slate-600 rounded text-xs shrink-0"
+                    >
+                      <option value="all">Everyone</option>
+                      <option value="restricted">Restricted</option>
+                    </select>
+                  </div>
                 ))}
               </div>
             )}
@@ -1254,39 +1452,102 @@ function TaskCard({
                           prev.map((x) => (x.id === st.id ? { ...x, done: next } : x))
                         );
                         try {
-                          await fetch(`/api/tasks/${task.id}/subtasks`, {
-                            method: "PUT",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ subtask_id: st.id, done: next }),
+                          await sendJSON(`/api/tasks/${task.id}/subtasks`, "PUT", {
+                            subtask_id: st.id,
+                            done: next,
                           });
-                        } catch {
-                          onError("Could not update subtask");
+                        } catch (err: any) {
+                          setSubtasks((prev) =>
+                            prev.map((x) =>
+                              x.id === st.id ? { ...x, done: !next } : x
+                            )
+                          );
+                          onError(err.message || "Could not update subtask");
                         }
                       }}
                     />
-                    <span
-                      className={`text-sm flex-1 min-w-32 ${
-                        st.done ? "line-through text-slate-500" : "text-slate-300"
-                      }`}
-                    >
-                      {st.title}
-                    </span>
+                    <div className="flex-1 min-w-32">
+                      <span
+                        className={`text-sm ${
+                          st.done ? "line-through text-slate-500" : "text-slate-300"
+                        }`}
+                      >
+                        {st.title}
+                      </span>
+                      <div className="flex items-center gap-2 mt-1">
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={st.done ? 100 : st.progress_percent ?? 0}
+                          onChange={async (e) => {
+                            const val = Number(e.target.value);
+                            const before = st.progress_percent ?? 0;
+                            setSubtasks((prev) =>
+                              prev.map((x) =>
+                                x.id === st.id ? { ...x, progress_percent: val } : x
+                              )
+                            );
+                            try {
+                              const res = await fetch(
+                                `/api/tasks/${task.id}/subtasks`,
+                                {
+                                  method: "PUT",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    subtask_id: st.id,
+                                    progress_percent: val,
+                                  }),
+                                }
+                              );
+                              if (!res.ok) {
+                                const body = await res.json().catch(() => ({}));
+                                throw new Error(
+                                  body?.error || "Could not update subtask progress"
+                                );
+                              }
+                            } catch (err: any) {
+                              setSubtasks((prev) =>
+                                prev.map((x) =>
+                                  x.id === st.id
+                                    ? { ...x, progress_percent: before }
+                                    : x
+                                )
+                              );
+                              onError(
+                                err.message || "Could not update subtask progress"
+                              );
+                            }
+                          }}
+                          className="flex-1 h-1"
+                        />
+                        <span className="text-xs text-slate-500 w-9 text-right">
+                          {st.done ? 100 : st.progress_percent ?? 0}%
+                        </span>
+                      </div>
+                    </div>
 
                     <select
                       value={st.assigned_to || ""}
                       onChange={async (e) => {
                         const val = e.target.value || null;
+                        const before = st.assigned_to;
                         setSubtasks((prev) =>
                           prev.map((x) => (x.id === st.id ? { ...x, assigned_to: val } : x))
                         );
                         try {
-                          await fetch(`/api/tasks/${task.id}/subtasks`, {
-                            method: "PUT",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ subtask_id: st.id, assigned_to: val }),
+                          await sendJSON(`/api/tasks/${task.id}/subtasks`, "PUT", {
+                            subtask_id: st.id,
+                            assigned_to: val,
                           });
-                        } catch {
-                          onError("Could not assign subtask");
+                        } catch (err: any) {
+                          setSubtasks((prev) =>
+                            prev.map((x) =>
+                              x.id === st.id ? { ...x, assigned_to: before } : x
+                            )
+                          );
+                          onError(err.message || "Could not assign subtask");
                         }
                       }}
                       className="px-2 py-1 bg-slate-900 border border-slate-600 rounded text-xs"
@@ -1301,15 +1562,20 @@ function TaskCard({
 
                     <button
                       onClick={async () => {
+                        const removed = st;
                         setSubtasks((prev) => prev.filter((x) => x.id !== st.id));
                         try {
-                          await fetch(`/api/tasks/${task.id}/subtasks`, {
-                            method: "DELETE",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ subtask_id: st.id }),
+                          await sendJSON(`/api/tasks/${task.id}/subtasks`, "DELETE", {
+                            subtask_id: st.id,
                           });
-                        } catch {
-                          onError("Could not delete subtask");
+                        } catch (err: any) {
+                          // Put it back where it was, not at the end.
+                          setSubtasks((prev) =>
+                            [...prev, removed].sort(
+                              (a, b) => (a.position ?? 0) - (b.position ?? 0)
+                            )
+                          );
+                          onError(err.message || "Could not delete subtask");
                         }
                       }}
                       className="text-slate-500 hover:text-red-400 text-xs"
@@ -1444,6 +1710,7 @@ function TaskDetail({
   taskDeps,
   teams,
   keyResults,
+  currentUserId,
 }: {
   taskId: string;
   tasks: Task[];
@@ -1456,6 +1723,7 @@ function TaskDetail({
   taskDeps?: Record<string, string[]>;
   teams?: { id: string; name: string }[];
   keyResults?: { id: string; title: string }[];
+  currentUserId?: string | null;
 }) {
   const task = tasks.find((t) => t.id === taskId);
   if (!task) return null;

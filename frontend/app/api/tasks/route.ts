@@ -55,7 +55,7 @@ export async function GET() {
 
     const { data: tasks, error } = await supabase
       .from("tasks")
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, progress_type, progress_target, progress_current, created_by, created_at")
       .in("desk_id", deskIds)
       .is("archived_at", null)
       .order("created_at", { ascending: false });
@@ -79,6 +79,10 @@ export async function POST(request: NextRequest) {
     const { title, description, priority = "medium", status = "pending", due_date, progress_percent = 0, project_id } = body;
 
     if (!title || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    // DOCX #10: a task cannot exist without a due date and time.
+    if (!due_date) {
+      return NextResponse.json({ error: "A due date and time is required" }, { status: 400 });
+    }
 
     const ctx = await resolveContext(supabase, user.id);
     if (!ctx) return NextResponse.json({ error: "No desk/project/stage set up" }, { status: 400 });
@@ -97,7 +101,7 @@ export async function POST(request: NextRequest) {
         progress_percent,
         created_by: user.id,
       })
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, progress_type, progress_target, progress_current, created_by, created_at")
       .single();
 
     if (error) throw error;
@@ -134,7 +138,7 @@ export async function PUT(request: NextRequest) {
     // Only send fields that were actually included in the request, so a
     // cleared date or a zero progress value is saved instead of skipped.
     const patch: Record<string, any> = {};
-    for (const field of ["title", "description", "priority", "status", "progress_percent", "due_date", "assigned_to", "milestone", "archived_at", "team_id", "department_id", "task_manager_id", "key_result_id"]) {
+    for (const field of ["title", "description", "priority", "status", "progress_percent", "due_date", "assigned_to", "milestone", "archived_at", "team_id", "department_id", "task_manager_id", "key_result_id", "progress_type", "progress_target", "progress_current"]) {
       if (Object.prototype.hasOwnProperty.call(body, field)) {
         patch[field] = body[field];
       }
@@ -144,13 +148,46 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
     }
 
+    // DOCX #2 and #10: the assignee cannot move their own deadline. Only the
+    // person who set the work, a named task manager, or a desk supervisor may
+    // change a due date; everyone else has to file an extension request.
+    if (Object.prototype.hasOwnProperty.call(patch, "due_date")) {
+      const { data: current } = await supabase
+        .from("tasks")
+        .select("created_by, assigned_to, task_manager_id")
+        .eq("id", id)
+        .single();
+
+      const { data: membership } = await supabase
+        .from("desk_members")
+        .select("role")
+        .eq("user_id", user.id)
+        .limit(1)
+        .single();
+
+      const privileged =
+        current?.created_by === user.id ||
+        current?.task_manager_id === user.id ||
+        ["supervisor", "manager", "admin"].includes(membership?.role ?? "");
+
+      if (!privileged) {
+        return NextResponse.json(
+          {
+            error:
+              "Only the assignor or a supervisor can change a due date. Request an extension instead.",
+          },
+          { status: 403 }
+        );
+      }
+    }
+
     patch.updated_at = new Date().toISOString();
 
     const { data: task, error } = await supabase
       .from("tasks")
       .update(patch)
       .eq("id", id)
-      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, created_at")
+      .select("id, title, description, priority, status, progress_percent, due_date, assigned_to, milestone, project_id, archived_at, team_id, task_manager_id, key_result_id, progress_type, progress_target, progress_current, created_by, created_at")
       .single();
 
     if (error) throw error;
@@ -179,7 +216,7 @@ export async function PUT(request: NextRequest) {
 
     // SOW #20: on completion, notify everyone connected to the task, not just
     // the assignee - the creator and anyone who commented on it.
-    if (patch.status === "done") {
+    if (patch.status === "done" || patch.status === "closed") {
       try {
         const recipients = new Set<string>();
         if (task.assigned_to) recipients.add(task.assigned_to);
