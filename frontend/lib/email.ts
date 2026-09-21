@@ -72,5 +72,10 @@ export async function sendMail(opts: {
   const to = await emailsForUsers(opts.userIds);
   if (to.length === 0) return false;
 
-  return deliver(to, opts.subject, opts.body);
+  // Round-1 audit fix: this used to put every recipient in one `to` array,
+  // which discloses everyone's address to everyone else in the same batch
+  // (e.g. a task assigned to a whole team). Send one message per recipient
+  // instead - the scheduler's own notify() loop already does this.
+  const results = await Promise.all(to.map((addr) => deliver([addr], opts.subject, opts.body)));
+  return results.some(Boolean);
 }
