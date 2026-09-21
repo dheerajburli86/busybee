@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
 
     const { data, error } = await supabase
       .from("notifications")
-      .select("id, title, message, type, read, created_at")
+      .select("id, title, message, type, read, created_at, task_id")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(50);
@@ -30,14 +30,12 @@ export async function PATCH(request: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const { id } = await request.json();
-    if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+    const { id, all } = await request.json();
+    if (!id && !all) return NextResponse.json({ error: "id or all required" }, { status: 400 });
 
-    const { error } = await supabase
-      .from("notifications")
-      .update({ read: true })
-      .eq("id", id)
-      .eq("user_id", user.id);
+    let q = supabase.from("notifications").update({ read: true }).eq("user_id", user.id);
+    q = all ? q.eq("read", false) : q.eq("id", id);
+    const { error } = await q;
 
     if (error) throw error;
     return NextResponse.json({ ok: true });

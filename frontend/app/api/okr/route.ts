@@ -1,5 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
+import { deny, getMemberships, logActivity, roleIn, MANAGER_ROLES, SUPER_ROLES } from "@/lib/permissions";
 
 // SOW #35 / #36: objectives with key results, and tasks linked to them.
 async function deskFor(supabase: any, userId: string) {
@@ -23,7 +24,7 @@ export async function GET() {
 
     const { data: objectives, error } = await supabase
       .from("objectives")
-      .select("id, title, description, period, created_at")
+      .select("id, title, description, period, owner_id, created_at")
       .eq("desk_id", deskId)
       .order("created_at", { ascending: false });
 
@@ -53,8 +54,17 @@ export async function POST(req: Request) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+    const memberships = await getMemberships(supabase, user.id);
+
     // Adding a key result to an existing objective.
     if (body.objective_id) {
+      const { data: obj } = await supabase.from("objectives").select("id, desk_id, owner_id").eq("id", body.objective_id).maybeSingle();
+      if (!obj || !memberships.some((m) => m.desk_id === obj.desk_id)) {
+        return NextResponse.json({ error: "Objective not found" }, { status: 404 });
+      }
+      if (obj.owner_id !== user.id && !MANAGER_ROLES.includes(roleIn(memberships, obj.desk_id))) {
+        return deny("Only the objective's owner or a manager can add key results.");
+      }
       if (!body.title?.trim()) {
         return NextResponse.json({ error: "Key result needs a title" }, { status: 400 });
       }
@@ -80,6 +90,9 @@ export async function POST(req: Request) {
 
     const deskId = await deskFor(supabase, user.id);
     if (!deskId) return NextResponse.json({ error: "No desk found" }, { status: 400 });
+    if (!MANAGER_ROLES.includes(roleIn(memberships, deskId))) {
+      return deny("Only a manager or supervisor can set objectives.");
+    }
 
     const { data, error } = await supabase
       .from("objectives")
@@ -94,6 +107,7 @@ export async function POST(req: Request) {
       .single();
 
     if (error) throw error;
+    await logActivity(supabase, { entity_type: "okr", entity_id: data.id, action: `set objective "${data.title}"`, performed_by: user.id, desk_id: deskId });
     return NextResponse.json(data);
   } catch (error: any) {
     console.error("POST /api/okr failed:", error);
@@ -112,6 +126,18 @@ export async function PUT(req: Request) {
     const supabase = await createServerSideClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { data: kr } = await supabase.from("key_results").select("id, objective_id").eq("id", key_result_id).maybeSingle();
+    const { data: obj } = kr
+      ? await supabase.from("objectives").select("desk_id, owner_id").eq("id", kr.objective_id).maybeSingle()
+      : { data: null };
+    const memberships = await getMemberships(supabase, user.id);
+    if (!obj || !memberships.some((m) => m.desk_id === obj.desk_id)) {
+      return NextResponse.json({ error: "Key result not found" }, { status: 404 });
+    }
+    if (obj.owner_id !== user.id && !MANAGER_ROLES.includes(roleIn(memberships, obj.desk_id))) {
+      return deny("Only the objective's owner or a manager can update key results.");
+    }
 
     const { data, error } = await supabase
       .from("key_results")

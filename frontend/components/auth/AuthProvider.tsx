@@ -12,35 +12,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const supabase = createClient();
 
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-
+    let cancelled = false;
+    supabase.auth
+      .getSession()
+      .then(({ data: { session } }) => {
+        if (cancelled) return;
         setIsAuthenticated(!!session);
+        if (!session) router.push("/login");
+      })
+      .finally(() => !cancelled && setIsLoading(false));
 
-        if (!session) {
-          router.push("/login");
-        }
+    // Follow sign-outs (and sign-ins in another tab).
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setIsAuthenticated(!!session);
+      if (!session) router.push("/login");
+    });
 
-        // Listen for auth changes
-        const {
-          data: { subscription },
-        } = supabase.auth.onAuthStateChange((_event, session) => {
-          setIsAuthenticated(!!session);
-          if (!session) {
-            router.push("/login");
-          }
-        });
-
-        return () => subscription?.unsubscribe();
-      } finally {
-        setIsLoading(false);
-      }
+    return () => {
+      cancelled = true;
+      subscription?.unsubscribe();
     };
-
-    checkAuth();
   }, [supabase, router]);
 
   if (isLoading) {

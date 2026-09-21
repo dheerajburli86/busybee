@@ -1,6 +1,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { sendMail } from "@/lib/email";
+import { deny, logActivity, requireUser, taskAccess } from "@/lib/permissions";
 
 // SOW #24 (supervisor seeks an update) and #39 (manual reminder).
 // Both are the same action: send a notification about this task to someone.
@@ -19,18 +20,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
 
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const { data: task, error: taskError } = await supabase
-      .from("tasks")
-      .select("id, title, assigned_to, created_by")
-      .eq("id", id)
-      .single();
-
-    if (taskError || !task) {
-      return NextResponse.json({ error: "Task not found" }, { status: 404 });
-    }
+    const access = await taskAccess(supabase, user.id, id);
+    if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
+    // SOW #24: seeking updates is the supervisor's / assignor's job.
+    if (!access.canManage) return deny("Only the assignor or a supervisor can send reminders on this task.");
+    const task = access.task;
 
     // An update request goes to whoever is doing the work; if nobody is
     // assigned there is no one to ask.
@@ -74,6 +71,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         ? `Update requested: ${task.title}`
         : `Reminder: ${task.title}`,
       body: message,
+    });
+
+    await logActivity(supabase, {
+      entity_type: "task",
+      entity_id: id,
+      action: isUpdateRequest ? "requested an update" : "sent a reminder",
+      performed_by: user.id,
+      desk_id: task.desk_id,
     });
 
     return NextResponse.json({ success: true, emailed });

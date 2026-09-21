@@ -19,7 +19,8 @@ export default function LoginPage() {
         password,
       });
       if (error) throw error;
-      router.push('/dashboard');
+      const next = new URLSearchParams(window.location.search).get('next');
+      router.push(next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard');
     } catch (err: any) {
       setError(err.message);
     }
