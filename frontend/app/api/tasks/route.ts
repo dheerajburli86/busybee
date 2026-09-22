@@ -647,13 +647,10 @@ export async function DELETE(request: NextRequest) {
     await supabase.from("notifications").delete().eq("task_id", id);
     await supabase.from("activity_log").delete().eq("entity_type", "task").eq("entity_id", id);
 
-    const { data: gone, error } = await supabase.from("tasks").delete().eq("id", id).select("id");
-    if (error || !gone || gone.length === 0) {
-      // Something in the database still points at it, or deleting isn't
-      // allowed there: archive it instead so it leaves the list either way.
-      if (error) console.error("DELETE /api/tasks fell back to archiving:", error);
-      await supabase.from("tasks").update({ archived_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
-      return NextResponse.json({ ok: true, archived: true });
+    const { error } = await supabase.from("tasks").delete().eq("id", id);
+    if (error) {
+      console.error("DELETE /api/tasks failed:", error);
+      return NextResponse.json({ error: "Could not delete task. It may have dependencies that prevent deletion." }, { status: 400 });
     }
     return NextResponse.json({ ok: true });
   } catch (error: any) {
