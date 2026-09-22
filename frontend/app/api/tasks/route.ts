@@ -622,12 +622,17 @@ export async function DELETE(request: NextRequest) {
     const access = await taskAccess(supabase, user.id, id);
     if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
     const task = access.task;
-    // Reuses the same ownership rule as isPrivateToSomeoneElse (the one
-    // taskAccess itself uses to decide visibility) instead of
-    // re-implementing "personal and mine" inline, so the two can't quietly
-    // drift apart the way the round-1 subtask-reassignment check did.
-    if (!task.personal || isPrivateToSomeoneElse(task, user.id)) {
-      return deny("Only your own private to-do items can be deleted - archive other tasks instead.");
+
+    // #1: personal to-do items can be deleted only by their owner.
+    // Project tasks can be deleted only by those who can manage them (assignor/supervisor).
+    if (task.personal) {
+      if (isPrivateToSomeoneElse(task, user.id)) {
+        return deny("Only your own private to-do items can be deleted.");
+      }
+    } else {
+      if (!access.canManage) {
+        return deny("Only the assignor or a supervisor can delete this task.");
+      }
     }
 
     // Stored files first (the storage rule finds a file through its row),
