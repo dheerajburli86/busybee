@@ -572,6 +572,27 @@ export function TaskDetail({
                 {task.archived_at ? "♻️ Restore" : "🗄️ Archive"}
               </button>
             )}
+            {!task.personal && canManage && (
+              <button
+                onClick={() =>
+                  once("delete", async () => {
+                    if (!window.confirm(`Delete "${task.title}"? This can't be undone.`)) return;
+                    try {
+                      const r = await sendJSON("/api/tasks", "DELETE", { id: task.id });
+                      onInfo(r?.archived ? "It couldn't be deleted completely, so it was archived." : "Task deleted.");
+                      onRemoved?.(task.id);
+                      onClose();
+                    } catch (e: any) {
+                      onError(e.message);
+                    }
+                  })
+                }
+                disabled={busy("delete")}
+                className={`${actionBtn} hover:bg-red-900`}
+              >
+                🗑 Delete
+              </button>
+            )}
           </div>
 
           <div className="flex gap-1 mt-3 text-sm overflow-x-auto">
