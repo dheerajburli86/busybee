@@ -34,9 +34,13 @@ export async function middleware(request: NextRequest) {
   const isPublic = PUBLIC_PATHS.some((p) => path === p || path.startsWith(p + "/"));
 
   if (!user && !isApi && !isPublic) {
+    // Come back to the same page after signing in, query string included
+    // (e.g. /dashboard?task=... from a notification email).
     const url = request.nextUrl.clone();
+    const next = path + request.nextUrl.search;
     url.pathname = "/login";
-    url.searchParams.set("next", path);
+    url.search = "";
+    url.searchParams.set("next", next);
     return NextResponse.redirect(url);
   }
   if (user && isPublic) {

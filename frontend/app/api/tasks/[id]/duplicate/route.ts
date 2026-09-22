@@ -1,7 +1,8 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { getMemberships, logActivity, requireUser, taskAccess } from "@/lib/permissions";
-import { firstSection } from "@/lib/workflow";
+import { firstSection, sectionInProject } from "@/lib/workflow";
+import { isFinished } from "@/lib/status";
 
 export async function POST(
   request: NextRequest,
@@ -40,21 +41,34 @@ export async function POST(
       deskId = proj.desk_id;
       stageId = await firstSection(supabase, proj.id);
     }
-    if (!stageId && original.project_id) stageId = await firstSection(supabase, original.project_id);
+    // A copy is new work: it starts in the first section of its project when
+    // the original has already moved on (e.g. into "Done"), or when the
+    // section isn't part of that project.
+    const copyProject = targetProjectId || original.project_id;
+    if (
+      copyProject &&
+      (!stageId || isFinished(original.status) || !(await sectionInProject(supabase, stageId, copyProject)))
+    ) {
+      stageId = await firstSection(supabase, copyProject);
+    }
 
     // Round-1 audit fix: copying a task whose deadline has already passed
     // used to carry that same past due_date onto the new, just-created copy,
     // so it showed up already overdue before anyone had a chance to act.
     // Keep the original's lead time (creation -> due) but measure it from
     // today instead, same idea as templates/route.ts.
+    // Whole days are added so the deadline keeps its time of day, and the
+    // checklist deadlines move by the same amount.
     let dueDate = original.due_date;
-    if (dueDate && new Date(dueDate).getTime() <= Date.now()) {
+    let shiftMs = 0;
+    const origDue = dueDate ? new Date(dueDate).getTime() : NaN;
+    if (Number.isFinite(origDue) && origDue <= Date.now()) {
       const from = new Date(original.start_date || original.created_at).getTime();
-      const spanMs = Number.isFinite(from) ? new Date(original.due_date).getTime() - from : NaN;
+      const spanMs = Number.isFinite(from) ? origDue - from : NaN;
       const days = Number.isFinite(spanMs) && spanMs > 0 ? Math.round(spanMs / 86400000) : 7;
-      const due = new Date();
-      due.setDate(due.getDate() + Math.max(1, Math.min(days, 365)));
-      dueDate = due.toISOString();
+      const target = Date.now() + Math.max(1, Math.min(days, 365)) * 86400000;
+      shiftMs = Math.ceil((target - origDue) / 86400000) * 86400000;
+      dueDate = new Date(origDue + shiftMs).toISOString();
     }
 
     const { data: duplicated, error: createError } = await supabase
@@ -90,18 +104,33 @@ export async function POST(
       .select("title, position, due_date, progress_type, progress_target")
       .eq("task_id", taskId)
       .order("position", { ascending: true });
+    const newDue = dueDate ? new Date(dueDate).getTime() : NaN;
+    const itemDue = (d: string | null) => {
+      if (!d) return null;
+      const t = new Date(d).getTime() + shiftMs;
+      if (!Number.isFinite(t) || t <= Date.now()) return null; // no stale deadlines on new work
+      return new Date(Number.isFinite(newDue) ? Math.min(t, newDue) : t).toISOString();
+    };
+    let copiedItems = 0;
+    let warning: string | undefined;
     if (items && items.length) {
-      await supabase.from("subtasks").insert(
+      const { error: itemsError } = await supabase.from("subtasks").insert(
         items.map((it: any, i: number) => ({
           task_id: duplicated.id,
           title: it.title,
           position: it.position ?? i,
-          due_date: it.due_date,
+          due_date: itemDue(it.due_date),
           progress_type: it.progress_type || "percent",
           progress_target: it.progress_target,
           created_by: user.id,
         }))
       );
+      if (itemsError) {
+        console.error("copying the checklist failed:", itemsError);
+        warning = "The task was copied, but its checklist couldn't be.";
+      } else {
+        copiedItems = items.length;
+      }
     }
 
     await logActivity(supabase, {
@@ -113,7 +142,7 @@ export async function POST(
       changes: { from_task_id: taskId },
     });
 
-    return NextResponse.json({ task: { ...duplicated, subtask_count: items?.length || 0, for_me: !!original.personal } });
+    return NextResponse.json({ task: { ...duplicated, subtask_count: copiedItems, for_me: !!original.personal }, warning });
   } catch (error: any) {
     console.error("POST duplicate failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

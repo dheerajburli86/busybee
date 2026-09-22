@@ -51,18 +51,29 @@ export default function ActivityPage() {
   const [to, setTo] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Don't load until the project in the address (?project_id=) has been read,
+  // or the desk-wide history could arrive last and replace the project's.
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search).get("project_id");
     if (p) setProjectId(p);
-    Promise.all([fetch("/api/projects"), fetch("/api/team/members")]).then(async ([pr, m]) => {
-      if (pr.ok) setProjects((await pr.json()).projects || []);
-      if (m.ok) setPeople((await m.json()).members || []);
-    });
+    setReady(true);
+    Promise.all([fetch("/api/projects"), fetch("/api/team/members")])
+      .then(async ([pr, m]) => {
+        if (pr.ok) setProjects((await pr.json()).projects || []);
+        if (m.ok) setPeople((await m.json()).members || []);
+      })
+      .catch(() => {
+        /* the filters just stay empty */
+      });
   }, []);
 
   useEffect(() => {
+    if (!ready) return;
+    let current = true;
     setLoading(true);
+    setError("");
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     if (person) qs.set("user_id", person);
@@ -70,14 +81,18 @@ export default function ActivityPage() {
     if (to) qs.set("to", new Date(`${to}T23:59:59`).toISOString());
     fetch(`/api/activity?${qs}`, { cache: "no-store" })
       .then(async (r) => {
-        const d = await r.json();
+        const d = await r.json().catch(() => ({}));
+        if (!current) return;
         if (!r.ok) throw new Error(d.error || "Could not load history");
         setEntries(d.entries || []);
         setNames(d.names || {});
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, [projectId, person, from, to]);
+      .catch((e) => current && setError(e.message))
+      .finally(() => current && setLoading(false));
+    return () => {
+      current = false;
+    };
+  }, [ready, projectId, person, from, to]);
 
   const inputCls = "px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm";
 

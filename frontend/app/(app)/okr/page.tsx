@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
@@ -35,6 +35,8 @@ export default function OkrPage() {
   const [keyResults, setKeyResults] = useState<KeyResult[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  // Stops a double click from adding the same objective or key result twice.
+  const busy = useRef(false);
   const [error, setError] = useState("");
   const [newObjective, setNewObjective] = useState("");
   const [newKr, setNewKr] = useState<Record<string, { title: string; target: string }>>({});
@@ -68,7 +70,8 @@ export default function OkrPage() {
   }, []);
 
   const addObjective = async () => {
-    if (!newObjective.trim()) return;
+    if (!newObjective.trim() || busy.current) return;
+    busy.current = true;
     try {
       const res = await fetch("/api/okr", {
         method: "POST",
@@ -81,6 +84,8 @@ export default function OkrPage() {
       setNewObjective("");
     } catch (e: any) {
       setError(e.message);
+    } finally {
+      busy.current = false;
     }
   };
 
@@ -89,6 +94,8 @@ export default function OkrPage() {
     const title = draft.title.trim();
     if (!title) return;
     const target = Number(draft.target) > 0 ? Number(draft.target) : 100;
+    if (busy.current) return;
+    busy.current = true;
     try {
       const res = await fetch("/api/okr", {
         method: "POST",
@@ -101,6 +108,8 @@ export default function OkrPage() {
       setNewKr((prev) => ({ ...prev, [objectiveId]: { title: "", target: "" } }));
     } catch (e: any) {
       setError(e.message);
+    } finally {
+      busy.current = false;
     }
   };
 
@@ -128,7 +137,7 @@ export default function OkrPage() {
     if (krs.length === 0) return 0;
     const total = krs.reduce((sum, k) => {
       const target = Number(k.target_value) || 1;
-      return sum + Math.min((Number(k.current_value) / target) * 100, 100);
+      return sum + Math.max(0, Math.min((Number(k.current_value) / target) * 100, 100));
     }, 0);
     return Math.round(total / krs.length);
   };
@@ -149,8 +158,9 @@ export default function OkrPage() {
         </div>
 
         {error && (
-          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">
-            {error}
+          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-3">
+            <span>{error}</span>
+            <button onClick={() => setError("")} className="text-red-200 hover:text-white" aria-label="Dismiss">✕</button>
           </div>
         )}
 
@@ -194,10 +204,10 @@ export default function OkrPage() {
                     <div className="space-y-3 mb-3">
                       {krs.map((k) => {
                         const target = Number(k.target_value) || 1;
-                        const kpct = Math.min(
+                        const kpct = Math.max(0, Math.min(
                           Math.round((Number(k.current_value) / target) * 100),
                           100
-                        );
+                        ));
                         // SOW #36: tasks linked to this key result
                         const linked = tasks.filter((t) => t.key_result_id === k.id);
                         return (

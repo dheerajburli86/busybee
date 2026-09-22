@@ -58,17 +58,22 @@ export default function ReportsPage() {
   }, []);
 
   useEffect(() => {
+    // Switching period quickly: only the latest request may fill the page.
+    let current = true;
     setLoading(true);
     setError("");
     const qs = new URLSearchParams({ period, date, ...(projectId ? { project_id: projectId } : {}) });
     fetch(`/api/reports?${qs}`, { cache: "no-store" })
       .then(async (r) => {
-        const d = await r.json();
+        const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || "Could not build the report");
-        setReport(d);
+        if (current) setReport(d);
       })
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch((e) => current && setError(e.message))
+      .finally(() => current && setLoading(false));
+    return () => {
+      current = false;
+    };
   }, [period, date, projectId]);
 
   const download = () => {
@@ -84,12 +89,16 @@ export default function ReportsPage() {
       ["Activity", report.activity.map((a) => ({ when: a.created_at, who: a.user_name, task: a.task_title, action: a.action }))],
     ];
     const text = sections.map(([title, rows]) => `${title}\n${toCsv(rows) || "(none)"}`).join("\n\n");
-    const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+    // The byte-order mark makes Excel read names with non-English letters correctly.
+    const url = URL.createObjectURL(new Blob(["\uFEFF" + text], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
     a.href = url;
     a.download = `busybee-${report.period}-report-${date}.csv`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    // Give the browser time to start the download before freeing it.
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
 
   const card = "bg-slate-800 border border-slate-700 rounded p-4";
@@ -115,7 +124,7 @@ export default function ReportsPage() {
             {p.label}
           </button>
         ))}
-        <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Report ending on" />
+        <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Report date (the day, week or month containing it)" />
         <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Project">
           <option value="">All projects</option>
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}

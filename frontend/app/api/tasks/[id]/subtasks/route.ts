@@ -6,9 +6,10 @@
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { deny, logActivity, notifyMany, requireUser, taskAccess, taskAudience } from "@/lib/permissions";
+import { deny, logActivity, notifyMany, notOnDesk, requireUser, taskAccess, taskAudience } from "@/lib/permissions";
 import { recomputeTaskProgress } from "@/lib/progress";
 import { autoCompleteFromChecklist } from "@/lib/workflow";
+import { normalizeTimestamp } from "@/lib/format";
 
 const COLUMNS =
   "id, title, done, progress_percent, position, assigned_to, due_date, progress_type, progress_target, progress_current, created_by";
@@ -52,12 +53,21 @@ export async function POST(request: NextRequest, { params }: Params) {
     // SOW #14: team members working on the task may break it down further.
     if (!access.canWork) return deny("Only people working on this task can add subtasks.");
 
-    const { title, due_date, assigned_to, progress_type, progress_target } = await request.json();
-    if (!title || !title.trim()) {
+    const body = await request.json();
+    const { title, assigned_to, progress_type, progress_target } = body;
+    if (typeof title !== "string" || !title.trim()) {
       return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    }
+    const due_date = body.due_date ? normalizeTimestamp(body.due_date) : null;
+    if (body.due_date && !due_date) {
+      return NextResponse.json({ error: "That deadline isn't a valid date" }, { status: 400 });
     }
     if (due_date && access.task.due_date && new Date(due_date) > new Date(access.task.due_date)) {
       return NextResponse.json({ error: "A subtask can't be due after its task" }, { status: 400 });
+    }
+    if (assigned_to) {
+      const problem = await notOnDesk(supabase, access.task.desk_id, { assigned_to });
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
     }
 
     const { count } = await supabase
@@ -159,8 +169,19 @@ export async function PUT(request: NextRequest, { params }: Params) {
     if (("assigned_to" in patch || "due_date" in patch || "progress_target" in patch) && !access.canManage && !mine) {
       return deny("Only the assignor, supervisor or the person already doing this item can change who does it or when.");
     }
+    if ("due_date" in patch && patch.due_date) {
+      const due = normalizeTimestamp(patch.due_date);
+      if (!due) return NextResponse.json({ error: "That deadline isn't a valid date" }, { status: 400 });
+      patch.due_date = due;
+    } else if ("due_date" in patch) {
+      patch.due_date = null;
+    }
     if (patch.due_date && access.task.due_date && new Date(patch.due_date) > new Date(access.task.due_date)) {
       return NextResponse.json({ error: "A subtask can't be due after its task" }, { status: 400 });
+    }
+    if ("assigned_to" in patch && patch.assigned_to) {
+      const problem = await notOnDesk(supabase, access.task.desk_id, { assigned_to: patch.assigned_to });
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
     }
     patch.updated_at = new Date().toISOString();
 

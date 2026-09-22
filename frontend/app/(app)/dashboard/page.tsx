@@ -22,9 +22,14 @@ const SORT_OPTIONS = [
   { value: "created_at", label: "Newest first" },
   { value: "due_date", label: "Due date" },
   { value: "priority", label: "Priority" },
-  { value: "progress", label: "Progress (% complete)" },
+  { value: "progress", label: "Progress (most done first)" },
+  { value: "progress_asc", label: "Progress (least done first)" },
   { value: "completed_at", label: "Date of completion" },
 ];
+
+// Board column for cards whose value has no column of its own (an old
+// status, a deleted section/department, someone no longer on the desk).
+const OTHER_COLUMN = "__other";
 
 const BOARD_GROUPS = [
   { value: "status", label: "Status" },
@@ -277,12 +282,14 @@ export default function DashboardPage() {
       .filter((t) => (assigneeF ? (assigneeF === "none" ? !t.assigned_to : t.assigned_to === assigneeF) : true))
       .sort((a, b) => {
         if (sortBy === "due_date") {
+          if (!a.due_date && !b.due_date) return 0;
           if (!a.due_date) return 1;
           if (!b.due_date) return -1;
           return a.due_date.localeCompare(b.due_date);
         }
         if (sortBy === "priority") return (PRIORITY_RANK[b.priority] ?? 0) - (PRIORITY_RANK[a.priority] ?? 0);
         if (sortBy === "progress") return (b.progress_percent || 0) - (a.progress_percent || 0);
+        if (sortBy === "progress_asc") return (a.progress_percent || 0) - (b.progress_percent || 0);
         if (sortBy === "completed_at") {
           // Finished work first, most recently finished at the top.
           if (!a.completed_at && !b.completed_at) return 0;
@@ -316,8 +323,16 @@ export default function DashboardPage() {
       : boardBy === "assignee"
       ? t.assigned_to || ""
       : boardBy === "department"
-      ? t.department_id || ""
+      ? // Work given to a team shows under that team's department.
+        t.department_id || lookups.teams.find((x) => x.id === t.team_id)?.department_id || ""
       : t.status || "pending";
+
+  const knownColumns = new Set(columns.map((c) => c.key));
+  const boardColumns = filtered.some((t) => !knownColumns.has(columnOf(t)))
+    ? [...columns, { key: OTHER_COLUMN, label: "Other" }]
+    : columns;
+  const inColumn = (t: Task, key: string) =>
+    key === OTHER_COLUMN ? !knownColumns.has(columnOf(t)) : columnOf(t) === key;
 
   const moveTo = (id: string, key: string) => {
     const field = BOARD_FIELD[boardBy] || "status";
@@ -328,6 +343,10 @@ export default function DashboardPage() {
 
   const dropOn = (key: string) => {
     if (!dragged) return;
+    if (key === OTHER_COLUMN) {
+      setDragged(null);
+      return;
+    }
     moveTo(dragged, key);
     setDragged(null);
   };
@@ -621,8 +640,8 @@ export default function DashboardPage() {
         </div>
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-2 snap-x">
-          {columns.map((col) => {
-            const list = filtered.filter((t) => columnOf(t) === col.key);
+          {boardColumns.map((col) => {
+            const list = filtered.filter((t) => inColumn(t, col.key));
             return (
               <div
                 key={col.key || "none"}
@@ -641,7 +660,12 @@ export default function DashboardPage() {
                     <div
                       key={t.id}
                       draggable
-                      onDragStart={() => setDragged(t.id)}
+                      onDragStart={(e) => {
+                        // Firefox only starts a drag when some data is set.
+                        e.dataTransfer.setData("text/plain", t.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        setDragged(t.id);
+                      }}
                       onDragEnd={() => setDragged(null)}
                       onClick={() => setOpenId(t.id)}
                       className={`bg-slate-900 p-3 rounded border cursor-pointer hover:border-blue-500 text-sm ${
@@ -694,6 +718,11 @@ export default function DashboardPage() {
           onAdd={(t) => setTasks((prev) => [t, ...prev])}
           onError={showError}
           onInfo={showInfo}
+          onTemplateSaved={(tpl) => setTemplates((prev) => (prev.some((x) => x.id === tpl.id) ? prev : [...prev, tpl]))}
+          onRemoved={(id) => {
+            setTasks((prev) => prev.filter((x) => x.id !== id));
+            setArchivedTasks((prev) => prev.filter((x) => x.id !== id));
+          }}
         />
       )}
     </div>

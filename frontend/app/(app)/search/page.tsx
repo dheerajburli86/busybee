@@ -12,6 +12,13 @@ type Results = {
   files: { id: string; file_name: string; task_id: string; task_title: string; download_url: string }[];
 };
 
+const ROLE_LABEL: Record<string, string> = {
+  member: "Team member",
+  manager: "Team manager",
+  supervisor: "Supervisor",
+  admin: "Admin",
+};
+
 const TYPES = [
   { value: "", label: "Everything" },
   { value: "projects", label: "Projects" },
@@ -27,29 +34,53 @@ export default function SearchPage() {
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [results, setResults] = useState<Results | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     setQ(p.get("q") || "");
     setProjectId(p.get("project_id") || "");
-    fetch("/api/projects").then((r) => (r.ok ? r.json() : { projects: [] })).then((d) => setProjects(d.projects || []));
+    fetch("/api/projects")
+      .then((r) => (r.ok ? r.json() : { projects: [] }))
+      .then((d) => setProjects(d.projects || []))
+      .catch(() => setProjects([]));
+    // A new search from the header while this page is open.
+    const onSearch = (e: Event) => setQ(String((e as CustomEvent).detail || ""));
+    window.addEventListener("bb-search", onSearch);
+    return () => window.removeEventListener("bb-search", onSearch);
   }, []);
 
   useEffect(() => {
     if (q.trim().length < 2) {
       setResults(null);
+      setError("");
       return;
     }
+    // Only the latest search may update the screen.
+    let current = true;
     const t = setTimeout(() => {
       setLoading(true);
       const qs = new URLSearchParams({ q: q.trim(), ...(type ? { type } : {}), ...(projectId ? { project_id: projectId } : {}) });
       fetch(`/api/search?${qs}`)
-        .then((r) => r.json())
-        .then((d) => setResults(d))
-        .finally(() => setLoading(false));
+        .then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!current) return;
+          if (!r.ok) {
+            setResults(null);
+            setError(d?.error || (r.status === 401 ? "Your session has expired - please sign in again." : "Search failed"));
+            return;
+          }
+          setError("");
+          setResults({ projects: d.projects || [], tasks: d.tasks || [], people: d.people || [], files: d.files || [] });
+        })
+        .catch(() => current && setError("Search failed - check your connection"))
+        .finally(() => current && setLoading(false));
       window.history.replaceState(null, "", `/search?${qs}`);
     }, 250);
-    return () => clearTimeout(t);
+    return () => {
+      current = false;
+      clearTimeout(t);
+    };
   }, [q, type, projectId]);
 
   const total = results ? results.projects.length + results.tasks.length + results.people.length + results.files.length : 0;
@@ -75,6 +106,7 @@ export default function SearchPage() {
       </div>
 
       {q.trim().length < 2 && <p className="text-slate-400 text-sm">Type at least two characters.</p>}
+      {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
       {loading && <p className="text-slate-400 text-sm">Searching...</p>}
       {results && !loading && total === 0 && <p className="text-slate-400">Nothing found for "{q}".</p>}
 
@@ -108,7 +140,7 @@ export default function SearchPage() {
             <div key={p.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex justify-between gap-2">
               <div>
                 <p className="font-semibold">{p.name}</p>
-                <p className="text-xs text-slate-500">{p.email} · {p.role}</p>
+                <p className="text-xs text-slate-500">{p.email} · {ROLE_LABEL[p.role] || "Team member"}</p>
               </div>
               <a href={`/dashboard?assignee=${p.id}`} className="text-xs text-blue-400 self-center">
                 Their tasks

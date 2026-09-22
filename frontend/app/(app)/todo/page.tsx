@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { isFinished, isOverdue } from "@/lib/status";
 import { sendJSON } from "@/lib/api";
-import { formatDue, fromLocalInput } from "@/components/tasks/types";
+import { formatDue, fromLocalInput, milestoneLabel } from "@/components/tasks/types";
 
 type Task = {
   id: string;
@@ -115,12 +115,26 @@ export default function TodoPage() {
     }
   };
 
+  // #1: delete one of your own private items.
+  const removeItem = async (t: Task) => {
+    if (!window.confirm(`Delete "${t.title}"? This can't be undone.`)) return;
+    const before = tasks;
+    setTasks((prev) => prev.filter((x) => x.id !== t.id));
+    try {
+      await sendJSON("/api/tasks", "DELETE", { id: t.id });
+    } catch (err: any) {
+      setTasks(before);
+      setError(err.message || "Could not delete that item");
+    }
+  };
+
   const toggleDone = async (t: Task) => {
     const next = isFinished(t.status) ? "pending" : "done";
     const before = t.status;
     setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, status: next } : x)));
     try {
-      await sendJSON("/api/tasks", "PUT", { id: t.id, status: next });
+      const r = await sendJSON("/api/tasks", "PUT", { id: t.id, status: next });
+      if (r?.task) setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, ...r.task } : x)));
     } catch (err: any) {
       setTasks((prev) => prev.map((x) => (x.id === t.id ? { ...x, status: before } : x)));
       setError(err.message || "Could not update that item");
@@ -130,7 +144,9 @@ export default function TodoPage() {
   const toggleItem = async (it: Item) => {
     setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, done: !it.done } : x)));
     try {
-      await sendJSON(`/api/tasks/${it.task_id}/subtasks`, "PUT", { subtask_id: it.id, done: !it.done });
+      const r = await sendJSON(`/api/tasks/${it.task_id}/subtasks`, "PUT", { subtask_id: it.id, done: !it.done });
+      // Ticking the last item can complete the task it belongs to.
+      if (r?.task?.id) setTasks((prev) => prev.map((x) => (x.id === r.task.id ? { ...x, ...r.task } : x)));
     } catch (err: any) {
       setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, done: it.done } : x)));
       setError(err.message || "Could not update that item");
@@ -230,16 +246,23 @@ export default function TodoPage() {
               >
                 <input type="checkbox" checked={false} onChange={() => toggleDone(t)} className="mt-1" aria-label={`Mark ${t.title} done`} />
                 <div className="flex-1 min-w-0">
-                  <a href={`/dashboard?task=${t.id}`} className="text-slate-200 hover:text-blue-400 break-words">
-                    {t.personal && "🔒 "}
-                    {t.title}
-                  </a>
+                  <div className="flex items-start justify-between gap-2">
+                    <a href={`/dashboard?task=${t.id}`} className="text-slate-200 hover:text-blue-400 break-words">
+                      {t.personal && "🔒 "}
+                      {t.title}
+                    </a>
+                    {t.personal && (
+                      <button onClick={() => removeItem(t)} className="text-slate-500 hover:text-red-400 text-xs px-1 shrink-0" aria-label={`Delete ${t.title}`}>
+                        🗑
+                      </button>
+                    )}
+                  </div>
                   <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500 mt-1 items-center">
                     <span>{PRIORITY_LABEL[t.priority] ?? t.priority}</span>
                     <span>{t.progress_percent}%</span>
                     {t.due_date && <span>Due {formatDue(t.due_date)}</span>}
                     {!t.assigned_to && <span>for your team</span>}
-                    {t.milestone && <span>📍 {t.milestone}</span>}
+                    {t.milestone && <span>📍 {milestoneLabel(t.milestone)}</span>}
                     {isOverdue(t) && <span className="text-red-400 font-semibold">OVERDUE</span>}
                     <label className="flex items-center gap-1">
                       ⏰
@@ -278,7 +301,12 @@ export default function TodoPage() {
               {done.map((t) => (
                 <div key={t.id} className="bg-slate-800 border border-slate-700 rounded p-3 flex items-start gap-3 opacity-60">
                   <input type="checkbox" checked={true} onChange={() => toggleDone(t)} className="mt-1" aria-label={`Re-open ${t.title}`} />
-                  <p className="text-slate-400 line-through break-words">{t.title}</p>
+                  <p className="text-slate-400 line-through break-words flex-1">{t.title}</p>
+                  {t.personal && (
+                    <button onClick={() => removeItem(t)} className="text-slate-500 hover:text-red-400 text-xs px-1" aria-label={`Delete ${t.title}`}>
+                      🗑
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

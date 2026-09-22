@@ -7,7 +7,7 @@
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { getMemberships, requireUser, visibleTasks, SUPER_ROLES } from "@/lib/permissions";
+import { getMemberships, requireUser, visibleProjects, visibleTasks, SUPER_ROLES } from "@/lib/permissions";
 import { attachNames } from "@/lib/names";
 import { namesForChanges } from "@/lib/describe";
 import { inChunks, selectAll, selectUpTo } from "@/lib/chunks";
@@ -43,6 +43,10 @@ export async function GET(request: NextRequest) {
     let titles = new Map<string, string>();
 
     if (projectId) {
+      // Only a project this person can see.
+      if (!(await visibleProjects(supabase, user.id)).some((p: any) => p.id === projectId)) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
       // Every task in the project this person may see, and the project itself.
       const tasks = await selectAll<any>(() => supabase.from("tasks").select("*").in("desk_id", deskIds).eq("project_id", projectId).order("id"));
       const visible = await visibleTasks(supabase, user.id, tasks);
@@ -51,8 +55,19 @@ export async function GET(request: NextRequest) {
       taskRows = await inChunks<any>(entityIds, (part) =>
         filters(supabase.from("activity_log").select(COLS).in("entity_id", part)).order("created_at", { ascending: false }).limit(MAX)
       );
+    } else if (!isSuper) {
+      // Start from the tasks this person may see (on a busy desk, the newest
+      // history overall could be all about other people's work).
+      const tasks = await selectAll<any>(() => supabase.from("tasks").select("*").in("desk_id", deskIds).order("id"));
+      const visible = await visibleTasks(supabase, user.id, tasks);
+      titles = new Map(visible.map((t: any) => [t.id, t.title]));
+      taskRows = await inChunks<any>(visible.map((t: any) => t.id), (part) =>
+        filters(supabase.from("activity_log").select(COLS).in("entity_id", part).eq("entity_type", "task"))
+          .order("created_at", { ascending: false })
+          .limit(MAX)
+      );
     } else {
-      // The desk's newest task history, then keep what this person may see.
+      // Supervisors see the whole desk: its newest task history.
       const recent = await selectUpTo<any>(
         () =>
           filters(supabase.from("activity_log").select(COLS).in("desk_id", deskIds).eq("entity_type", "task"))

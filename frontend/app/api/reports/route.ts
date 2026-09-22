@@ -1,9 +1,10 @@
 // Checklist #38 / SOW #42: daily, weekly and monthly MIS reports.
 //
 // GET /api/reports?period=daily|weekly|monthly[&date=YYYY-MM-DD][&project_id=]
-// The window ends at the end of `date` (default today, IST) and runs back one
-// day, seven days or one calendar month. Everything is computed from tasks
-// the caller is allowed to see.
+// Calendar periods in IST around `date` (default today): daily = that day,
+// weekly = its Monday-to-Sunday week, monthly = its calendar month. A period
+// that includes today runs up to the end of today. Everything is computed from
+// tasks the caller is allowed to see.
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
@@ -16,15 +17,30 @@ const IST_OFFSET_MIN = 330;
 
 const istDate = (d: Date) => new Date(d.getTime() + IST_OFFSET_MIN * 60000).toISOString().slice(0, 10);
 
+const shiftDay = (ymd: string, days: number) => {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
 function windowFor(period: string, dateStr: string | null) {
-  // Whole IST calendar days: daily = that day, weekly = 7 days, monthly = 30 days.
-  const valid = dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
-  const ymd = valid ? (dateStr as string) : new Date(Date.now() + IST_OFFSET_MIN * 60000).toISOString().slice(0, 10);
-  const end = new Date(`${ymd}T23:59:59.999+05:30`);
-  const start = new Date(`${ymd}T00:00:00+05:30`);
-  const back = period === "monthly" ? 29 : period === "weekly" ? 6 : 0;
-  start.setTime(start.getTime() - back * 86400000);
-  return { start, end };
+  const today = istDate(new Date());
+  const valid = !!dateStr && /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && !isNaN(new Date(`${dateStr}T00:00:00Z`).getTime());
+  const ymd = valid ? (dateStr as string) : today;
+  let first = ymd;
+  let last = ymd;
+  if (period === "weekly") {
+    const monday = (new Date(`${ymd}T00:00:00Z`).getUTCDay() + 6) % 7; // days since Monday
+    first = shiftDay(ymd, -monday);
+    last = shiftDay(first, 6);
+  } else if (period === "monthly") {
+    first = `${ymd.slice(0, 8)}01`;
+    const d = new Date(`${first}T00:00:00Z`);
+    d.setUTCMonth(d.getUTCMonth() + 1, 0); // last day of that month
+    last = d.toISOString().slice(0, 10);
+  }
+  if (first <= today && last > today) last = today;
+  return { start: new Date(`${first}T00:00:00+05:30`), end: new Date(`${last}T23:59:59.999+05:30`) };
 }
 
 export async function GET(request: NextRequest) {

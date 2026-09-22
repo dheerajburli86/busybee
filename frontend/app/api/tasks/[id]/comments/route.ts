@@ -9,6 +9,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { deny, logActivity, notifyMany, requireUser, taskAccess, SUPER_ROLES } from "@/lib/permissions";
+import { handleFor, mentionsIn } from "@/lib/mentions";
 import { sendMail } from "@/lib/email";
 
 type Params = { params: Promise<{ id: string }> };
@@ -39,13 +40,11 @@ async function present(supabase: any, userId: string, rows: any[]) {
 
 /** @handles in the text -> the people they refer to on this desk. */
 async function mentionedPeople(supabase: any, deskId: string, content: string): Promise<Set<string>> {
-  const mentions: string[] = Array.from(
-    new Set<string>(((content.match(/@[A-Za-z0-9._-]+/g) || []) as string[]).map((m) => m.slice(1).toLowerCase()))
-  );
+  const mentions = mentionsIn(content);
   const recipients = new Set<string>();
   if (mentions.length === 0) return recipients;
 
-  const slug = (name: string) => (name || "").toLowerCase().replace(/\s+/g, "");
+  const slug = handleFor;
 
   const { data: mates } = await supabase
     .from("desk_members")
@@ -54,7 +53,7 @@ async function mentionedPeople(supabase: any, deskId: string, content: string): 
   for (const dm of mates || []) {
     const u: any = (dm as any).users;
     if (!u) continue;
-    const handles = [slug(u.full_name || ""), (u.email || "").split("@")[0].toLowerCase()].filter(Boolean);
+    const handles = [slug(u.full_name || ""), slug((u.email || "").split("@")[0])].filter(Boolean);
     if (mentions.some((m) => handles.includes(m))) recipients.add(u.id);
   }
 
@@ -72,8 +71,13 @@ async function mentionedPeople(supabase: any, deskId: string, content: string): 
     (data || []).forEach((t: any) => !teamIds.includes(t.id) && teamIds.push(t.id));
   }
   if (teamIds.length) {
-    const { data } = await supabase.from("team_members").select("user_id").in("team_id", teamIds);
+    const [{ data }, { data: led }] = await Promise.all([
+      supabase.from("team_members").select("user_id").in("team_id", teamIds),
+      supabase.from("teams").select("manager_id").in("id", teamIds),
+    ]);
     (data || []).forEach((m: any) => m.user_id && recipients.add(m.user_id));
+    // A team's manager is part of the team for tagging too.
+    (led || []).forEach((t: any) => t.manager_id && recipients.add(t.manager_id));
   }
   if (groupIds.length) {
     const { data } = await supabase.from("group_members").select("user_id").in("group_id", groupIds);

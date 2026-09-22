@@ -2,7 +2,7 @@
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { logActivity } from "@/lib/permissions";
+import { DESK_ROLE_VALUES, logActivity, normalizeRole } from "@/lib/permissions";
 
 export async function GET(request: NextRequest) {
   try {
@@ -30,12 +30,11 @@ export async function GET(request: NextRequest) {
       id: dm.user_id,
       email: dm.users?.email,
       name: dm.users?.full_name || dm.users?.email,
-      role: dm.role || "member",
+      role: normalizeRole(dm.role),
     })) || [];
 
     // The caller's own role decides whether the UI offers role editing.
-    const myRole =
-      data?.find((dm: any) => dm.user_id === user.id)?.role || "member";
+    const myRole = normalizeRole(data?.find((dm: any) => dm.user_id === user.id)?.role);
 
     // Supervisors also see accounts waiting to be let in.
     let pending: any[] = [];
@@ -68,7 +67,7 @@ export async function POST(request: NextRequest) {
     const { data: memberships } = await supabase.from("desk_members").select("desk_id, role").eq("user_id", user.id);
     const desk = (memberships || [])[0];
     if (!desk) return NextResponse.json({ error: "You are not on a desk" }, { status: 403 });
-    if (!["admin", "supervisor"].includes(desk.role)) {
+    if (!["admin", "supervisor"].includes(normalizeRole(desk.role))) {
       return NextResponse.json({ error: "Only a supervisor or admin can add people" }, { status: 403 });
     }
 
@@ -88,26 +87,29 @@ export async function POST(request: NextRequest) {
 
 // SOW #27 / #28: promote someone to supervisor, manager or admin.
 //
-// Only an existing privileged member may do this. There is one exception: a
-// brand new desk has nobody privileged, so the change is allowed while no
-// supervisor, manager or admin exists yet. That lets the first person set
-// themselves up without a manual SQL statement, and closes as soon as one
-// privileged member exists.
+// Only an existing supervisor or admin may do this, and only an admin can make
+// someone an admin or change an admin's role (while a desk has no admin at all,
+// a supervisor may appoint the first). One exception: a brand new desk
+// has nobody privileged, so while no supervisor or admin exists anyone on the
+// desk may set roles - that lets the first person set themselves up without a
+// SQL statement, and closes as soon as one privileged member exists.
+//
+// The rules are applied inside the database (bb_set_desk_role, which also
+// locks the desk so two people can't both grab the first admin role at the
+// same moment). If that function isn't installed yet, the same rules run here.
 export async function PUT(request: NextRequest) {
-  const ROLES = ["member", "manager", "supervisor", "admin"];
-
   try {
     const supabase = await createServerSideClient();
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { user_id, role } = await request.json();
-    if (!user_id) {
+    if (!user_id || typeof user_id !== "string") {
       return NextResponse.json({ error: "user_id required" }, { status: 400 });
     }
-    if (!ROLES.includes(role)) {
+    if (!DESK_ROLE_VALUES.includes(role)) {
       return NextResponse.json(
-        { error: `role must be one of: ${ROLES.join(", ")}` },
+        { error: `role must be one of: ${DESK_ROLE_VALUES.join(", ")}` },
         { status: 400 }
       );
     }
@@ -122,55 +124,65 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "You are not on a desk" }, { status: 403 });
     }
 
-    const { data: deskMembers } = await supabase
-      .from("desk_members")
-      .select("user_id, role")
-      .in("desk_id", deskIds);
-
-    // Checklist #21: only supervisors and admins manage desk roles, and only
-    // an admin can make someone else an admin.
-    const privileged = ["supervisor", "admin"];
-    const myRole =
-      deskMembers?.find((m: any) => m.user_id === user.id)?.role || "member";
-    const anyPrivileged = (deskMembers || []).some((m: any) =>
-      privileged.includes(m.role || "member")
-    );
-
-    if (!privileged.includes(myRole) && anyPrivileged) {
-      return NextResponse.json(
-        { error: "Only a supervisor or admin can change roles" },
-        { status: 403 }
-      );
-    }
-    if (role === "admin" && myRole !== "admin" && anyPrivileged) {
-      return NextResponse.json({ error: "Only an admin can make someone an admin" }, { status: 403 });
+    const rpc = await supabase.rpc("bb_set_desk_role", { p_user: user_id, p_role: role });
+    const rpcMissing =
+      !!rpc.error &&
+      (rpc.error.code === "PGRST202" || /could not find the function|does not exist/i.test(rpc.error.message || ""));
+    if (rpc.error && !rpcMissing) {
+      const msg = rpc.error.message || "Could not change the role";
+      const status = rpc.error.code === "42501" ? 403 : 400;
+      return NextResponse.json({ error: msg }, { status });
     }
 
-    // Don't let the last privileged member demote themselves and lock
-    // everyone out of role management.
-    if (
-      user_id === user.id &&
-      privileged.includes(myRole) &&
-      !privileged.includes(role)
-    ) {
-      const others = (deskMembers || []).filter(
-        (m: any) => m.user_id !== user.id && privileged.includes(m.role || "member")
-      );
-      if (others.length === 0) {
+    if (rpcMissing) {
+      const { data: deskMembers } = await supabase
+        .from("desk_members")
+        .select("user_id, role")
+        .in("desk_id", deskIds);
+
+      const privileged = ["supervisor", "admin"];
+      const roleOf = (id: string) => normalizeRole(deskMembers?.find((m: any) => m.user_id === id)?.role);
+      const myRole = roleOf(user.id);
+      const anyPrivileged = (deskMembers || []).some((m: any) => privileged.includes(normalizeRole(m.role)));
+
+      if (!(deskMembers || []).some((m: any) => m.user_id === user_id)) {
+        return NextResponse.json({ error: "That person isn't on your desk" }, { status: 400 });
+      }
+      if (!privileged.includes(myRole) && anyPrivileged) {
+        return NextResponse.json({ error: "Only a supervisor or admin can change roles" }, { status: 403 });
+      }
+      const anyAdmin = (deskMembers || []).some((m: any) => normalizeRole(m.role) === "admin");
+      if ((role === "admin" || roleOf(user_id) === "admin") && myRole !== "admin" && anyAdmin) {
+        return NextResponse.json({ error: "Only an admin can make someone an admin or change an admin's role" }, { status: 403 });
+      }
+      // Don't let the last privileged member demote themselves and lock
+      // everyone out of role management.
+      if (user_id === user.id && privileged.includes(myRole) && !privileged.includes(role)) {
+        const others = (deskMembers || []).filter(
+          (m: any) => m.user_id !== user.id && privileged.includes(normalizeRole(m.role))
+        );
+        if (others.length === 0) {
+          return NextResponse.json({ error: "You are the only supervisor - promote someone else first" }, { status: 400 });
+        }
+      }
+
+      const { data: changed, error } = await supabase
+        .from("desk_members")
+        .update({ role })
+        .eq("user_id", user_id)
+        .in("desk_id", deskIds)
+        .select("user_id");
+      if (error) throw error;
+      // Row security can silently skip the update; say so instead of
+      // pretending it worked.
+      if (!changed || changed.length === 0) {
         return NextResponse.json(
-          { error: "You are the only supervisor - promote someone else first" },
-          { status: 400 }
+          { error: "The database didn't allow the role change. Run the latest BusyBee migration in Supabase, then try again." },
+          { status: 409 }
         );
       }
     }
 
-    const { error } = await supabase
-      .from("desk_members")
-      .update({ role })
-      .eq("user_id", user_id)
-      .in("desk_id", deskIds);
-
-    if (error) throw error;
     await logActivity(supabase, {
       entity_type: "team", entity_id: deskIds[0], action: `changed a desk role to ${role}`,
       performed_by: user.id, desk_id: deskIds[0], changes: { user_id, role },

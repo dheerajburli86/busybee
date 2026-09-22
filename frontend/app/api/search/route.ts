@@ -8,7 +8,7 @@
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { getMemberships, requireUser, visibleProjects, visibleTasks, SUPER_ROLES, roleIn } from "@/lib/permissions";
+import { getMemberships, requireUser, visibleProjects, visibleTasks, SUPER_ROLES, roleIn, normalizeRole } from "@/lib/permissions";
 import { inChunks } from "@/lib/chunks";
 
 const LIMIT = 25;
@@ -111,7 +111,7 @@ export async function GET(request: NextRequest) {
         .in("desk_id", deskIds);
       const seen = new Set<string>();
       out.people = (mates || [])
-        .map((m: any) => ({ id: m.user_id, name: m.users?.full_name || m.users?.email, email: m.users?.email, role: m.role || "member" }))
+        .map((m: any) => ({ id: m.user_id, name: m.users?.full_name || m.users?.email, email: m.users?.email, role: normalizeRole(m.role) }))
         .filter((p: any) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
         .filter((p: any) => `${p.name || ""} ${p.email || ""}`.toLowerCase().includes(q))
         .slice(0, LIMIT);

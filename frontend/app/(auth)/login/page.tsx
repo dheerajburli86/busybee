@@ -2,17 +2,21 @@
 
 import { createClient } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const signingIn = useRef(false);
   const router = useRouter();
   const supabase = createClient();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (signingIn.current) return;
+    signingIn.current = true;
+    setError('');
     try {
       const { error } = await supabase.auth.signInWithPassword({
         email,
@@ -20,9 +24,11 @@ export default function LoginPage() {
       });
       if (error) throw error;
       const next = new URLSearchParams(window.location.search).get('next');
-      router.push(next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard');
+      // Only ever go back to a page of this site ("//x" and "/\x" are other sites).
+      router.push(next && /^\/(?![\/\\])/.test(next) ? next : '/dashboard');
     } catch (err: any) {
       setError(err.message);
+      signingIn.current = false;
     }
   };
 

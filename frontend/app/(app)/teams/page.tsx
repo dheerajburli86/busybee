@@ -4,7 +4,7 @@
 // and custom groups. Controls only appear for people allowed to use them;
 // the server enforces the same rules.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { PeoplePicker } from "@/components/tasks/TaskDetail";
 
@@ -75,7 +75,13 @@ export default function TeamsPage() {
     load();
   }, []);
 
+  const posting = useRef(false);
   const call = async (method: "POST" | "PUT" | "DELETE", body: any) => {
+    // A double click on "Create" mustn't make two of the same thing.
+    if (method === "POST") {
+      if (posting.current) return null;
+      posting.current = true;
+    }
     try {
       const r = await sendJSON("/api/teams", method, body);
       await load();
@@ -83,6 +89,8 @@ export default function TeamsPage() {
     } catch (e: any) {
       setError(e.message);
       return null;
+    } finally {
+      if (method === "POST") posting.current = false;
     }
   };
 
@@ -133,7 +141,7 @@ export default function TeamsPage() {
     <div className="max-w-4xl mx-auto p-3 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-bold mb-2">Teams &amp; permissions</h1>
       <p className="text-sm text-slate-400 mb-6">
-        Your role: <span className="text-slate-200">{DESK_ROLES.find((r) => r.value === role)?.label}</span>
+        Your role: <span className="text-slate-200">{DESK_ROLES.find((r) => r.value === role)?.label ?? role}</span>
         {managed.length > 0 && ` · you manage ${managed.length} team${managed.length > 1 ? "s" : ""}`}
       </p>
 
@@ -219,7 +227,7 @@ export default function TeamsPage() {
                 {d.name}
                 <span className="text-xs text-slate-500">{teams.filter((t) => t.department_id === d.id).length} teams</span>
                 {isSuper && (
-                  <button onClick={() => confirm(`Delete ${d.name}?`) && call("DELETE", { kind: "department", id: d.id })} className="text-slate-500 hover:text-red-400" aria-label="Delete department">✕</button>
+                  <button onClick={() => confirm(`Delete ${d.name}? Its teams stay but leave the department, and work given to the department becomes unassigned.`) && call("DELETE", { kind: "department", id: d.id })} className="text-slate-500 hover:text-red-400" aria-label="Delete department">✕</button>
                 )}
               </span>
             ))}
@@ -276,7 +284,7 @@ export default function TeamsPage() {
                             <option value="">No manager</option>
                             {people.map((p) => <option key={p.id} value={p.id}>Manager: {p.name}</option>)}
                           </select>
-                          <button onClick={() => confirm(`Delete team ${t.name}?`) && call("DELETE", { kind: "team", id: t.id })} className="text-slate-500 hover:text-red-400">Delete</button>
+                          <button onClick={() => confirm(`Delete team ${t.name}? Its projects and the work given to the team become unassigned.`) && call("DELETE", { kind: "team", id: t.id })} className="text-slate-500 hover:text-red-400">Delete</button>
                         </>
                       ) : (
                         <span className="text-slate-400">
@@ -367,7 +375,7 @@ export default function TeamsPage() {
                 <div key={g.id} className="bg-slate-900 rounded p-3">
                   <div className="flex justify-between items-center gap-2 mb-2">
                     <p className="font-semibold">{g.name} <span className="text-xs text-slate-500 font-normal">by {nameFor(g.created_by)}</span></p>
-                    {mine && <button onClick={() => confirm(`Delete group ${g.name}?`) && call("DELETE", { kind: "group", id: g.id })} className="text-xs text-slate-500 hover:text-red-400">Delete</button>}
+                    {mine && <button onClick={() => confirm(`Delete group ${g.name}? Work given to the group becomes unassigned.`) && call("DELETE", { kind: "group", id: g.id })} className="text-xs text-slate-500 hover:text-red-400">Delete</button>}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {members.map((m) => (

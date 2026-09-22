@@ -21,6 +21,19 @@ import { selectAll } from "@/lib/chunks";
 
 export const SUPER_ROLES = ["admin", "supervisor"];
 export const MANAGER_ROLES = ["admin", "supervisor", "manager"];
+export const DESK_ROLE_VALUES = ["member", "manager", "supervisor", "admin"];
+
+/**
+ * desk_members.role as the app understands it. Data from the original app
+ * can hold "owner" (whoever set the desk up) or odd casing/spacing; "owner"
+ * is the desk's admin. Anything else unknown counts as a plain member, so
+ * nobody gains rights by accident.
+ */
+export function normalizeRole(raw: unknown): string {
+  const r = String(raw ?? "").trim().toLowerCase();
+  if (r === "owner" || r === "administrator" || r === "superadmin" || r === "super_admin") return "admin";
+  return DESK_ROLE_VALUES.includes(r) ? r : "member";
+}
 
 export type Membership = { desk_id: string; role: string };
 
@@ -48,7 +61,7 @@ export async function getMemberships(supabase: any, userId: string): Promise<Mem
     .from("desk_members")
     .select("desk_id, role")
     .eq("user_id", userId);
-  return (data || []).map((m: any) => ({ desk_id: m.desk_id, role: m.role || "member" }));
+  return (data || []).map((m: any) => ({ desk_id: m.desk_id, role: normalizeRole(m.role) }));
 }
 
 export function roleIn(memberships: Membership[], deskId: string | null | undefined): string {
@@ -360,4 +373,35 @@ export async function requireUser(supabase: any) {
     data: { user },
   } = await supabase.auth.getUser();
   return user as { id: string; email?: string } | null;
+}
+
+/**
+ * The people and units a task (or subtask) is given to must be on the same
+ * desk. Returns a message for the first one that isn't, or null. Shared by
+ * every route that writes assigned_to/task_manager_id/team_id/etc. so this
+ * check can't silently drift between them (subtasks used to skip it
+ * entirely - see round-2 audit).
+ */
+export async function notOnDesk(
+  supabase: any,
+  deskId: string,
+  refs: { assigned_to?: any; task_manager_id?: any; team_id?: any; department_id?: any; group_id?: any }
+): Promise<string | null> {
+  for (const [key, what] of [["assigned_to", "That person"], ["task_manager_id", "That task manager"]] as const) {
+    const v = refs[key];
+    if (!v) continue;
+    const { data } = await supabase.from("desk_members").select("user_id").eq("desk_id", deskId).eq("user_id", v).limit(1);
+    if (!data || data.length === 0) return `${what} isn't on this desk`;
+  }
+  for (const [key, table, what] of [
+    ["team_id", "teams", "That team"],
+    ["department_id", "departments", "That department"],
+    ["group_id", "groups", "That group"],
+  ] as const) {
+    const v = refs[key];
+    if (!v) continue;
+    const { data } = await supabase.from(table).select("desk_id").eq("id", v).maybeSingle();
+    if (!data || data.desk_id !== deskId) return `${what} isn't on this desk`;
+  }
+  return null;
 }

@@ -6,14 +6,15 @@
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Lookups } from "./types";
+import { handleFor } from "@/lib/mentions";
 
 type Option = { handle: string; label: string; kind: string };
 
-const slug = (s: string) => (s || "").toLowerCase().replace(/\s+/g, "");
+const slug = handleFor;
 
 export function mentionOptions(lookups: Lookups): Option[] {
   const people = lookups.people.map((p) => ({
-    handle: (p.email || "").split("@")[0].toLowerCase() || slug(p.name),
+    handle: slug((p.email || "").split("@")[0]) || slug(p.name),
     label: p.name,
     kind: "person",
   }));

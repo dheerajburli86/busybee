@@ -1,7 +1,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { sendMail } from "@/lib/email";
-import { deny, logActivity, requireUser, taskAccess } from "@/lib/permissions";
+import { deny, logActivity, requireUser, taskAccess, unitMemberIds } from "@/lib/permissions";
 
 // SOW #24 (supervisor seeks an update) and #39 (manual reminder).
 // Both are the same action: send a notification about this task to someone.
@@ -29,44 +29,45 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!access.canManage) return deny("Only the assignor or a supervisor can send reminders on this task.");
     const task = access.task;
 
-    // An update request goes to whoever is doing the work; if nobody is
-    // assigned there is no one to ask.
-    const target = task.assigned_to;
-    if (!target) {
+    // It goes to whoever is doing the work: the named assignee, or - for work
+    // given to a team, department or group with nobody named - everyone in
+    // that unit.
+    const doers: string[] = task.assigned_to
+      ? [task.assigned_to]
+      : await unitMemberIds(supabase, { teamId: task.team_id, departmentId: task.department_id, groupId: task.group_id });
+    const targets = Array.from(new Set(doers.filter((x) => x && x !== user.id)));
+    if (targets.length === 0) {
       return NextResponse.json(
-        { error: "Assign the task to someone before sending a reminder" },
+        { error: "Nobody else is working on this task yet - assign it to someone first" },
         { status: 400 }
       );
     }
 
     const isUpdateRequest = kind === "update_request";
+    const message =
+      String(note || "").trim().slice(0, 500) ||
+      (isUpdateRequest
+        ? `An update was requested on: ${task.title}`
+        : `Reminder about: ${task.title}`);
 
-    const { error } = await supabase.from("notifications").insert({
-      user_id: target,
-      task_id: id,
-      type: isUpdateRequest ? "update_request" : "reminder",
-      title: isUpdateRequest ? "Update requested" : "Reminder",
-      message:
-        note ||
-        (isUpdateRequest
-          ? `An update was requested on: ${task.title}`
-          : `Reminder about: ${task.title}`),
-      read: false,
-    });
+    const { error } = await supabase.from("notifications").insert(
+      targets.map((uid) => ({
+        user_id: uid,
+        task_id: id,
+        type: isUpdateRequest ? "update_request" : "reminder",
+        title: isUpdateRequest ? "Update requested" : "Reminder",
+        message,
+        read: false,
+      }))
+    );
 
     if (error) throw error;
 
     // SOW #39: the reminder also goes out by email when mail is configured.
     // A failed or unconfigured send must not fail the request, so the result
     // is reported rather than thrown.
-    const message =
-      note ||
-      (isUpdateRequest
-        ? `An update was requested on: ${task.title}`
-        : `Reminder about: ${task.title}`);
-
     const emailed = await sendMail({
-      userIds: [target],
+      userIds: targets,
       subject: isUpdateRequest
         ? `Update requested: ${task.title}`
         : `Reminder: ${task.title}`,
@@ -81,7 +82,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       desk_id: task.desk_id,
     });
 
-    return NextResponse.json({ success: true, emailed });
+    return NextResponse.json({ success: true, emailed, sent_to: targets.length });
   } catch (error: any) {
     console.error("POST /api/tasks/[id]/remind failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

@@ -13,8 +13,23 @@ export type Room = {
   created_by: string | null;
 };
 
-/** Make sure the org room and a room for each team/department exist. */
-export async function ensureDefaultRooms(supabase: any, deskId: string) {
+// When each desk's default rooms were last checked (per server instance).
+const lastEnsured = new Map<string, number>();
+
+/**
+ * Make sure the org room and a room for each team/department exist. Checked
+ * at most once a minute per desk (pass `force` right after creating a team or
+ * department). The database function does it in one step and can see every
+ * room; the fallback below is for a database without it.
+ */
+export async function ensureDefaultRooms(supabase: any, deskId: string, force = false) {
+  const now = Date.now();
+  if (!force && now - (lastEnsured.get(deskId) || 0) < 60000) return;
+  lastEnsured.set(deskId, now);
+
+  const { error: rpcError } = await supabase.rpc("bb_ensure_default_rooms", { p_desk: deskId });
+  if (!rpcError) return;
+
   const [{ data: rooms }, { data: teams }, { data: depts }] = await Promise.all([
     supabase.from("chat_rooms").select("id, kind, team_id, department_id, name").eq("desk_id", deskId),
     supabase.from("teams").select("id, name").eq("desk_id", deskId),

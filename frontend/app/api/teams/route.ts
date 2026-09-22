@@ -9,6 +9,7 @@ import {
   roleIn,
   SUPER_ROLES,
 } from "@/lib/permissions";
+import { ensureDefaultRooms } from "@/lib/chat";
 
 // Checklist #23 / #25 / #26, SOW #41: departments, teams, custom groups.
 //
@@ -181,6 +182,7 @@ export async function POST(req: Request) {
         entity_type: "department", entity_id: data.id, action: `created department ${data.name}`,
         performed_by: user.id, desk_id: deskId,
       });
+      await ensureDefaultRooms(supabase, deskId, true); // its chat room
       return NextResponse.json(data);
     }
 
@@ -204,6 +206,7 @@ export async function POST(req: Request) {
       entity_type: "team", entity_id: data.id, action: `created team ${data.name}`,
       performed_by: user.id, desk_id: deskId,
     });
+    await ensureDefaultRooms(supabase, deskId, true); // its chat room
     return NextResponse.json(data);
   } catch (error: any) {
     console.error("POST /api/teams failed:", error);
@@ -311,6 +314,12 @@ export async function DELETE(req: Request) {
       if (group.created_by !== user.id && !isSuper && !leavingSelf) {
         return deny("Only the group's creator or a supervisor can change it.");
       }
+      if (kind === "group") {
+        // Work given to the group becomes unassigned rather than pointing at
+        // a group that no longer exists.
+        await supabase.from("tasks").update({ group_id: null }).eq("group_id", group.id);
+        await supabase.from("group_members").delete().eq("group_id", group.id);
+      }
       await supabase.from(kind === "group" ? "groups" : "group_members").delete().eq("id", id);
       await logActivity(supabase, {
         entity_type: "group", entity_id: group.id,
@@ -324,6 +333,18 @@ export async function DELETE(req: Request) {
     const table = kind === "department" ? "departments" : "teams";
     const { data: row } = await supabase.from(table).select("id, name, desk_id").eq("id", id).maybeSingle();
     if (!row || row.desk_id !== deskId) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    // Nothing may be left pointing at the removed department or team: its
+    // projects and tasks become unassigned (a project of a deleted team would
+    // otherwise disappear for its members), its teams leave the department.
+    if (kind === "department") {
+      await supabase.from("teams").update({ department_id: null }).eq("department_id", id);
+      await supabase.from("tasks").update({ department_id: null }).eq("department_id", id);
+    } else {
+      await supabase.from("projects").update({ team_id: null }).eq("team_id", id);
+      await supabase.from("tasks").update({ team_id: null }).eq("team_id", id);
+      await supabase.from("team_members").delete().eq("team_id", id);
+    }
 
     const { error } = await supabase.from(table).delete().eq("id", id);
     if (error) throw error;

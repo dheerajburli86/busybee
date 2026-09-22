@@ -132,7 +132,10 @@ export function GanttView({
     setDrag(null);
   };
 
-  const Bar = ({ t }: { t: Task }) => {
+  // A plain function, not a component: a component defined inside render is a
+  // new type on every render, so each pointer move during a drag would
+  // re-create every bar and drop the handle's pointer capture.
+  const renderBar = (t: Task) => {
     const s = startOf(t);
     const e = endOf(t);
     const left = pct(Math.min(s, e));
@@ -180,7 +183,13 @@ export function GanttView({
       </div>
 
       <div className="overflow-x-auto">
-        <div className="min-w-[720px]" onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerLeave={onPointerUp}>
+        <div
+          className="min-w-[720px]"
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerUp}
+          onPointerCancel={() => setDrag(null)}
+        >
           {/* Axis */}
           <div className="grid grid-cols-[180px_1fr] gap-2">
             <div />
@@ -231,7 +240,7 @@ export function GanttView({
                             {t.title}
                             <span className="block text-[10px] text-slate-500 truncate">{nameOf(people, t.assigned_to)}</span>
                           </button>
-                          <Bar t={t} />
+                          {renderBar(t)}
                         </div>
                         {children.map((s) => {
                           const sStart = startOf(t);

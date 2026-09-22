@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
@@ -35,18 +35,23 @@ export default function TimesheetPage() {
   const [me, setMe] = useState<string | null>(null);
   const [role, setRole] = useState("member");
   const [viewing, setViewing] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+  // Whose timesheet the latest request was for; older answers are ignored.
+  const latest = useRef("");
   const router = useRouter();
   const isLead = ["admin", "supervisor", "manager"].includes(role);
   const mine = !viewing || viewing === me;
 
   const load = async (who = viewing) => {
+    latest.current = who;
     try {
       const [e, t, m] = await Promise.all([
         fetch(`/api/timesheet${who ? `?user_id=${who}` : ""}`, { cache: "no-store" }),
         fetch("/api/tasks"),
         fetch("/api/team/members"),
       ]);
-      const ed = await e.json();
+      const ed = await e.json().catch(() => ({}));
+      if (latest.current !== who) return;
       if (!e.ok) throw new Error(ed.error || "Could not load the timesheet");
       setEntries(ed.entries || []);
       if (t.ok) setTasks((await t.json()).tasks || []);
@@ -57,9 +62,9 @@ export default function TimesheetPage() {
         setRole(md.myRole || "member");
       }
     } catch (err: any) {
-      setError(err.message);
+      if (latest.current === who) setError(err.message);
     } finally {
-      setLoading(false);
+      if (latest.current === who) setLoading(false);
     }
   };
 
@@ -68,11 +73,13 @@ export default function TimesheetPage() {
   }, []);
 
   const addEntry = async () => {
+    if (saving) return;
     if (!hours || Number(hours) <= 0) {
       setError("Enter how many hours you spent");
       return;
     }
     setError("");
+    setSaving(true);
     try {
       const res = await fetch("/api/timesheet", {
         method: "POST",
@@ -92,6 +99,8 @@ export default function TimesheetPage() {
       setTaskId("");
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -156,6 +165,8 @@ export default function TimesheetPage() {
               onChange={(e) => {
                 const who = e.target.value === me ? "" : e.target.value;
                 setViewing(who);
+                setEntries([]);
+                setError("");
                 setLoading(true);
                 load(who);
               }}
@@ -216,9 +227,10 @@ export default function TimesheetPage() {
             />
             <button
               onClick={addEntry}
-              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm"
+              disabled={saving}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm"
             >
-              Log time
+              {saving ? "Saving..." : "Log time"}
             </button>
           </div>
         </div>
@@ -236,7 +248,7 @@ export default function TimesheetPage() {
                   <div key={d}>
                     <div className="flex justify-between items-center mb-2">
                       <h2 className="text-sm font-semibold text-slate-300">
-                        {new Date(d).toLocaleDateString(undefined, {
+                        {new Date(`${d}T12:00:00`).toLocaleDateString(undefined, {
                           weekday: "long",
                           day: "numeric",
                           month: "short",

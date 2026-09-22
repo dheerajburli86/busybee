@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isFinished, isOverdue } from "@/lib/status";
 import { sendJSON } from "@/lib/api";
 
@@ -27,6 +27,10 @@ export default function ProjectsPage() {
   const [managedTeams, setManagedTeams] = useState<string[]>([]);
   const [role, setRole] = useState("member");
   const [loading, setLoading] = useState(true);
+  // Stops a double click from creating a project or comment twice.
+  const busy = useRef(false);
+  // The project whose details are open, for answers that arrive late.
+  const openRef = useRef<string | null>(null);
   const [error, setError] = useState("");
   const [openProject, setOpenProject] = useState<string | null>(null);
   const [sectionsOpen, setSectionsOpen] = useState<string | null>(null);
@@ -47,6 +51,20 @@ export default function ProjectsPage() {
         const pd = await p.json();
         if (!p.ok) throw new Error(pd.error || "Could not load projects");
         setProjects(pd.projects || []);
+        // The server works out each project's figures over all of its tasks.
+        const serverStats: Record<string, Stats> = {};
+        const serverSections: Record<string, number> = {};
+        (pd.projects || []).forEach((proj: any) => {
+          if (proj.stats) serverStats[proj.id] = proj.stats;
+          (proj.sections || []).forEach((sec: any) => {
+            if (typeof sec.task_count === "number") serverSections[sec.id] = sec.task_count;
+          });
+        });
+        const haveServerStats = Object.keys(serverStats).length > 0;
+        if (haveServerStats) {
+          setStats(serverStats);
+          setSectionCounts(serverSections);
+        }
 
         if (tm.ok) {
           const d = await tm.json();
@@ -55,8 +73,8 @@ export default function ProjectsPage() {
           setManagedTeams(d.managedTeams || []);
         }
 
-        // Roll task progress (already rolled up from subtasks) to project level.
-        if (t.ok) {
+        // Older server without figures: roll up the tasks this person can see.
+        if (t.ok && !haveServerStats) {
           const tasks = (await t.json()).tasks || [];
           const s: Record<string, Stats> = {};
           const perSection: Record<string, number> = {};
@@ -83,11 +101,14 @@ export default function ProjectsPage() {
 
   const openPanel = async (project: Project) => {
     setOpenProject(project.id);
+    openRef.current = project.id;
     setDescDraft(project.description || "");
     setComments([]);
     try {
       const c = await fetch(`/api/projects/comments?project_id=${project.id}`);
-      if (c.ok) setComments((await c.json()).comments || []);
+      const list = c.ok ? (await c.json()).comments || [] : [];
+      // Opening another project meanwhile: these comments aren't for it.
+      if (openRef.current === project.id) setComments(list);
     } catch {
       setError("Could not load project details");
     }
@@ -123,7 +144,8 @@ export default function ProjectsPage() {
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!creating.name.trim()) return;
+    if (!creating.name.trim() || busy.current) return;
+    busy.current = true;
     try {
       const p = await sendJSON("/api/projects", "POST", {
         name: creating.name.trim(),
@@ -134,17 +156,22 @@ export default function ProjectsPage() {
       setCreating({ name: "", description: "", team: "" });
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      busy.current = false;
     }
   };
 
   const addComment = async (projectId: string) => {
-    if (!draft.trim()) return;
+    if (!draft.trim() || busy.current) return;
+    busy.current = true;
     try {
       const body = await sendJSON("/api/projects/comments", "POST", { project_id: projectId, content: draft.trim() });
       setComments((prev) => [...prev, body]);
       setDraft("");
     } catch (e: any) {
       setError(e.message);
+    } finally {
+      busy.current = false;
     }
   };
 
@@ -208,7 +235,7 @@ export default function ProjectsPage() {
                   Team: {teamName(project.team_id) || "not assigned"} · created {new Date(project.created_at).toLocaleDateString()}
                 </p>
 
-                {s ? (
+                {s && s.total > 0 ? (
                   <div className="mt-4">
                     <div className="flex justify-between text-xs text-slate-400 mb-1">
                       <span>

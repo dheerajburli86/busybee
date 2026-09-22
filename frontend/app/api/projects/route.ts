@@ -11,6 +11,7 @@ import {
   SUPER_ROLES,
 } from "@/lib/permissions";
 import { inChunks } from "@/lib/chunks";
+import { isFinished } from "@/lib/status";
 
 // Projects. Supervisors/admins see and manage every project on their desk.
 // A team manager manages the projects assigned to their team (checklist #23).
@@ -34,7 +35,51 @@ export async function GET() {
       .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0) || String(a.created_at).localeCompare(String(b.created_at)))
       .forEach((st: any) => byProject.set(st.project_id, [...(byProject.get(st.project_id) || []), { id: st.id, name: st.name || "Section", position: st.position ?? 0 }]));
 
-    return NextResponse.json({ projects: out.map((p: any) => ({ ...p, sections: byProject.get(p.id) || [] })) });
+    // Checklist #33 / #37: each project's progress over ALL of its tasks - the
+    // same figures for everyone, archived (finished) work included, private
+    // to-do items left out. Counting only the tasks one person can see gave
+    // different numbers to different people, and finished work dropped out of
+    // the figures once it was archived.
+    const projectTasks = await inChunks<any>(
+      out.map((p: any) => p.id),
+      (part) =>
+        supabase
+          .from("tasks")
+          .select("id, project_id, stage_id, status, progress_percent, due_date, archived_at, personal")
+          .in("project_id", part)
+          .order("id"),
+      { all: true }
+    );
+    const stats = new Map<string, { total: number; done: number; overdue: number; sum: number }>();
+    const perSection = new Map<string, number>();
+    const now = Date.now();
+    for (const t of projectTasks) {
+      if (t.personal) continue;
+      const s = stats.get(t.project_id) || { total: 0, done: 0, overdue: 0, sum: 0 };
+      const finished = isFinished(t.status);
+      s.total += 1;
+      if (finished) s.done += 1;
+      s.sum += finished ? 100 : Math.max(0, Math.min(100, Number(t.progress_percent) || 0));
+      if (!finished && !t.archived_at && t.due_date && new Date(t.due_date).getTime() < now) s.overdue += 1;
+      stats.set(t.project_id, s);
+      if (t.stage_id && !t.archived_at) perSection.set(t.stage_id, (perSection.get(t.stage_id) || 0) + 1);
+    }
+
+    return NextResponse.json({
+      projects: out.map((p: any) => {
+        const s = stats.get(p.id);
+        return {
+          ...p,
+          sections: (byProject.get(p.id) || []).map((sec: any) => ({ ...sec, task_count: perSection.get(sec.id) || 0 })),
+          stats: {
+            total: s?.total || 0,
+            done: s?.done || 0,
+            overdue: s?.overdue || 0,
+            progress: s && s.total ? Math.round(s.sum / s.total) : 0,
+          },
+        };
+      }),
+    });
   } catch (error: any) {
     console.error("GET /api/projects failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

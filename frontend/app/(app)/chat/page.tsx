@@ -47,6 +47,9 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const room = rooms.find((r) => r.id === roomId) || null;
+  // The room on screen right now, for answers that arrive after a switch.
+  const roomRef = useRef<string | null>(null);
+  roomRef.current = roomId;
 
   const loadRooms = useCallback(async () => {
     const r = await fetch("/api/chat/rooms", { cache: "no-store" });
@@ -91,10 +94,16 @@ export default function ChatPage() {
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
+    // Don't show the previous room's messages under this room's name.
+    setMessages([]);
     const load = async () => {
-      const r = await fetch(`/api/chat?room_id=${roomId}`, { cache: "no-store" });
-      const d = await r.json();
-      if (!cancelled && r.ok) setMessages(d.messages || []);
+      try {
+        const r = await fetch(`/api/chat?room_id=${roomId}`, { cache: "no-store" });
+        const d = await r.json();
+        if (!cancelled && r.ok) setMessages(d.messages || []);
+      } catch {
+        /* try again on the next update or poll */
+      }
     };
     load();
     markSeen(roomId);
@@ -123,17 +132,38 @@ export default function ChatPage() {
   // Search across every room you can see.
   useEffect(() => {
     if (search.trim().length < 2) return setResults(null);
+    let current = true;
     const t = setTimeout(() => {
       fetch(`/api/chat?q=${encodeURIComponent(search.trim())}`)
-        .then((r) => r.json())
-        .then((d) => setResults(d.messages || []));
+        .then(async (r) => {
+          const d = await r.json().catch(() => ({}));
+          if (!current) return;
+          if (!r.ok) {
+            setError(d?.error || "Message search failed");
+            setResults([]);
+            return;
+          }
+          setResults(d.messages || []);
+        })
+        .catch(() => current && setError("Message search failed - check your connection"));
     }, 250);
-    return () => clearTimeout(t);
+    return () => {
+      current = false;
+      clearTimeout(t);
+    };
   }, [search]);
 
   const nameFor = (id: string) => {
     const m = members.find((x) => x.id === id);
     return m?.name || m?.email || "Someone";
+  };
+
+  // A private chat is named after the OTHER people in it, so each person sees
+  // who they're talking to (its stored name is the creator's view).
+  const roomLabel = (r: Room) => {
+    if (r.kind !== "private" || !me) return r.name;
+    const others = Array.from(new Set([r.created_by, ...r.members].filter((x): x is string => !!x && x !== me)));
+    return others.length ? others.map(nameFor).join(", ") : r.name;
   };
   const online = (id: string) => presence[id]?.online;
 
@@ -141,8 +171,12 @@ export default function ChatPage() {
     if (!draft.trim() || !roomId) return;
     setSending(true);
     try {
-      const msg = await sendJSON("/api/chat", "POST", { content: draft.trim(), room_id: roomId });
-      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      const sentTo = roomId;
+      const msg = await sendJSON("/api/chat", "POST", { content: draft.trim(), room_id: sentTo });
+      // Only add it here if that room is still the one on screen.
+      if (roomRef.current === sentTo) {
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      }
       setDraft("");
       markSeen(roomId);
     } catch (e: any) {
@@ -152,8 +186,10 @@ export default function ChatPage() {
     }
   };
 
+  const creatingRoom = useRef(false);
   const createRoom = async () => {
-    if (!creating) return;
+    if (!creating || creatingRoom.current) return;
+    creatingRoom.current = true;
     try {
       const r = await sendJSON("/api/chat/rooms", "POST", { kind: creating.kind, name: creating.name, user_ids: creating.people });
       setCreating(null);
@@ -161,11 +197,13 @@ export default function ChatPage() {
       setRoomId(r.id);
     } catch (e: any) {
       setError(e.message);
+    } finally {
+      creatingRoom.current = false;
     }
   };
 
   const deleteRoom = async (r: Room) => {
-    if (!confirm(`Delete "${r.name}" and all its messages?`)) return;
+    if (!confirm(`Delete "${roomLabel(r)}" and all its messages?`)) return;
     try {
       await sendJSON("/api/chat/rooms", "DELETE", { room_id: r.id });
       setRoomId(null);
@@ -225,7 +263,7 @@ export default function ChatPage() {
           {/* Rooms */}
           <aside className="bg-slate-800 border border-slate-700 rounded p-3 md:h-[70vh] md:overflow-y-auto">
             <button onClick={() => setShowRooms(!showRooms)} className="md:hidden w-full text-left text-sm font-semibold mb-2">
-              {room ? `# ${room.name}` : "Rooms"} {showRooms ? "▲" : "▼"}
+              {room ? `# ${roomLabel(room)}` : "Rooms"} {showRooms ? "▲" : "▼"}
             </button>
             <div className={`${showRooms ? "" : "hidden"} md:block`}>
               <div className="flex gap-2 mb-3">
@@ -245,7 +283,7 @@ export default function ChatPage() {
                         ) : (
                           <span className="text-slate-500">#</span>
                         )}
-                        <span className="truncate flex-1">{r.name}</span>
+                        <span className="truncate flex-1">{roomLabel(r)}</span>
                         {unread(r) && <span className="w-2 h-2 rounded-full bg-blue-400 shrink-0" aria-label="New messages" />}
                       </button>
                     );
@@ -328,7 +366,7 @@ export default function ChatPage() {
                   }
                 }}
                 rows={1}
-                placeholder={room ? `Message #${room.name}...` : "Pick a room"}
+                placeholder={room ? `Message #${roomLabel(room)}...` : "Pick a room"}
                 disabled={sending || !room}
                 className={`${inputCls} flex-1 resize-none`}
               />

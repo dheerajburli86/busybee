@@ -14,6 +14,9 @@ export const STATUSES = [
   { value: "closed", label: "Closed" },
 ];
 
+export const STATUS_VALUES = STATUSES.map((s) => s.value);
+export const PRIORITY_VALUES = ["super_high", "high", "medium", "low"];
+
 /** Statuses that mean the work is finished. */
 export const TERMINAL_STATUSES = ["done", "closed"];
 

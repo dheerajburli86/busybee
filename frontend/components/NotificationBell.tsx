@@ -94,7 +94,11 @@ export function NotificationBell() {
         {unread > 0 && <span className="ml-1 bg-red-600 text-white text-xs rounded-full px-1.5">{unread}</span>}
       </button>
       {open && (
-        <div className="absolute right-0 mt-2 w-[min(22rem,calc(100vw-1.5rem))] bg-slate-800 border border-slate-700 rounded shadow-lg z-50" role="dialog" aria-label="Notifications">
+        <div
+          className="fixed left-3 right-3 top-14 sm:absolute sm:left-auto sm:top-auto sm:right-0 sm:mt-2 sm:w-[22rem] bg-slate-800 border border-slate-700 rounded shadow-lg z-50"
+          role="dialog"
+          aria-label="Notifications"
+        >
           <div className="flex justify-between items-center px-3 py-2 border-b border-slate-700">
             <span className="text-sm font-semibold">Notifications</span>
             {unread > 0 && (

@@ -39,13 +39,27 @@ export function AppNav() {
   }, []);
 
   const logout = async () => {
-    await createClient().auth.signOut();
-    router.push("/login");
+    // Sign out this browser only (the default signs out every device), then
+    // load the login page fresh so no signed-in screen lingers.
+    try {
+      await createClient().auth.signOut({ scope: "local" });
+    } catch {
+      /* the cookie is cleared locally either way */
+    }
+    window.location.href = "/login";
   };
 
   const search = (e: React.FormEvent) => {
     e.preventDefault();
-    if (q.trim().length >= 2) router.push(`/search?q=${encodeURIComponent(q.trim())}`);
+    const term = q.trim();
+    if (term.length < 2) return;
+    if (pathname === "/search") {
+      // Already on the search page, which doesn't reload for a new query
+      // string: hand it the new words directly.
+      window.dispatchEvent(new CustomEvent("bb-search", { detail: term }));
+    } else {
+      router.push(`/search?q=${encodeURIComponent(term)}`);
+    }
   };
 
   const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");

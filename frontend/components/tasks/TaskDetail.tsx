@@ -5,7 +5,7 @@
 // extensions and the task's history. Which controls appear depends on what
 // the server says this person may do; the server re-checks every change.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { createClient } from "@/lib/supabase";
 import { STATUSES, isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
@@ -18,11 +18,11 @@ import {
   fromLocalInput,
   nameOf,
   sectionsFor,
-  toLocalInput,
 } from "./types";
 import { MentionTextarea } from "./MentionTextarea";
+import { DateTimeField } from "./DateTimeField";
 
-type Access = { canManage: boolean; canWork: boolean; isSuper: boolean; role: string };
+type Access = { canManage: boolean; canWork: boolean; isSuper: boolean; isAssignor?: boolean; role: string };
 type Comment = {
   id: string;
   content: string;
@@ -117,6 +117,8 @@ export function TaskDetail({
   onAdd,
   onError,
   onInfo,
+  onTemplateSaved,
+  onRemoved,
 }: {
   task: Task;
   allTasks: Task[];
@@ -127,8 +129,17 @@ export function TaskDetail({
   onAdd: (task: Task) => void;
   onError: (msg: string) => void;
   onInfo: (msg: string) => void;
+  /** Lets the page add a newly saved template to its template picker. */
+  onTemplateSaved?: (template: { id: string; name: string }) => void;
+  /** Lets the page drop a deleted private to-do item from its lists. */
+  onRemoved?: (id: string) => void;
 }) {
   const [access, setAccess] = useState<Access | null>(null);
+  // Editing the title and instructions (assignor side).
+  const [editingText, setEditingText] = useState(false);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [draftDescription, setDraftDescription] = useState("");
+  const [savingText, setSavingText] = useState(false);
   const [comments, setComments] = useState<Comment[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [subtasks, setSubtasks] = useState<Subtask[]>([]);
@@ -183,6 +194,23 @@ export function TaskDetail({
   useEffect(() => {
     load();
   }, [load]);
+
+  // Double clicks mustn't create the same comment, item or request twice: a
+  // ref (not state) so the second click of a fast double click sees it.
+  const inFlight = useRef(new Set<string>());
+  const [, setBusyTick] = useState(0);
+  const once = async (key: string, fn: () => Promise<void>) => {
+    if (inFlight.current.has(key)) return;
+    inFlight.current.add(key);
+    setBusyTick((n) => n + 1);
+    try {
+      await fn();
+    } finally {
+      inFlight.current.delete(key);
+      setBusyTick((n) => n + 1);
+    }
+  };
+  const busy = (key: string) => inFlight.current.has(key);
 
   const refreshHistory = async () => {
     const r = await fetch(`/api/tasks/${task.id}/activity`, { cache: "no-store" });
@@ -392,7 +420,8 @@ export function TaskDetail({
     try {
       const r = await sendJSON(`/api/tasks/${task.id}/duplicate`, "POST", { project_id: projectId || null });
       onAdd(r.task);
-      onInfo(projectId ? "Copied into the other project." : "Task duplicated.");
+      if (r.warning) onError(r.warning);
+      else onInfo(projectId ? "Copied into the other project." : "Task duplicated.");
     } catch (e: any) {
       onError(e.message);
     }
@@ -400,8 +429,9 @@ export function TaskDetail({
 
   const remind = async (kind: "reminder" | "update_request") => {
     try {
-      await sendJSON(`/api/tasks/${task.id}/remind`, "POST", { kind });
-      onInfo(kind === "reminder" ? "Reminder sent to the assignee." : "Update request sent to the assignee.");
+      const r = await sendJSON(`/api/tasks/${task.id}/remind`, "POST", { kind });
+      const who = Number(r?.sent_to) > 1 ? `${r.sent_to} people` : task.assigned_to ? "the assignee" : "the person on it";
+      onInfo(kind === "reminder" ? `Reminder sent to ${who}.` : `Update request sent to ${who}.`);
       refreshHistory();
     } catch (e: any) {
       onError(e.message);
@@ -409,11 +439,42 @@ export function TaskDetail({
   };
 
   const saveTemplate = async () => {
+    // Templates are shared with the whole desk; a private to-do isn't.
+    if (task.personal && !window.confirm("Templates are visible to everyone on the desk. Save this private to-do as a template anyway?")) {
+      return;
+    }
     try {
-      await sendJSON("/api/templates", "POST", { from_task_id: task.id });
+      const saved = await sendJSON("/api/templates", "POST", { from_task_id: task.id });
+      if (saved?.id) onTemplateSaved?.({ id: saved.id, name: saved.name || task.title });
       onInfo("Saved as a template.");
     } catch (e: any) {
       onError(e.message);
+    }
+  };
+
+  const startEditText = () => {
+    setDraftTitle(task.title);
+    setDraftDescription(task.description || "");
+    setEditingText(true);
+  };
+
+  const saveText = async () => {
+    const title = draftTitle.trim();
+    if (!title) return;
+    const p: Partial<Task> = {};
+    if (title !== task.title) p.title = title;
+    const description = draftDescription.trim() ? draftDescription : null;
+    if (description !== (task.description ?? null)) p.description = description;
+    if (Object.keys(p).length === 0) {
+      setEditingText(false);
+      return;
+    }
+    setSavingText(true);
+    const ok = await onPatch(task.id, p);
+    setSavingText(false);
+    if (ok) {
+      setEditingText(false);
+      refreshHistory();
     }
   };
 
@@ -448,18 +509,40 @@ export function TaskDetail({
           </div>
 
           <div className="flex flex-wrap gap-2 mt-3">
-            <button onClick={() => duplicate()} className={actionBtn}>📋 Duplicate</button>
+            <button onClick={() => once("duplicate", () => duplicate())} disabled={busy("duplicate")} className={actionBtn}>📋 Duplicate</button>
             {lookups.projects.length > 1 && (
-              <select value="" onChange={(e) => e.target.value && duplicate(e.target.value)} className={input}>
+              <select value="" onChange={(e) => { const to = e.target.value; if (to) once("duplicate", () => duplicate(to)); }} className={input}>
                 <option value="">Copy to project...</option>
                 {lookups.projects.filter((p) => p.id !== task.project_id).map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </select>
             )}
-            {canManage && <button onClick={() => remind("update_request")} className={actionBtn}>🔔 Request update</button>}
-            {canManage && <button onClick={() => remind("reminder")} className={actionBtn}>⏰ Remind</button>}
-            <button onClick={saveTemplate} className={actionBtn}>📄 Save as template</button>
+            {canManage && <button onClick={() => once("remind", () => remind("update_request"))} disabled={busy("remind")} className={actionBtn}>🔔 Request update</button>}
+            {canManage && <button onClick={() => once("remind", () => remind("reminder"))} disabled={busy("remind")} className={actionBtn}>⏰ Remind</button>}
+            <button onClick={() => once("template", saveTemplate)} disabled={busy("template")} className={actionBtn}>📄 Save as template</button>
+            {/* #1: your own private to-do items can be deleted outright. */}
+            {task.personal && (task.created_by === me || task.assigned_to === me) && (
+              <button
+                onClick={() =>
+                  once("delete", async () => {
+                    if (!window.confirm(`Delete "${task.title}"? This can't be undone.`)) return;
+                    try {
+                      const r = await sendJSON("/api/tasks", "DELETE", { id: task.id });
+                      onInfo(r?.archived ? "It couldn't be deleted completely, so it was archived." : "Deleted.");
+                      onRemoved?.(task.id);
+                      onClose();
+                    } catch (e: any) {
+                      onError(e.message);
+                    }
+                  })
+                }
+                disabled={busy("delete")}
+                className={`${actionBtn} hover:bg-red-900`}
+              >
+                🗑 Delete
+              </button>
+            )}
             {/* A completed task can be re-opened (from the archive too). */}
             {isFinished(task.status) && canWork && (!task.archived_at || canManage) && (
               <button
@@ -516,7 +599,46 @@ export function TaskDetail({
 
           {access && tab === "details" && (
             <>
-              {task.description && <p className="text-slate-300 text-sm whitespace-pre-wrap mb-4">{task.description}</p>}
+              {editingText ? (
+                <div className="mb-4 space-y-2">
+                  <input
+                    value={draftTitle}
+                    onChange={(e) => setDraftTitle(e.target.value)}
+                    maxLength={300}
+                    className={`${input} w-full`}
+                    aria-label="Title"
+                  />
+                  <textarea
+                    value={draftDescription}
+                    onChange={(e) => setDraftDescription(e.target.value)}
+                    rows={4}
+                    placeholder="Description / instructions (optional)"
+                    className={`${input} w-full`}
+                    aria-label="Description"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={saveText}
+                      disabled={savingText || !draftTitle.trim()}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm"
+                    >
+                      {savingText ? "Saving..." : "Save"}
+                    </button>
+                    <button onClick={() => setEditingText(false)} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {task.description && <p className="text-slate-300 text-sm whitespace-pre-wrap mb-2">{task.description}</p>}
+                  {canManage && (
+                    <button onClick={startEditText} className="text-xs text-slate-400 hover:text-white mb-4">
+                      ✏️ Edit title &amp; description
+                    </button>
+                  )}
+                </>
+              )}
               {!canWork && (
                 <p className="text-xs text-slate-400 mb-3">You can view this task but aren't working on it, so the controls are read-only.</p>
               )}
@@ -531,31 +653,29 @@ export function TaskDetail({
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Priority</span>
-                  <select value={task.priority} disabled={!canManage} onChange={(e) => patch({ priority: e.target.value })} className={input}>
+                  <select value={task.priority} disabled={!(access?.isSuper || access?.isAssignor)} onChange={(e) => patch({ priority: e.target.value })} className={input}>
                     {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Start</span>
-                  <input
-                    type="datetime-local"
-                    value={toLocalInput(task.start_date)}
+                  <DateTimeField
+                    value={task.start_date}
                     disabled={!canManage}
-                    onChange={(e) => patch({ start_date: fromLocalInput(e.target.value) })}
+                    onCommit={(iso) => patch({ start_date: iso })}
                     className={input}
+                    ariaLabel="Start"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Due {canManage ? "" : "(ask for an extension to change)"}</span>
-                  <input
-                    type="datetime-local"
-                    value={toLocalInput(task.due_date)}
+                  <DateTimeField
+                    value={task.due_date}
                     disabled={!canManage}
-                    onChange={(e) => {
-                      const iso = fromLocalInput(e.target.value);
-                      if (iso) patch({ due_date: iso });
-                    }}
+                    allowClear={false}
+                    onCommit={(iso) => iso && patch({ due_date: iso })}
                     className={input}
+                    ariaLabel="Due"
                   />
                 </label>
                 <label className="flex flex-col gap-1">
@@ -576,13 +696,12 @@ export function TaskDetail({
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Remind me at {task.remind_at && !canWork ? "" : "(optional)"}</span>
                   <div className="flex gap-2">
-                    <input
-                      type="datetime-local"
-                      value={toLocalInput(task.remind_at)}
+                    <DateTimeField
+                      value={task.remind_at}
                       disabled={!canWork}
-                      onChange={(e) => patch({ remind_at: fromLocalInput(e.target.value) })}
+                      onCommit={(iso) => patch({ remind_at: iso })}
                       className={`${input} flex-1 min-w-0`}
-                      aria-label="Reminder"
+                      ariaLabel="Reminder"
                     />
                     {task.remind_at && canWork && (
                       <button onClick={() => patch({ remind_at: null })} className="text-xs text-slate-400 hover:text-white px-2" aria-label="Clear reminder">✕</button>
@@ -713,6 +832,9 @@ export function TaskDetail({
                   {subtasks.map((st) => {
                     const mine = st.assigned_to === me;
                     const can = canWork || mine;
+                    // Who does it, by when and how much: the assignor side or
+                    // the person doing the item (the server enforces the same).
+                    const canPlan = canManage || mine;
                     const quantified = st.progress_type === "number" || st.progress_type === "amount";
                     const late = st.due_date && !st.done && new Date(st.due_date) < new Date();
                     return (
@@ -732,15 +854,15 @@ export function TaskDetail({
                         </div>
                         {can && (
                           <div className="flex flex-wrap gap-2 mt-2 items-center">
-                            <select value={st.assigned_to || ""} onChange={(e) => saveSubtask(st, { assigned_to: e.target.value || null })} className={`${input} text-xs py-1`} aria-label="Subtask assignee">
+                            <select value={st.assigned_to || ""} disabled={!canPlan} onChange={(e) => saveSubtask(st, { assigned_to: e.target.value || null })} className={`${input} text-xs py-1`} aria-label="Subtask assignee">
                               <option value="">Unassigned</option>
                               {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                             </select>
-                            <input
-                              type="datetime-local"
-                              value={toLocalInput(st.due_date)}
-                              onChange={(e) => saveSubtask(st, { due_date: fromLocalInput(e.target.value) })}
-                              className={`${input} text-xs py-1`} aria-label="Subtask deadline"
+                            <DateTimeField
+                              value={st.due_date}
+                              disabled={!canPlan}
+                              onCommit={(iso) => saveSubtask(st, { due_date: iso })}
+                              className={`${input} text-xs py-1`} ariaLabel="Subtask deadline"
                             />
                             <select value={st.progress_type || "percent"} onChange={(e) => saveSubtask(st, { progress_type: e.target.value })} className={`${input} text-xs py-1`} aria-label="Measure by">
                               <option value="percent">%</option>
@@ -750,11 +872,11 @@ export function TaskDetail({
                             {quantified ? (
                               <>
                                 <input type="number" min="0" defaultValue={st.progress_current ?? 0}
-                                  onBlur={(e) => saveSubtask(st, { progress_current: Number(e.target.value) })}
+                                  onBlur={(e) => Number(e.target.value) !== Number(st.progress_current ?? 0) && saveSubtask(st, { progress_current: Number(e.target.value) })}
                                   className={`${input} text-xs py-1 w-20`} aria-label="Done so far" />
                                 <span className="text-xs text-slate-500">of</span>
-                                <input type="number" min="0" defaultValue={st.progress_target ?? 0}
-                                  onBlur={(e) => saveSubtask(st, { progress_target: Number(e.target.value) })}
+                                <input type="number" min="0" defaultValue={st.progress_target ?? 0} disabled={!canPlan}
+                                  onBlur={(e) => Number(e.target.value) !== Number(st.progress_target ?? 0) && saveSubtask(st, { progress_target: Number(e.target.value) })}
                                   className={`${input} text-xs py-1 w-20`} aria-label="Target" />
                               </>
                             ) : (
@@ -772,14 +894,14 @@ export function TaskDetail({
                 {canWork && (
                   <div className="flex flex-wrap gap-2 mt-3">
                     <input value={newSub.title} onChange={(e) => setNewSub({ ...newSub, title: e.target.value })}
-                      onKeyDown={(e) => e.key === "Enter" && addSubtask()}
+                      onKeyDown={(e) => e.key === "Enter" && once("subtask", addSubtask)}
                       placeholder="Add a subtask or checklist item..." className={`${input} flex-1 min-w-48`} />
                     <input type="datetime-local" value={newSub.due} onChange={(e) => setNewSub({ ...newSub, due: e.target.value })} className={input} aria-label="Deadline" />
                     <select value={newSub.assignee} onChange={(e) => setNewSub({ ...newSub, assignee: e.target.value })} className={input} aria-label="Assign to">
                       <option value="">Unassigned</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
-                    <button onClick={addSubtask} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Add</button>
+                    <button onClick={() => once("subtask", addSubtask)} disabled={busy("subtask")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">Add</button>
                   </div>
                 )}
               </div>
@@ -828,7 +950,7 @@ export function TaskDetail({
                         placeholder="Reason for the delay..." className={`${input} w-full`} />
                       <div className="flex flex-wrap gap-2">
                         <input type="datetime-local" value={ext.date} onChange={(e) => setExt({ ...ext, date: e.target.value })} className={input} aria-label="Requested deadline" />
-                        <button onClick={requestExtension} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Request extension</button>
+                        <button onClick={() => once("extension", requestExtension)} disabled={busy("extension")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">Request extension</button>
                       </div>
                     </div>
                   )}
@@ -997,7 +1119,7 @@ export function TaskDetail({
                   className={`${input} w-full resize-y ${privateTo ? "border-amber-600" : ""}`}
                 />
                 <div className="flex flex-wrap items-center gap-3 mt-2">
-                  <button onClick={postComment} disabled={!newComment.trim() || (!!privateTo && privateTo.length === 0)} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm">
+                  <button onClick={() => once("comment", postComment)} disabled={busy("comment") || !newComment.trim() || (!!privateTo && privateTo.length === 0)} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm">
                     {privateTo ? "Send privately" : "Post"}
                   </button>
                   <label className="flex items-center gap-2 text-sm text-slate-300">

@@ -119,7 +119,6 @@ export async function POST(request: NextRequest, { params }: Params) {
         .insert({
           task_id: taskId,
           file_name: String(body.file_name || path.split("/").pop()),
-          file_url: path, // kept for older NOT NULL schemas; the bucket is private
           storage_path: path,
           file_type: body.file_type || null,
           file_size: Number(body.file_size) || null,
@@ -128,7 +127,11 @@ export async function POST(request: NextRequest, { params }: Params) {
         })
         .select("*")
         .single();
-      if (error) throw error;
+      if (error) {
+        // Don't leave the uploaded bytes behind with no record pointing at them.
+        await supabase.storage.from(BUCKET).remove([path]);
+        throw error;
+      }
 
       // Make sure the upload really finished before keeping the record.
       const { error: missing } = await supabase.storage.from(BUCKET).createSignedUrl(path, 10);
@@ -164,7 +167,6 @@ export async function POST(request: NextRequest, { params }: Params) {
         .insert({
           task_id: taskId,
           file_name: blob.name,
-          file_url: path, // kept for older NOT NULL schemas; the bucket is private
           storage_path: path,
           file_type: blob.type || null,
           file_size: blob.size,
@@ -185,10 +187,12 @@ export async function POST(request: NextRequest, { params }: Params) {
     await logActivity(supabase, {
       entity_type: "task",
       entity_id: taskId,
-      action: `attached "${attachment.file_name}"${visibility !== "all" ? ` (${visibility})` : ""}`,
+      // Everyone on the task can read the history, so a restricted file's
+      // name stays out of it.
+      action: visibility === "all" ? `attached "${attachment.file_name}"` : `attached a ${visibility === "custom" ? "shared" : "restricted"} file`,
       performed_by: user.id,
       desk_id: access.task.desk_id,
-      changes: { file: attachment.file_name, visibility },
+      changes: visibility === "all" ? { file: attachment.file_name, visibility } : { visibility },
     });
 
     const [named] = await attachNames(supabase, [present(attachment, user.id, access, shared)], "uploaded_by", "uploader_name");
@@ -238,7 +242,10 @@ export async function PUT(request: NextRequest, { params }: Params) {
     await logActivity(supabase, {
       entity_type: "task",
       entity_id: taskId,
-      action: `changed access to "${file.file_name}" to ${visibility}`,
+      action:
+        visibility === "all" && (file.visibility || "all") === "all"
+          ? `changed access to "${file.file_name}"`
+          : `changed who can open a file (now ${visibility === "all" ? "everyone on the task" : visibility})`,
       performed_by: user.id,
       desk_id: access.task.desk_id,
       changes: { visibility: { from: file.visibility || "all", to: visibility }, shared_with: shared },
@@ -284,7 +291,7 @@ export async function DELETE(request: NextRequest, { params }: Params) {
     await logActivity(supabase, {
       entity_type: "task",
       entity_id: taskId,
-      action: `deleted file "${file.file_name}"`,
+      action: (file.visibility || "all") === "all" ? `deleted file "${file.file_name}"` : "deleted a restricted file",
       performed_by: user.id,
       desk_id: access.task.desk_id,
     });

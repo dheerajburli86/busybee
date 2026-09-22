@@ -6,8 +6,10 @@ import {
   deny,
   getMemberships,
   isForMe,
+  isPrivateToSomeoneElse,
   logActivity,
   notifyMany,
+  notOnDesk,
   requireUser,
   taskAccess,
   taskAudience,
@@ -15,7 +17,8 @@ import {
   userUnits,
   visibleTasks,
 } from "@/lib/permissions";
-import { isFinished } from "@/lib/status";
+import { isFinished, PRIORITY_VALUES, STATUS_VALUES } from "@/lib/status";
+import { normalizeTimestamp } from "@/lib/format";
 import { inChunks, selectAll } from "@/lib/chunks";
 import { completionMove, firstSection, notifyCompleted, sectionInProject } from "@/lib/workflow";
 
@@ -42,7 +45,8 @@ const MANAGE_FIELDS = [
 // Fields the person doing the work may also report.
 const WORK_FIELDS = ["status", "progress_percent", "progress_current", "remind_at"];
 
-const validDate = (v: any) => typeof v === "string" && !isNaN(new Date(v).getTime());
+const clampPercent = (v: any) => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+const validAmount = (v: any) => v === null || (typeof v === "number" && isFinite(v) && v >= 0);
 
 // Plain words for change notifications and history.
 const FIELD_LABEL: Record<string, string> = {
@@ -66,6 +70,36 @@ const FIELD_LABEL: Record<string, string> = {
 const label = (k: string) => FIELD_LABEL[k] || k.replace(/_/g, " ");
 const labels = (keys: string[]) => Array.from(new Set(keys.map(label))).join(", ");
 
+// #2: "remind me at" is per person (task_reminders): on a shared task everyone
+// keeps their own time. Before the round-2 migration that table doesn't
+// exist, and the single reminder on the task row is used as before.
+const tableMissing = (error: any) =>
+  !!error && (["42P01", "PGRST205"].includes(error.code) || /task_reminders/.test(error.message || "") && /not find|does not exist/i.test(error.message || ""));
+
+/** This person's reminder times by task id, or null on an older database. */
+async function myReminders(supabase: any, userId: string): Promise<Map<string, string> | null> {
+  const { data, error } = await supabase.from("task_reminders").select("task_id, remind_at").eq("user_id", userId);
+  if (error) {
+    if (tableMissing(error)) return null;
+    throw error;
+  }
+  return new Map((data || []).map((r: any) => [r.task_id, r.remind_at]));
+}
+
+/** Set (or with null, clear) this person's reminder. "missing" on an older database. */
+async function setMyReminder(supabase: any, taskId: string, userId: string, at: string | null): Promise<"ok" | "missing"> {
+  const { error } = at
+    ? await supabase
+        .from("task_reminders")
+        .upsert({ task_id: taskId, user_id: userId, remind_at: at, sent_at: null }, { onConflict: "task_id,user_id" })
+    : await supabase.from("task_reminders").delete().eq("task_id", taskId).eq("user_id", userId);
+  if (error) {
+    if (tableMissing(error)) return "missing";
+    throw error;
+  }
+  return "ok";
+}
+
 async function resolveContext(supabase: any, userId: string, projectId?: string | null) {
   const memberships = await getMemberships(supabase, userId);
   if (memberships.length === 0) return null;
@@ -80,14 +114,38 @@ async function resolveContext(supabase: any, userId: string, projectId?: string 
     if (!data || !memberships.some((m) => m.desk_id === data.desk_id)) return null;
     project = data;
   } else {
-    const { data } = await supabase
+    // No project chosen: use the desk's general project - one that isn't
+    // given to a team - so the task isn't shared with a team by accident.
+    const deskIds = memberships.map((m) => m.desk_id);
+    const { data: general } = await supabase
       .from("projects")
       .select("id, desk_id")
-      .in("desk_id", memberships.map((m) => m.desk_id))
+      .in("desk_id", deskIds)
+      .is("team_id", null)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
-    project = data;
+    project = general;
+    if (!project) {
+      const { data: created } = await supabase
+        .from("projects")
+        .insert({ desk_id: deskIds[0], name: "General", description: "Tasks that don't belong to a particular project" })
+        .select("id, desk_id")
+        .maybeSingle();
+      if (created) {
+        await supabase.from("stages").insert({ project_id: created.id, name: "To do", position: 0 });
+        project = created;
+      } else {
+        const { data: oldest } = await supabase
+          .from("projects")
+          .select("id, desk_id")
+          .in("desk_id", deskIds)
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        project = oldest;
+      }
+    }
   }
   if (!project) return null;
 
@@ -114,7 +172,11 @@ export async function GET(request: NextRequest) {
       return q.order("created_at", { ascending: false }).order("id");
     });
 
-    const [visible, units] = await Promise.all([visibleTasks(supabase, user.id, tasks || []), userUnits(supabase, user.id)]);
+    const [visible, units, reminders] = await Promise.all([
+      visibleTasks(supabase, user.id, tasks || []),
+      userUnits(supabase, user.id),
+      myReminders(supabase, user.id),
+    ]);
 
     // How many subtasks each task has, so the UI knows when progress is rolled up.
     const ids = visible.map((t: any) => t.id);
@@ -123,7 +185,13 @@ export async function GET(request: NextRequest) {
     subs.forEach((s: any) => (counts[s.task_id] = (counts[s.task_id] || 0) + 1));
 
     return NextResponse.json({
-      tasks: visible.map((t: any) => ({ ...t, subtask_count: counts[t.id] || 0, for_me: isForMe(t, user.id, units) })),
+      tasks: visible.map((t: any) => ({
+        ...t,
+        // Your own "remind me at" time, not whoever else set one on the task.
+        ...(reminders ? { remind_at: reminders.get(t.id) ?? null } : {}),
+        subtask_count: counts[t.id] || 0,
+        for_me: isForMe(t, user.id, units),
+      })),
     });
   } catch (error: any) {
     console.error("GET /api/tasks failed:", error);
@@ -157,17 +225,28 @@ export async function POST(request: NextRequest) {
     // #1: an item added to "My To-Do" is private to its owner.
     const personal = body.personal === true;
 
-    if (!title || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    if (typeof title !== "string" || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
     // DOCX #10: a task cannot exist without a due date and time.
-    if (!due_date || !validDate(due_date)) {
+    const due = normalizeTimestamp(due_date);
+    if (!due) {
       return NextResponse.json({ error: "A due date and time is required" }, { status: 400 });
     }
-    if (remind_at && !validDate(remind_at)) {
+    const start = start_date ? normalizeTimestamp(start_date) : null;
+    if (start_date && !start) return NextResponse.json({ error: "The start date isn't a valid date" }, { status: 400 });
+    const remind = remind_at ? normalizeTimestamp(remind_at) : null;
+    if (remind_at && !remind) {
       return NextResponse.json({ error: "The reminder time isn't a valid date" }, { status: 400 });
     }
+    if (!STATUS_VALUES.includes(status)) return NextResponse.json({ error: "Unknown status" }, { status: 400 });
+    if (!PRIORITY_VALUES.includes(priority)) return NextResponse.json({ error: "Unknown priority" }, { status: 400 });
 
     const ctx = await resolveContext(supabase, user.id, project_id);
     if (!ctx) return NextResponse.json({ error: "No project is set up for your desk yet" }, { status: 400 });
+
+    if (!personal) {
+      const problem = await notOnDesk(supabase, ctx.desk_id, { assigned_to, team_id, department_id, group_id });
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    }
 
     // #20: the task goes into the chosen section of its project, or the first one.
     let section: string | null = null;
@@ -190,21 +269,26 @@ export async function POST(request: NextRequest) {
         description: description || null,
         priority,
         status,
-        due_date,
-        start_date: start_date || null,
-        progress_percent,
+        due_date: due,
+        start_date: start,
+        progress_percent: clampPercent(progress_percent),
         assigned_to: personal ? user.id : assigned_to || null,
         team_id: personal ? null : team_id || null,
         department_id: personal ? null : department_id || null,
         group_id: personal ? null : group_id || null,
         created_by: user.id,
         ...(personal ? { personal: true } : {}),
-        ...(remind_at ? { remind_at, remind_to: user.id } : {}),
       })
       .select("*")
       .single();
 
     if (error) throw error;
+
+    if (remind && (await setMyReminder(supabase, task.id, user.id, remind)) === "missing") {
+      // Older database: the reminder lives on the task row.
+      await supabase.from("tasks").update({ remind_at: remind, remind_to: user.id }).eq("id", task.id);
+    }
+    task.remind_at = remind;
 
     await logActivity(supabase, {
       entity_type: "task",
@@ -288,20 +372,78 @@ export async function PUT(request: NextRequest) {
     if (touchesWork && !access.canWork) {
       return deny("Only people working on this task can update its status or progress.");
     }
+
+    // Check the values themselves before anything is written.
+    if ("title" in patch) {
+      if (typeof patch.title !== "string" || !patch.title.trim()) {
+        return NextResponse.json({ error: "A task needs a title" }, { status: 400 });
+      }
+      patch.title = patch.title.trim();
+    }
+    if ("description" in patch && patch.description !== null && typeof patch.description !== "string") {
+      return NextResponse.json({ error: "The description must be text" }, { status: 400 });
+    }
+    if ("status" in patch && !STATUS_VALUES.includes(patch.status)) {
+      return NextResponse.json({ error: "Unknown status" }, { status: 400 });
+    }
+    if ("priority" in patch && !PRIORITY_VALUES.includes(patch.priority)) {
+      return NextResponse.json({ error: "Unknown priority" }, { status: 400 });
+    }
+    if ("progress_percent" in patch) patch.progress_percent = clampPercent(patch.progress_percent);
+    for (const k of ["progress_current", "progress_target"]) {
+      if (k in patch && !validAmount(patch[k])) {
+        return NextResponse.json({ error: "Progress numbers can't be negative" }, { status: 400 });
+      }
+    }
+    if ("project_id" in patch && !patch.project_id) {
+      return NextResponse.json({ error: "A task must stay in a project" }, { status: 400 });
+    }
     if (patch.due_date === null || patch.due_date === "") {
       return NextResponse.json({ error: "A task must keep a due date" }, { status: 400 });
     }
-    if ("due_date" in patch && !validDate(patch.due_date)) {
-      return NextResponse.json({ error: "That due date isn't a valid date" }, { status: 400 });
+    if ("due_date" in patch) {
+      const due = normalizeTimestamp(patch.due_date);
+      if (!due) return NextResponse.json({ error: "That due date isn't a valid date" }, { status: 400 });
+      patch.due_date = due;
     }
+    if ("start_date" in patch && patch.start_date) {
+      const start = normalizeTimestamp(patch.start_date);
+      if (!start) return NextResponse.json({ error: "That start date isn't a valid date" }, { status: 400 });
+      patch.start_date = start;
+    } else if ("start_date" in patch) {
+      patch.start_date = null;
+    }
+    {
+      const problem = await notOnDesk(supabase, before.desk_id, patch);
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    }
+    // "Remind me at" is this person's own reminder, not a change to the task:
+    // no history entry, no notification, nobody else's reminder replaced.
+    let myReminder: string | null | undefined;
     if ("remind_at" in patch) {
-      if (patch.remind_at && !validDate(patch.remind_at)) {
-        return NextResponse.json({ error: "The reminder time isn't a valid date" }, { status: 400 });
+      let at: string | null = null;
+      if (patch.remind_at) {
+        at = normalizeTimestamp(patch.remind_at);
+        if (!at) return NextResponse.json({ error: "The reminder time isn't a valid date" }, { status: 400 });
       }
-      patch.remind_at = patch.remind_at || null;
-      // The reminder goes to whoever set it.
-      patch.remind_to = patch.remind_at ? user.id : null;
-      patch.reminder_sent_at = null;
+      if ((await setMyReminder(supabase, id, user.id, at)) === "ok") {
+        myReminder = at;
+        delete patch.remind_at;
+      } else {
+        // Older database: the reminder lives on the task row, for whoever set it last.
+        patch.remind_at = at;
+        patch.remind_to = at ? user.id : null;
+        patch.reminder_sent_at = null;
+      }
+      if (Object.keys(patch).length === 0) {
+        const [{ count }, units] = await Promise.all([
+          supabase.from("subtasks").select("id", { count: "exact", head: true }).eq("task_id", id),
+          userUnits(supabase, user.id),
+        ]);
+        return NextResponse.json({
+          task: { ...before, remind_at: myReminder ?? null, subtask_count: count || 0, for_me: isForMe(before, user.id, units) },
+        });
+      }
     }
     if (patch.project_id) {
       const memberships = await getMemberships(supabase, user.id);
@@ -352,6 +494,8 @@ export async function PUT(request: NextRequest) {
     if (Object.prototype.hasOwnProperty.call(patch, "status")) {
       if (isFinished(patch.status) && !isFinished(before.status)) {
         patch.completed_at = new Date().toISOString();
+        // Finished work is 100% done (with subtasks, progress follows them).
+        if ((subCount || 0) === 0) patch.progress_percent = 100;
         // #20: completed work moves on to the next section if the project says so.
         if (!("stage_id" in patch)) Object.assign(patch, await completionMove(supabase, { ...before, ...patch }));
       }
@@ -412,6 +556,16 @@ export async function PUT(request: NextRequest) {
       });
     }
 
+    // The person the work was taken from hears about it too.
+    if (changes.assigned_to && before.assigned_to && before.assigned_to !== user.id && before.assigned_to !== task.assigned_to) {
+      await notifyMany(supabase, [before.assigned_to], {
+        task_id: id,
+        type: "updated",
+        title: "Task reassigned",
+        message: `${task.title} was given to someone else`,
+      });
+    }
+
     const audience = (await taskAudience(supabase, task)).filter((x) => x !== user.id);
 
     // SOW #20: completion goes to everyone connected to the task.
@@ -436,14 +590,69 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    const [{ count }, units] = await Promise.all([
+    const [{ count }, units, reminders] = await Promise.all([
       supabase.from("subtasks").select("id", { count: "exact", head: true }).eq("task_id", id),
       userUnits(supabase, user.id),
+      myReminder === undefined ? myReminders(supabase, user.id) : Promise.resolve(null),
     ]);
+    const shownReminder =
+      myReminder !== undefined ? myReminder : reminders ? reminders.get(id) ?? null : task.remind_at ?? null;
 
-    return NextResponse.json({ task: { ...task, subtask_count: count || 0, for_me: isForMe(task, user.id, units) } });
+    return NextResponse.json({
+      task: { ...task, remind_at: shownReminder, subtask_count: count || 0, for_me: isForMe(task, user.id, units) },
+    });
   } catch (error: any) {
     console.error("PUT /api/tasks failed:", error);
     return NextResponse.json({ error: error?.message || "Failed to update task" }, { status: 500 });
+  }
+}
+
+// #1: the owner of a private to-do item can delete it. Shared work is archived
+// instead (never deleted) so its history and the reports keep it.
+export async function DELETE(request: NextRequest) {
+  try {
+    const supabase = await createServerSideClient();
+    const user = await requireUser(supabase);
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const body = await request.json().catch(() => ({}));
+    const id = body?.id;
+    if (!id || typeof id !== "string") return NextResponse.json({ error: "Task ID is required" }, { status: 400 });
+
+    const access = await taskAccess(supabase, user.id, id);
+    if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
+    const task = access.task;
+    // Reuses the same ownership rule as isPrivateToSomeoneElse (the one
+    // taskAccess itself uses to decide visibility) instead of
+    // re-implementing "personal and mine" inline, so the two can't quietly
+    // drift apart the way the round-1 subtask-reassignment check did.
+    if (!task.personal || isPrivateToSomeoneElse(task, user.id)) {
+      return deny("Only your own private to-do items can be deleted - archive other tasks instead.");
+    }
+
+    // Stored files first (the storage rule finds a file through its row),
+    // then everything that hangs off the item.
+    const { data: files } = await supabase.from("attachments").select("storage_path").eq("task_id", id);
+    const paths = (files || []).map((f: any) => f.storage_path).filter(Boolean);
+    if (paths.length) await supabase.storage.from("task-files").remove(paths);
+    for (const table of ["attachments", "subtasks", "comments", "task_assignors", "extension_requests", "task_dependencies", "task_reminders"]) {
+      await supabase.from(table).delete().eq("task_id", id);
+    }
+    await supabase.from("task_dependencies").delete().eq("depends_on_task_id", id);
+    await supabase.from("notifications").delete().eq("task_id", id);
+    await supabase.from("activity_log").delete().eq("entity_type", "task").eq("entity_id", id);
+
+    const { data: gone, error } = await supabase.from("tasks").delete().eq("id", id).select("id");
+    if (error || !gone || gone.length === 0) {
+      // Something in the database still points at it, or deleting isn't
+      // allowed there: archive it instead so it leaves the list either way.
+      if (error) console.error("DELETE /api/tasks fell back to archiving:", error);
+      await supabase.from("tasks").update({ archived_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
+      return NextResponse.json({ ok: true, archived: true });
+    }
+    return NextResponse.json({ ok: true });
+  } catch (error: any) {
+    console.error("DELETE /api/tasks failed:", error);
+    return NextResponse.json({ error: error?.message || "Could not delete the item" }, { status: 500 });
   }
 }

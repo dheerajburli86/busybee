@@ -16,30 +16,53 @@ export function mailConfigured(): boolean {
   return Boolean(process.env.RESEND_API_KEY);
 }
 
-async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** POST to Resend, retrying once if it says we're sending too fast. */
+async function post(path: string, payload: unknown): Promise<boolean> {
   const key = process.env.RESEND_API_KEY;
   if (!key) return false;
 
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ from: FROM, to, subject, text }),
-    });
-
-    if (!res.ok) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`https://api.resend.com${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.ok) return true;
+      if (res.status === 429 && attempt === 0) {
+        await sleep(1100);
+        continue;
+      }
       // A failed email must never take down the request that triggered it.
       console.error("email send failed:", res.status, await res.text());
       return false;
+    } catch (err) {
+      console.error("email send threw:", err);
+      return false;
     }
-    return true;
-  } catch (err) {
-    console.error("email send threw:", err);
-    return false;
   }
+  return false;
+}
+
+/**
+ * One message per recipient, so nobody sees anyone else's address. Several
+ * recipients go in a single batch request (up to 100 per request) instead of
+ * one request each, which Resend's per-second limit would partly refuse.
+ */
+async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
+  if (to.length === 1) return post("/emails", { from: FROM, to, subject, text });
+  let ok = false;
+  for (let i = 0; i < to.length; i += 100) {
+    const part = to.slice(i, i + 100).map((addr) => ({ from: FROM, to: [addr], subject, text }));
+    if (await post("/emails/batch", part)) ok = true;
+  }
+  return ok;
 }
 
 /** Look up email addresses for a set of user ids, skipping any without one. */
@@ -72,10 +95,7 @@ export async function sendMail(opts: {
   const to = await emailsForUsers(opts.userIds);
   if (to.length === 0) return false;
 
-  // Round-1 audit fix: this used to put every recipient in one `to` array,
-  // which discloses everyone's address to everyone else in the same batch
-  // (e.g. a task assigned to a whole team). Send one message per recipient
-  // instead - the scheduler's own notify() loop already does this.
-  const results = await Promise.all(to.map((addr) => deliver([addr], opts.subject, opts.body)));
-  return results.some(Boolean);
+  // Round-1 audit fix: one message per recipient (a shared `to` list disclosed
+  // everyone's address to everyone else). deliver() sends them as a batch.
+  return deliver(Array.from(new Set(to)), opts.subject, opts.body);
 }
