@@ -578,8 +578,8 @@ export function TaskDetail({
                   once("delete", async () => {
                     if (!window.confirm(`Delete "${task.title}"? This can't be undone.`)) return;
                     try {
-                      const r = await sendJSON("/api/tasks", "DELETE", { id: task.id });
-                      onInfo(r?.archived ? "It couldn't be deleted completely, so it was archived." : "Task deleted.");
+                      await sendJSON("/api/tasks", "DELETE", { id: task.id });
+                      onInfo("Task deleted.");
                       onRemoved?.(task.id);
                       onClose();
                     } catch (e: any) {
