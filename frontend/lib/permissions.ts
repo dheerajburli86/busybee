@@ -101,6 +101,37 @@ export async function userProjectIds(supabase: any, userId: string): Promise<str
 }
 
 /**
+ * SOW #41/#29: team and group ids the user belongs to. A task given to a team
+ * is a task every member of that team is expected to see and work on, so this
+ * feeds both visibility and the notification audience.
+ *
+ * The teams tables arrived after the rest of the app, so a database that
+ * hasn't had the migration run yet must not break every task query - an error
+ * here means "no teams", not a failed request.
+ */
+export async function userTeamIds(supabase: any, userId: string): Promise<string[]> {
+  try {
+    const { data, error } = await supabase.from("team_members").select("team_id").eq("user_id", userId);
+    if (error) return [];
+    return Array.from(new Set((data || []).map((t: any) => t.team_id).filter(Boolean)));
+  } catch {
+    return [];
+  }
+}
+
+/** Everyone in a team or group, for assignment and notifications. */
+export async function teamMemberIds(supabase: any, teamId: string | null | undefined): Promise<string[]> {
+  if (!teamId) return [];
+  try {
+    const { data, error } = await supabase.from("team_members").select("user_id").eq("team_id", teamId);
+    if (error) return [];
+    return Array.from(new Set((data || []).map((t: any) => t.user_id).filter(Boolean)));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * What the user may do with a project: see it (on their desk) and manage it
  * (supervisor/admin, or this project's own manager (#22)).
  */
@@ -135,11 +166,12 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
   const role = roleIn(memberships, task.desk_id);
   const isSuper = SUPER_ROLES.includes(role);
 
-  const [{ data: extra }, { data: subs }, managed, myProjects] = await Promise.all([
+  const [{ data: extra }, { data: subs }, managed, myProjects, myTeams] = await Promise.all([
     supabase.from("task_assignors").select("user_id").eq("task_id", taskId),
     supabase.from("subtasks").select("assigned_to").eq("task_id", taskId),
     managedProjectIds(supabase, userId),
     userProjectIds(supabase, userId),
+    userTeamIds(supabase, userId),
   ]);
 
   const isAssignor =
@@ -150,9 +182,12 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
   // Checklist #22: whoever runs this task's project runs its tasks too.
   const isProjectManager = !!task.project_id && managed.includes(task.project_id);
 
+  // SOW #29: a task given to a team is work for everyone in that team, the
+  // same as if they had been named on it individually.
   const isWorker =
     task.assigned_to === userId ||
     (subs || []).some((s: any) => s.assigned_to === userId) ||
+    (!!task.team_id && myTeams.includes(task.team_id)) ||
     (!!task.project_id && myProjects.includes(task.project_id));
 
   const canManage = isSuper || isAssignor || isProjectManager;
@@ -181,17 +216,20 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
   const memberships = await getMemberships(supabase, userId);
 
   // Filtered by person only - a list of every task id would not fit in a URL.
-  const [extra, subs, managed, myProjects] = await Promise.all([
+  const [extra, subs, managed, myProjects, myTeams] = await Promise.all([
     selectAll<any>(() => supabase.from("task_assignors").select("task_id").eq("user_id", userId).order("id")),
     selectAll<any>(() => supabase.from("subtasks").select("task_id").eq("assigned_to", userId).order("id")),
     managedProjectIds(supabase, userId),
     userProjectIds(supabase, userId),
+    userTeamIds(supabase, userId),
   ]);
 
   const extraIds = new Set((extra || []).map((x: any) => x.task_id));
   const subIds = new Set((subs || []).map((x: any) => x.task_id));
   // Checklist #22: projects this user manages, plus the ones they are on.
   const myProjectIds = new Set<string>([...managed, ...myProjects]);
+  // SOW #29: plus anything handed to a team or group they belong to.
+  const myTeamIds = new Set<string>(myTeams);
 
   return tasks.filter((t) => {
     if (isPrivateToSomeoneElse(t, userId)) return false;
@@ -203,6 +241,7 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
       t.task_manager_id === userId ||
       extraIds.has(t.id) ||
       subIds.has(t.id) ||
+      (!!t.team_id && myTeamIds.has(t.team_id)) ||
       (!!t.project_id && myProjectIds.has(t.project_id))
     );
   });
@@ -212,8 +251,11 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
  * Is this task on the person's own plate? Given to them by name, or sitting
  * unassigned in a project they are a member of.
  */
-export function isForMe(task: any, userId: string, projectIds: string[]): boolean {
+export function isForMe(task: any, userId: string, projectIds: string[], teamIds: string[] = []): boolean {
   if (task.assigned_to) return task.assigned_to === userId;
+  // SOW #29: unassigned work handed to my team is on my plate as much as
+  // unassigned work sitting in my project.
+  if (task.team_id && teamIds.includes(task.team_id)) return true;
   return !!task.project_id && projectIds.includes(task.project_id);
 }
 
@@ -262,8 +304,14 @@ export async function taskAudience(supabase: any, task: any): Promise<string[]> 
   (subs || []).forEach((x: any) => x.assigned_to && ids.add(x.assigned_to));
   (commenters || []).forEach((x: any) => x.author_id && ids.add(x.author_id));
 
-  const members = await projectMemberIds(supabase, task.project_id);
+  // SOW #2/#20: "the team" means the team too, not just the named people -
+  // everyone in a team the task was given to hears about changes to it.
+  const [members, teammates] = await Promise.all([
+    projectMemberIds(supabase, task.project_id),
+    teamMemberIds(supabase, task.team_id),
+  ]);
   members.forEach((x) => ids.add(x));
+  teammates.forEach((x) => ids.add(x));
   return Array.from(ids);
 }
 
@@ -360,7 +408,7 @@ export async function requireUser(supabase: any) {
 export async function notOnDesk(
   supabase: any,
   deskId: string,
-  refs: { assigned_to?: any; task_manager_id?: any; project_id?: any }
+  refs: { assigned_to?: any; task_manager_id?: any; project_id?: any; team_id?: any; milestone_id?: any }
 ): Promise<string | null> {
   for (const [key, what] of [["assigned_to", "That person"], ["task_manager_id", "That task manager"]] as const) {
     const v = refs[key];
@@ -371,6 +419,26 @@ export async function notOnDesk(
   if (refs.project_id) {
     const { data } = await supabase.from("projects").select("desk_id").eq("id", refs.project_id).maybeSingle();
     if (!data || data.desk_id !== deskId) return "That project isn't on this desk";
+  }
+  // SOW #41: a task may only be handed to a team on its own desk.
+  if (refs.team_id) {
+    const { data, error } = await supabase.from("teams").select("desk_id").eq("id", refs.team_id).maybeSingle();
+    if (error) return "Teams aren't set up yet - run the database migration";
+    if (!data || data.desk_id !== deskId) return "That team isn't on this desk";
+  }
+  // SOW #17: and only onto a milestone of a project on this desk. Without
+  // this a task could be pointed at another desk's milestone, which would
+  // then show that desk an inflated task count for work it can't see.
+  if (refs.milestone_id) {
+    const { data, error } = await supabase
+      .from("milestones")
+      .select("project_id, projects(desk_id)")
+      .eq("id", refs.milestone_id)
+      .maybeSingle();
+    if (error) return "Milestones aren't set up yet - run the database migration";
+    const owner = (data as any)?.projects;
+    const ownerDesk = Array.isArray(owner) ? owner[0]?.desk_id : owner?.desk_id;
+    if (!data || ownerDesk !== deskId) return "That milestone isn't on this desk";
   }
   return null;
 }
