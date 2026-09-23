@@ -72,6 +72,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         ? `Update requested: ${task.title}`
         : `Reminder: ${task.title}`,
       body: message,
+      type: isUpdateRequest ? "update_request" : "reminder",
     });
 
     await logActivity(supabase, {

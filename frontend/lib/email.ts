@@ -9,6 +9,7 @@
 // working normally with in-app notifications only.
 
 import { createServerSideClient } from "@/lib/supabase-server";
+import { getPrefsMap, wantsEmail } from "@/lib/notifications";
 
 const FROM = process.env.MAIL_FROM || "BusyBee <onboarding@resend.dev>";
 
@@ -84,15 +85,31 @@ export async function emailsForUsers(userIds: string[]): Promise<string[]> {
  * Send a message to a set of user ids. Safe to call unconditionally - it
  * resolves addresses, skips silently when mail is not configured, and never
  * throws.
+ *
+ * Checklist #48: pass `type` (the same notification `type` given to
+ * notifyMany) so anyone who has muted email for that category, or turned
+ * off email entirely, is left out before anything is sent.
  */
 export async function sendMail(opts: {
   userIds: string[];
   subject: string;
   body: string;
+  type?: string;
 }): Promise<boolean> {
   if (!mailConfigured()) return false;
 
-  const to = await emailsForUsers(opts.userIds);
+  let userIds = opts.userIds;
+  if (opts.type) {
+    try {
+      const prefs = await getPrefsMap(await createServerSideClient(), userIds);
+      userIds = userIds.filter((uid) => wantsEmail(prefs.get(uid)!, opts.type!));
+    } catch {
+      /* if prefs can't be read, fail open rather than silently drop mail */
+    }
+  }
+  if (userIds.length === 0) return false;
+
+  const to = await emailsForUsers(userIds);
   if (to.length === 0) return false;
 
   // Round-1 audit fix: one message per recipient (a shared `to` list disclosed

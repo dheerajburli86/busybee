@@ -293,6 +293,54 @@ def already_sent(task_id: str, marker: str, since: datetime) -> bool:
         return True
 
 
+# Checklist #48: notification preferences, mirroring frontend/lib/notifications.ts
+# category-for-category. The scheduler is the only source of "reminder"/
+# "overdue"/"checklist_due"/"bod_summary"/"eod_summary"/"update_request"
+# notifications, so without this the settings page's "Deadline reminders"
+# and "Daily summaries" toggles would silently do nothing.
+_prefs = {}
+
+
+def _category_of(ntype: str) -> str:
+    t = ntype or ""
+    if t in ("mention", "private_comment"):
+        return "comments"
+    if t in ("extension_request", "extension_reviewed", "assignor_added"):
+        return "extensions"
+    if t == "overdue" or t == "checklist_due" or t.startswith("reminder"):
+        return "reminders"
+    if t in ("bod_summary", "eod_summary", "update_request"):
+        return "daily_summary"
+    return "tasks"
+
+
+def _prefs_for(user_id: str) -> dict:
+    cached = _prefs.get(user_id)
+    if cached and time.time() - cached[1] < 300:
+        return cached[0]
+    prefs = {"email_enabled": True, "categories": {}}
+    try:
+        res = supabase.table("notification_prefs").select("email_enabled, categories").eq("user_id", user_id).limit(1).execute()
+        row = (res.data or [None])[0]
+        if row:
+            prefs["email_enabled"] = row.get("email_enabled") is not False
+            prefs["categories"] = row.get("categories") or {}
+    except Exception as exc:
+        # Table missing or unreachable: fail open (everything on), same default
+        # as a person who never visited the settings page.
+        warn(f"could not load notification prefs for {user_id}: {exc!r}")
+    _prefs[user_id] = (prefs, time.time())
+    return prefs
+
+
+def _wants(user_id: str, ntype: str, channel: str) -> bool:
+    prefs = _prefs_for(user_id)
+    if channel == "email" and not prefs["email_enabled"]:
+        return False
+    cat = prefs["categories"].get(_category_of(ntype)) or {}
+    return cat.get(channel) is not False
+
+
 # SOW #30: email alongside the in-app notification, through Resend's REST API
 # via the standard library. A no-op until RESEND_API_KEY is set.
 MAIL_FROM = (os.environ.get("MAIL_FROM") or "").strip() or "BusyBee <onboarding@resend.dev>"
@@ -353,19 +401,26 @@ def send_mail(user_id: str, subject: str, body: str) -> bool:
 
 def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "") -> bool:
     """In-app notification, then the same by email. No email if the in-app one
-    couldn't be saved: the saved row is what stops it being sent again."""
-    try:
-        supabase.table("notifications").insert(
-            {"user_id": user_id, "task_id": task_id, "type": ntype, "title": title, "message": message, "read": False}
-        ).execute()
-    except Exception as exc:
-        warn(f"could not write notification for {user_id}: {exc!r}")
-        return False
-    body = message
-    if APP_URL:
-        body += f"\n\nOpen BusyBee: {APP_URL}/dashboard" + (f"?task={task_id}" if task_id else "")
-    send_mail(user_id, subject or title, body)
-    return True
+    couldn't be saved: the saved row is what stops it being sent again.
+
+    Checklist #48: skipped per-channel when this person has muted ntype's
+    category (or, for email, turned email off entirely)."""
+    wrote = False
+    if _wants(user_id, ntype, "in_app"):
+        try:
+            supabase.table("notifications").insert(
+                {"user_id": user_id, "task_id": task_id, "type": ntype, "title": title, "message": message, "read": False}
+            ).execute()
+            wrote = True
+        except Exception as exc:
+            warn(f"could not write notification for {user_id}: {exc!r}")
+            return False
+    if _wants(user_id, ntype, "email"):
+        body = message
+        if APP_URL:
+            body += f"\n\nOpen BusyBee: {APP_URL}/dashboard" + (f"?task={task_id}" if task_id else "")
+        send_mail(user_id, subject or title, body)
+    return wrote
 
 
 def hours_text(h: float) -> str:

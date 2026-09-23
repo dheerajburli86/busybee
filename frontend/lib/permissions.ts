@@ -18,6 +18,7 @@
 
 import { NextResponse } from "next/server";
 import { selectAll } from "@/lib/chunks";
+import { getPrefsMap, wantsInApp } from "@/lib/notifications";
 
 export const SUPER_ROLES = ["admin", "supervisor"];
 export const MANAGER_ROLES = ["admin", "supervisor", "manager"];
@@ -43,6 +44,7 @@ export type TaskAccess = {
   isSuper: boolean;
   isAssignor: boolean;
   isTeamManager: boolean;
+  isProjectManager: boolean;
   isWorker: boolean;
   /** May edit the task's definition: dates, assignment, priority, archive. */
   canManage: boolean;
@@ -90,7 +92,8 @@ export async function managedTeamIds(supabase: any, userId: string): Promise<str
 
 /**
  * What the user may do with a project: see it (on their desk) and manage it
- * (supervisor/admin, or manager of the team the project is assigned to).
+ * (supervisor/admin, this project's own manager (#22), or manager of the
+ * team the project is assigned to).
  */
 export async function projectAccess(supabase: any, userId: string, projectId: string) {
   const { data: project } = await supabase.from("projects").select("*").eq("id", projectId).maybeSingle();
@@ -99,8 +102,9 @@ export async function projectAccess(supabase: any, userId: string, projectId: st
   if (!memberships.some((m) => m.desk_id === project.desk_id)) return null;
   const role = roleIn(memberships, project.desk_id);
   const managed = project.team_id ? await managedTeamIds(supabase, userId) : [];
-  const canManage = SUPER_ROLES.includes(role) || (!!project.team_id && managed.includes(project.team_id));
-  return { project, role, canManage };
+  const isProjectManager = project.manager_id === userId;
+  const canManage = SUPER_ROLES.includes(role) || isProjectManager || (!!project.team_id && managed.includes(project.team_id));
+  return { project, role, canManage, isProjectManager };
 }
 
 /** Team, department and group ids the user belongs to. */
@@ -145,7 +149,7 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     managedTeamIds(supabase, userId),
     userUnits(supabase, userId),
     task.project_id
-      ? supabase.from("projects").select("team_id").eq("id", task.project_id).maybeSingle()
+      ? supabase.from("projects").select("team_id, manager_id").eq("id", task.project_id).maybeSingle()
       : Promise.resolve({ data: null }),
   ]);
 
@@ -155,6 +159,9 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     (extra || []).some((a: any) => a.user_id === userId);
 
   const projectTeam = (project as any)?.data?.team_id ?? null;
+  // Checklist #22: whoever is named this project's manager runs its tasks too,
+  // independent of any team.
+  const isProjectManager = (project as any)?.data?.manager_id === userId;
   // Whoever is named manager of the task's team (or its project's team) runs it.
   const isTeamManager =
     (task.team_id && managed.includes(task.team_id)) || (projectTeam && managed.includes(projectTeam));
@@ -167,7 +174,7 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     (task.group_id && units.groupIds.includes(task.group_id)) ||
     (projectTeam && units.teamIds.includes(projectTeam));
 
-  const canManage = isSuper || isAssignor || !!isTeamManager;
+  const canManage = isSuper || isAssignor || !!isTeamManager || isProjectManager;
   const canWork = canManage || !!isWorker;
 
   return {
@@ -176,6 +183,7 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     isSuper,
     isAssignor,
     isTeamManager: !!isTeamManager,
+    isProjectManager,
     isWorker: !!isWorker,
     canManage,
     canWork,
@@ -198,13 +206,17 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
     selectAll<any>(() => supabase.from("subtasks").select("task_id").eq("assigned_to", userId).order("id")),
     managedTeamIds(supabase, userId),
     userUnits(supabase, userId),
-    selectAll<any>(() => supabase.from("projects").select("id, team_id").in("desk_id", memberships.map((m) => m.desk_id)).order("id")),
+    selectAll<any>(() => supabase.from("projects").select("id, team_id, manager_id").in("desk_id", memberships.map((m) => m.desk_id)).order("id")),
   ]);
 
   const extraIds = new Set((extra || []).map((x: any) => x.task_id));
   const subIds = new Set((subs || []).map((x: any) => x.task_id));
   const projectTeam = new Map<string, string | null>(
     (projects || []).map((p: any) => [p.id, p.team_id ?? null])
+  );
+  // Checklist #22: projects this user manages, independent of any team.
+  const managedProjects = new Set(
+    (projects || []).filter((p: any) => p.manager_id === userId).map((p: any) => p.id)
   );
 
   return tasks.filter((t) => {
@@ -221,7 +233,8 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
       (t.team_id && (units.teamIds.includes(t.team_id) || managed.includes(t.team_id))) ||
       (t.department_id && units.departmentIds.includes(t.department_id)) ||
       (t.group_id && units.groupIds.includes(t.group_id)) ||
-      (pTeam && (units.teamIds.includes(pTeam) || managed.includes(pTeam)))
+      (pTeam && (units.teamIds.includes(pTeam) || managed.includes(pTeam))) ||
+      (t.project_id && managedProjects.has(t.project_id))
     );
   });
 }
@@ -262,12 +275,16 @@ export async function visibleProjects(supabase: any, userId: string): Promise<an
   return projects
     .filter((p: any) => {
       if (SUPER_ROLES.includes(roleIn(memberships, p.desk_id))) return true;
+      if (p.manager_id === userId) return true;
       if (!p.team_id) return true;
       return managed.includes(p.team_id) || units.teamIds.includes(p.team_id) || withTasks.has(p.id);
     })
     .map((p: any) => ({
       ...p,
-      can_manage: SUPER_ROLES.includes(roleIn(memberships, p.desk_id)) || (!!p.team_id && managed.includes(p.team_id)),
+      can_manage:
+        SUPER_ROLES.includes(roleIn(memberships, p.desk_id)) ||
+        p.manager_id === userId ||
+        (!!p.team_id && managed.includes(p.team_id)),
     }));
 }
 
@@ -345,20 +362,31 @@ export async function logActivity(
   }
 }
 
-/** Insert notifications for several people at once. Never throws. */
+/**
+ * Insert notifications for several people at once. Never throws.
+ *
+ * Checklist #48: a person who has muted this notification's category (or
+ * every in-app notification) is skipped here rather than at read time, so
+ * their bell count and list never show it in the first place.
+ */
 export async function notifyMany(
   supabase: any,
   userIds: string[],
   n: { task_id?: string | null; type: string; title: string; message: string }
 ) {
-  const rows = Array.from(new Set(userIds.filter(Boolean))).map((uid) => ({
-    user_id: uid,
-    task_id: n.task_id ?? null,
-    type: n.type,
-    title: n.title,
-    message: n.message,
-    read: false,
-  }));
+  const ids = Array.from(new Set(userIds.filter(Boolean)));
+  if (ids.length === 0) return;
+  const prefs = await getPrefsMap(supabase, ids);
+  const rows = ids
+    .filter((uid) => wantsInApp(prefs.get(uid)!, n.type))
+    .map((uid) => ({
+      user_id: uid,
+      task_id: n.task_id ?? null,
+      type: n.type,
+      title: n.title,
+      message: n.message,
+      read: false,
+    }));
   if (rows.length === 0) return;
   try {
     await supabase.from("notifications").insert(rows);

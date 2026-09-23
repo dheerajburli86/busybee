@@ -12,6 +12,7 @@ import {
 } from "@/lib/permissions";
 import { inChunks } from "@/lib/chunks";
 import { isFinished } from "@/lib/status";
+import { isValidColor } from "@/components/tasks/types";
 
 // Projects. Supervisors/admins see and manage every project on their desk.
 // A team manager manages the projects assigned to their team (checklist #23).
@@ -89,8 +90,9 @@ export async function GET() {
 // Create a project (supervisor/admin, or a manager for their own team).
 export async function POST(req: Request) {
   try {
-    const { name, description, team_id } = await req.json();
+    const { name, description, team_id, manager_id, color } = await req.json();
     if (!name?.trim()) return NextResponse.json({ error: "A name is required" }, { status: 400 });
+    if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
 
     const supabase = await createServerSideClient();
     const user = await requireUser(supabase);
@@ -101,6 +103,12 @@ export async function POST(req: Request) {
     if (!deskId) return NextResponse.json({ error: "No desk found" }, { status: 400 });
     const role = roleIn(memberships, deskId);
 
+    // Checklist #22: only a supervisor/admin may name a project's manager -
+    // a team manager creating their own team's project can't hand it to
+    // someone else outright.
+    if (manager_id && !SUPER_ROLES.includes(role)) {
+      return deny("Only a supervisor can set a project manager.");
+    }
     if (!SUPER_ROLES.includes(role)) {
       const managed = await managedTeamIds(supabase, user.id);
       if (!managed.length) return deny("Only a supervisor or a team manager can create projects.");
@@ -112,10 +120,21 @@ export async function POST(req: Request) {
       const { data: t } = await supabase.from("teams").select("desk_id").eq("id", team_id).maybeSingle();
       if (!t || t.desk_id !== deskId) return NextResponse.json({ error: "Team not found" }, { status: 404 });
     }
+    if (manager_id) {
+      const { data: m } = await supabase.from("desk_members").select("user_id").eq("desk_id", deskId).eq("user_id", manager_id).limit(1);
+      if (!m || m.length === 0) return NextResponse.json({ error: "That person isn't on this desk" }, { status: 400 });
+    }
 
     const { data: project, error } = await supabase
       .from("projects")
-      .insert({ desk_id: deskId, name: name.trim(), description: description || null, team_id: team_id || null })
+      .insert({
+        desk_id: deskId,
+        name: name.trim(),
+        description: description || null,
+        team_id: team_id || null,
+        manager_id: manager_id || null,
+        color: color || null,
+      })
       .select("*")
       .single();
     if (error) throw error;
@@ -129,7 +148,7 @@ export async function POST(req: Request) {
 
     await logActivity(supabase, {
       entity_type: "project", entity_id: project.id, action: `created project ${project.name}`,
-      performed_by: user.id, desk_id: deskId, changes: { team_id: team_id || null },
+      performed_by: user.id, desk_id: deskId, changes: { team_id: team_id || null, manager_id: manager_id || null },
     });
     return NextResponse.json({ ...project, can_manage: true, sections: first ? [first] : [] });
   } catch (error: any) {
@@ -158,7 +177,8 @@ export async function PUT(req: Request) {
     const managed = await managedTeamIds(supabase, user.id);
     const isSuper = SUPER_ROLES.includes(role);
     const isTeamMgr = project.team_id && managed.includes(project.team_id);
-    if (!isSuper && !isTeamMgr) return deny("Only a supervisor or the project's team manager can edit it.");
+    const isProjectMgr = project.manager_id === user.id;
+    if (!isSuper && !isTeamMgr && !isProjectMgr) return deny("Only a supervisor, the project's manager or its team manager can edit it.");
 
     const patch: Record<string, any> = {};
     if (body.description !== undefined) patch.description = body.description;
@@ -174,6 +194,23 @@ export async function PUT(req: Request) {
       }
       patch.team_id = body.team_id || null;
     }
+    // Checklist #22: a distinct Project Manager, independent of any team -
+    // only a supervisor/admin may name or change one.
+    if ("manager_id" in body) {
+      if (!isSuper) return deny("Only a supervisor can set a project manager.");
+      if (body.manager_id) {
+        const { data: m } = await supabase.from("desk_members").select("user_id").eq("desk_id", project.desk_id).eq("user_id", body.manager_id).limit(1);
+        if (!m || m.length === 0) return NextResponse.json({ error: "That person isn't on this desk" }, { status: 400 });
+      }
+      patch.manager_id = body.manager_id || null;
+    }
+    // Checklist #19: an optional custom color for the project's badge.
+    if ("color" in body) {
+      if (body.color && !isValidColor(body.color)) {
+        return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
+      }
+      patch.color = body.color || null;
+    }
     if (Object.keys(patch).length === 0) return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
 
     const { data, error } = await supabase.from("projects").update(patch).eq("id", id).select("*").single();
@@ -184,6 +221,8 @@ export async function PUT(req: Request) {
       action:
         "team_id" in patch
           ? "assigned the project to a team"
+          : "manager_id" in patch
+          ? patch.manager_id ? "set the project's manager" : "removed the project's manager"
           : "auto_advance" in patch || "auto_complete" in patch
           ? "changed the project's workflow"
           : "edited the project",

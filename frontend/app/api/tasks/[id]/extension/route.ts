@@ -164,6 +164,7 @@ export async function POST(req: Request, { params }: Params) {
       userIds: deciders,
       subject: `Extension requested: ${access.task.title}`,
       body: `Reason: ${reason.trim()}\nCurrent deadline: ${formatForPeople(access.task.due_date)}\nRequested new deadline: ${formatForPeople(data.requested_date)}`,
+      type: "extension_request",
     });
 
     return NextResponse.json({ ...data, can_review: false });
@@ -281,6 +282,7 @@ export async function PUT(req: Request, { params }: Params) {
       userIds: [existing.requested_by],
       subject: status === "approved" ? "Extension approved" : "Extension rejected",
       body: message,
+      type: "extension_reviewed",
     });
 
     // Like any other deadline change, everyone else on the task hears about it.

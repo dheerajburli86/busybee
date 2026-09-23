@@ -10,6 +10,7 @@ import { sendJSON } from "@/lib/api";
 import { createClient } from "@/lib/supabase";
 import { STATUSES, isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
 import {
+  COLOR_SWATCHES,
   Lookups,
   MILESTONES,
   PRIORITIES,
@@ -677,6 +678,25 @@ export function TaskDetail({
                   <select value={task.priority} disabled={!(access?.isSuper || access?.isAssignor)} onChange={(e) => patch({ priority: e.target.value })} className={input}>
                     {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
+                </label>
+                <label className="flex flex-col gap-1 sm:col-span-2">
+                  <span className="text-slate-400 text-xs">Color (#19: a visual accent, purely optional)</span>
+                  <div className="flex gap-1 items-center">
+                    {COLOR_SWATCHES.map((c) => (
+                      <button
+                        key={c.value || "none"}
+                        type="button"
+                        disabled={!canManage}
+                        title={c.label}
+                        aria-label={`Color: ${c.label}`}
+                        onClick={() => patch({ color: c.value || null })}
+                        className={`w-6 h-6 rounded-full border-2 disabled:opacity-40 ${(task.color || "") === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[10px]"}`}
+                        style={c.value ? { backgroundColor: c.value } : undefined}
+                      >
+                        {!c.value && "✕"}
+                      </button>
+                    ))}
+                  </div>
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Start</span>

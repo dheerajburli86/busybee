@@ -173,7 +173,7 @@ export async function POST(request: NextRequest, { params }: Params) {
         title: "Private comment for you",
         message: `On "${access.task.title}": ${content.slice(0, 140)}`,
       });
-      await sendMail({ userIds: privateTo, subject: `Private comment on ${access.task.title}`, body: content });
+      await sendMail({ userIds: privateTo, subject: `Private comment on ${access.task.title}`, body: content, type: "private_comment" });
     } else {
       await notifyMany(supabase, Array.from(tagged), {
         task_id: taskId,

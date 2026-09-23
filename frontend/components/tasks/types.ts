@@ -32,6 +32,8 @@ export type Task = {
   remind_at?: string | null;
   /** On this person's own plate: theirs by name, or their unit's with nobody named. */
   for_me?: boolean;
+  /** Checklist #19: an optional custom color, shown as an accent on cards and bars. Overrides nothing about status/priority logic - purely visual. */
+  color?: string | null;
 };
 
 export type Section = { id: string; name: string; position: number };
@@ -46,6 +48,10 @@ export type Project = Named & {
   auto_advance?: boolean;
   auto_complete?: boolean;
   sections?: Section[];
+  /** Checklist #19: an optional custom color for this project's badge. */
+  color?: string | null;
+  /** Checklist #22: a person set as this project's manager (independent of team). */
+  manager_id?: string | null;
 };
 
 export type Lookups = {
@@ -66,6 +72,26 @@ export const PRIORITIES = [
 ];
 
 export const PRIORITY_RANK: Record<string, number> = { super_high: 4, high: 3, medium: 2, low: 1 };
+
+// Checklist #19: a small fixed palette so cards, badges and bars stay
+// legible in both themes rather than accepting any hex a person might type.
+// "" always means "no custom color - fall back to status/priority colors".
+export const COLOR_SWATCHES = [
+  { value: "", label: "None" },
+  { value: "#ef4444", label: "Red" },
+  { value: "#f97316", label: "Orange" },
+  { value: "#eab308", label: "Yellow" },
+  { value: "#22c55e", label: "Green" },
+  { value: "#14b8a6", label: "Teal" },
+  { value: "#3b82f6", label: "Blue" },
+  { value: "#8b5cf6", label: "Violet" },
+  { value: "#ec4899", label: "Pink" },
+  { value: "#64748b", label: "Slate" },
+];
+
+export function isValidColor(v: unknown): v is string {
+  return typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v);
+}
 
 export const MILESTONES = [
   { value: "phase1", label: "Phase 1" },

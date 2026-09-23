@@ -18,6 +18,7 @@ import {
   visibleTasks,
 } from "@/lib/permissions";
 import { isFinished, PRIORITY_VALUES, STATUS_VALUES } from "@/lib/status";
+import { isValidColor } from "@/components/tasks/types";
 import { normalizeTimestamp } from "@/lib/format";
 import { inChunks, selectAll } from "@/lib/chunks";
 import { completionMove, firstSection, notifyCompleted, sectionInProject } from "@/lib/workflow";
@@ -41,6 +42,7 @@ const MANAGE_FIELDS = [
   "progress_target",
   "project_id",
   "stage_id",
+  "color",
 ];
 // Fields the person doing the work may also report.
 const WORK_FIELDS = ["status", "progress_percent", "progress_current", "remind_at"];
@@ -221,11 +223,13 @@ export async function POST(request: NextRequest) {
       group_id,
       stage_id,
       remind_at,
+      color,
     } = body;
     // #1: an item added to "My To-Do" is private to its owner.
     const personal = body.personal === true;
 
     if (typeof title !== "string" || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
     // DOCX #10: a task cannot exist without a due date and time.
     const due = normalizeTimestamp(due_date);
     if (!due) {
@@ -277,6 +281,7 @@ export async function POST(request: NextRequest) {
         department_id: personal ? null : department_id || null,
         group_id: personal ? null : group_id || null,
         created_by: user.id,
+        color: color || null,
         ...(personal ? { personal: true } : {}),
       })
       .select("*")
@@ -317,6 +322,7 @@ export async function POST(request: NextRequest) {
         userIds: Array.from(recipients),
         subject: `New task assigned: ${task.title}`,
         body: `You were assigned: ${task.title}`,
+        type: "assigned",
       });
     }
 
@@ -394,6 +400,13 @@ export async function PUT(request: NextRequest) {
       if (k in patch && !validAmount(patch[k])) {
         return NextResponse.json({ error: "Progress numbers can't be negative" }, { status: 400 });
       }
+    }
+    // Checklist #19: an optional custom color accent - "" clears it.
+    if ("color" in patch) {
+      if (patch.color && !isValidColor(patch.color)) {
+        return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
+      }
+      patch.color = patch.color || null;
     }
     if ("project_id" in patch && !patch.project_id) {
       return NextResponse.json({ error: "A task must stay in a project" }, { status: 400 });
@@ -553,6 +566,7 @@ export async function PUT(request: NextRequest) {
         userIds: Array.from(newlyAssigned),
         subject: `New task assigned: ${task.title}`,
         body: `You were assigned: ${task.title}`,
+        type: "assigned",
       });
     }
 

@@ -7,6 +7,7 @@ import { OPEN_TASK_EVENT } from "@/components/NotificationBell";
 import { TaskDetail } from "@/components/tasks/TaskDetail";
 import { GanttView } from "@/components/tasks/GanttView";
 import {
+  COLOR_SWATCHES,
   Lookups,
   PRIORITIES,
   PRIORITY_RANK,
@@ -90,6 +91,7 @@ export default function DashboardPage() {
     team: "",
     department: "",
     group: "",
+    color: "",
   });
   const [creating, setCreating] = useState(false);
   const [showMore, setShowMore] = useState(false);
@@ -237,9 +239,10 @@ export default function DashboardPage() {
         team_id: form.team || null,
         department_id: form.department || null,
         group_id: form.group || null,
+        color: form.color || null,
       });
       setTasks((prev) => [data.task, ...prev]);
-      setForm({ ...form, title: "", description: "", start: "", due: "", assignee: "", team: "", department: "", group: "" });
+      setForm({ ...form, title: "", description: "", start: "", due: "", assignee: "", team: "", department: "", group: "", color: "" });
       // A new task may have created a project's first section; refresh the lookups quietly.
       if (!sectionsFor(lookups.projects, data.task.project_id).some((x) => x.id === data.task.stage_id)) refreshProjects();
       showInfo("Task created.");
@@ -514,6 +517,24 @@ export default function DashboardPage() {
                 </select>
               </label>
             )}
+            <div className="flex flex-col text-xs text-slate-400 gap-1">
+              Color
+              <div className="flex gap-1 items-center">
+                {COLOR_SWATCHES.map((c) => (
+                  <button
+                    key={c.value || "none"}
+                    type="button"
+                    title={c.label}
+                    aria-label={`Color: ${c.label}`}
+                    onClick={() => setForm({ ...form, color: c.value })}
+                    className={`w-6 h-6 rounded-full border-2 ${form.color === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[10px]"}`}
+                    style={c.value ? { backgroundColor: c.value } : undefined}
+                  >
+                    {!c.value && "✕"}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </form>
@@ -592,10 +613,12 @@ export default function DashboardPage() {
               <button
                 key={t.id}
                 onClick={() => setOpenId(t.id)}
-                className={`text-left bg-slate-800 rounded border p-4 hover:border-blue-500 ${late ? "border-l-4 border-l-red-500 border-slate-700" : "border-slate-700"}`}
+                style={!late && t.color ? { borderLeftColor: t.color, borderLeftWidth: 4 } : undefined}
+                className={`text-left bg-slate-800 rounded border p-4 hover:border-blue-500 ${late ? "border-l-4 border-l-red-500 border-slate-700" : t.color ? "border-slate-700" : "border-slate-700"}`}
               >
                 <div className="flex justify-between items-start gap-3 mb-1">
                   <h3 className={`font-bold ${late ? "text-red-400" : ""}`}>
+                    {t.color && <span className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle" style={{ backgroundColor: t.color }} title="Custom color" />}
                     {t.title}
                     {late && <span className="ml-2 text-xs font-normal">OVERDUE</span>}
                   </h3>
@@ -668,11 +691,15 @@ export default function DashboardPage() {
                       }}
                       onDragEnd={() => setDragged(null)}
                       onClick={() => setOpenId(t.id)}
+                      style={!isOverdue(t) && t.color ? { borderColor: t.color } : undefined}
                       className={`bg-slate-900 p-3 rounded border cursor-pointer hover:border-blue-500 text-sm ${
                         isOverdue(t) ? "border-red-600" : "border-slate-700"
                       } ${dragged === t.id ? "opacity-40" : ""}`}
                     >
-                      <p className="font-semibold mb-1">{t.title}</p>
+                      <p className="font-semibold mb-1">
+                        {t.color && <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ backgroundColor: t.color }} />}
+                        {t.title}
+                      </p>
                       <div className="flex justify-between text-xs text-slate-500 mb-2 gap-2">
                         <span>{boardBy === "status" ? PRIORITIES.find((p) => p.value === t.priority)?.label : statusLabel(t.status)}</span>
                         {boardBy === "section" && t.status && isFinished(t.status) && <span className="text-green-400">✓</span>}

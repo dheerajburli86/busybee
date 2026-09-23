@@ -67,7 +67,7 @@ export async function notifyCompleted(supabase: any, task: any, actorId: string 
     title: `Task ${word}`,
     message: `Task marked ${word}${how}: ${task.title}`,
   });
-  await sendMail({ userIds: audience, subject: `Task ${word}: ${task.title}`, body: `${task.title} was marked ${word}${how}.` });
+  await sendMail({ userIds: audience, subject: `Task ${word}: ${task.title}`, body: `${task.title} was marked ${word}${how}.`, type: "completed" });
 }
 
 /**

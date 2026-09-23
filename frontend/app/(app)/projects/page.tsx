@@ -3,14 +3,18 @@
 import { useEffect, useRef, useState } from "react";
 import { isFinished, isOverdue } from "@/lib/status";
 import { sendJSON } from "@/lib/api";
+import { COLOR_SWATCHES } from "@/components/tasks/types";
 
 type Section = { id: string; name: string; position: number };
+type Person = { id: string; name: string; email: string };
 
 interface Project {
   id: string;
   name: string;
   description: string | null;
   team_id: string | null;
+  manager_id?: string | null;
+  color?: string | null;
   created_at: string;
   can_manage?: boolean;
   auto_advance?: boolean;
@@ -24,6 +28,7 @@ export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [stats, setStats] = useState<Record<string, Stats>>({});
   const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const [people, setPeople] = useState<Person[]>([]);
   const [managedTeams, setManagedTeams] = useState<string[]>([]);
   const [role, setRole] = useState("member");
   const [loading, setLoading] = useState(true);
@@ -39,7 +44,7 @@ export default function ProjectsPage() {
   const [draft, setDraft] = useState("");
   const [descDraft, setDescDraft] = useState("");
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState({ name: "", description: "", team: "" });
+  const [creating, setCreating] = useState({ name: "", description: "", team: "", manager: "", color: "" });
 
   const isSuper = ["admin", "supervisor"].includes(role);
   const canCreate = isSuper || managedTeams.length > 0;
@@ -47,7 +52,7 @@ export default function ProjectsPage() {
   useEffect(() => {
     (async () => {
       try {
-        const [p, t, tm] = await Promise.all([fetch("/api/projects"), fetch("/api/tasks"), fetch("/api/teams")]);
+        const [p, t, tm, pm] = await Promise.all([fetch("/api/projects"), fetch("/api/tasks"), fetch("/api/teams"), fetch("/api/team/members")]);
         const pd = await p.json();
         if (!p.ok) throw new Error(pd.error || "Could not load projects");
         setProjects(pd.projects || []);
@@ -71,6 +76,10 @@ export default function ProjectsPage() {
           setTeams(d.teams || []);
           setRole(d.role || "member");
           setManagedTeams(d.managedTeams || []);
+        }
+        if (pm.ok) {
+          const d = await pm.json();
+          setPeople(d.members || []);
         }
 
         // Older server without figures: roll up the tasks this person can see.
@@ -151,9 +160,11 @@ export default function ProjectsPage() {
         name: creating.name.trim(),
         description: creating.description.trim() || null,
         team_id: creating.team || null,
+        manager_id: creating.manager || null,
+        color: creating.color || null,
       });
       setProjects((prev) => [p, ...prev]);
-      setCreating({ name: "", description: "", team: "" });
+      setCreating({ name: "", description: "", team: "", manager: "", color: "" });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -178,6 +189,7 @@ export default function ProjectsPage() {
   if (loading) return <p className="text-slate-400 p-6">Loading projects...</p>;
 
   const teamName = (id: string | null) => teams.find((t) => t.id === id)?.name;
+  const personName = (id: string | null | undefined) => (id ? people.find((p) => p.id === id)?.name || "Someone" : null);
   const inputCls = "px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm";
   const visible = projects.filter((p) =>
     `${p.name} ${p.description || ""} ${teamName(p.team_id) || ""}`.toLowerCase().includes(search.toLowerCase())
@@ -203,6 +215,27 @@ export default function ProjectsPage() {
               <option key={t.id} value={t.id}>{t.name}</option>
             ))}
           </select>
+          {isSuper && (
+            <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly, independent of any team">
+              <option value="">No project manager</option>
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+            </select>
+          )}
+          <div className="flex gap-1 items-center" role="group" aria-label="Project color">
+            {COLOR_SWATCHES.map((c) => (
+              <button
+                key={c.value || "none"}
+                type="button"
+                title={c.label}
+                aria-label={`Color: ${c.label}`}
+                onClick={() => setCreating({ ...creating, color: c.value })}
+                className={`w-6 h-6 rounded-full border-2 ${creating.color === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[10px]"}`}
+                style={c.value ? { backgroundColor: c.value } : undefined}
+              >
+                {!c.value && "✕"}
+              </button>
+            ))}
+          </div>
           <button type="submit" disabled={!creating.name.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm">Create project</button>
         </form>
       )}
@@ -218,7 +251,10 @@ export default function ProjectsPage() {
             return (
               <div key={project.id} className="p-4 sm:p-6 bg-slate-800 rounded border border-slate-700">
                 <div className="flex flex-wrap justify-between items-start gap-3 mb-2">
-                  <a href={`/dashboard?project=${project.id}`} className="text-xl font-bold hover:text-blue-400">{project.name}</a>
+                  <a href={`/dashboard?project=${project.id}`} className="text-xl font-bold hover:text-blue-400 flex items-center gap-2">
+                    {project.color && <span className="inline-block w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: project.color }} title="Custom color" />}
+                    {project.name}
+                  </a>
                   <div className="flex flex-wrap gap-3 text-xs">
                     <a href={`/search?project_id=${project.id}`} className="text-slate-400 hover:text-white">Search in project</a>
                     <a href={`/activity?project_id=${project.id}`} className="text-slate-400 hover:text-white">History</a>
@@ -232,7 +268,9 @@ export default function ProjectsPage() {
                 </div>
                 <p className="text-slate-400 text-sm">{project.description || "No description"}</p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Team: {teamName(project.team_id) || "not assigned"} · created {new Date(project.created_at).toLocaleDateString()}
+                  Team: {teamName(project.team_id) || "not assigned"}
+                  {project.manager_id && <> · Project Manager: {personName(project.manager_id)}</>}
+                  {" "}· created {new Date(project.created_at).toLocaleDateString()}
                 </p>
 
                 {s && s.total > 0 ? (
@@ -275,6 +313,28 @@ export default function ProjectsPage() {
                               {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                             </select>
                           )}
+                          {isSuper && (
+                            <select value={project.manager_id || ""} onChange={(e) => update(project.id, { manager_id: e.target.value || null })} className={`${inputCls} text-xs`} aria-label="Project manager (#22)">
+                              <option value="">No project manager</option>
+                              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+                            </select>
+                          )}
+                        </div>
+                        <div className="flex gap-1 items-center" role="group" aria-label="Project color">
+                          <span className="text-xs text-slate-400 mr-1">Color:</span>
+                          {COLOR_SWATCHES.map((c) => (
+                            <button
+                              key={c.value || "none"}
+                              type="button"
+                              title={c.label}
+                              aria-label={`Color: ${c.label}`}
+                              onClick={() => update(project.id, { color: c.value || null })}
+                              className={`w-5 h-5 rounded-full border-2 ${(project.color || "") === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[9px]"}`}
+                              style={c.value ? { backgroundColor: c.value } : undefined}
+                            >
+                              {!c.value && "✕"}
+                            </button>
+                          ))}
                         </div>
                       </div>
                     )}

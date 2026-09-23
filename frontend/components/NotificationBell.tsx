@@ -101,11 +101,14 @@ export function NotificationBell() {
         >
           <div className="flex justify-between items-center px-3 py-2 border-b border-slate-700">
             <span className="text-sm font-semibold">Notifications</span>
-            {unread > 0 && (
-              <button onClick={markAll} className="text-xs text-blue-400 hover:underline">
-                Mark all read
-              </button>
-            )}
+            <span className="flex items-center gap-3">
+              {unread > 0 && (
+                <button onClick={markAll} className="text-xs text-blue-400 hover:underline">
+                  Mark all read
+                </button>
+              )}
+              <a href="/settings" className="text-xs text-slate-400 hover:text-white" title="Notification settings (#48)">⚙️</a>
+            </span>
           </div>
           <div className="max-h-80 overflow-y-auto">
             {items.length === 0 ? (
