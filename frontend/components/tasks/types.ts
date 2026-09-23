@@ -11,6 +11,12 @@ export type Task = {
   completed_at: string | null;
   assigned_to: string | null;
   milestone: string | null;
+  /** SOW #17: the real milestone this task belongs to, if one is set. The
+   * legacy `milestone` text column above is still read for older tasks. */
+  milestone_id?: string | null;
+  /** SOW #29: the team or group this task is given to, alongside the
+   * individual assignee. Either, both or neither may be set. */
+  team_id?: string | null;
   project_id: string | null;
   stage_id?: string | null;
   archived_at: string | null;
@@ -50,10 +56,42 @@ export type Project = Named & {
   manager_id?: string | null;
 };
 
+/** SOW #41: the org structure people sit in, above projects. */
+export type Department = Named & {
+  member_count?: number;
+  team_count?: number;
+  can_manage?: boolean;
+};
+
+/**
+ * SOW #41: a standing team, or an ad-hoc "group" put together for one
+ * assignment. Same shape either way - `kind` is what separates them.
+ */
+export type Team = Named & {
+  kind: "team" | "group";
+  department_id?: string | null;
+  department_name?: string | null;
+  manager_id?: string | null;
+  manager_name?: string | null;
+  members?: Person[];
+  can_manage?: boolean;
+};
+
+/** SOW #17: a real milestone on a project, with a date of its own. */
+export type Milestone = Named & {
+  project_id: string;
+  project_name?: string | null;
+  due_date: string | null;
+  position: number;
+  task_count?: number;
+};
+
 export type Lookups = {
   people: Person[];
   projects: Project[];
   keyResults: { id: string; title: string }[];
+  teams?: Team[];
+  milestones?: Milestone[];
   me: string | null;
 };
 
