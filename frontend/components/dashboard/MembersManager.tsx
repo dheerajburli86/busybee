@@ -1,10 +1,11 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { createClient } from '@/utils/supabase/client';
+import { useState, useEffect, useCallback } from 'react';
+import { createClient } from '@/lib/supabase';
 
 interface TeamMember {
   id: string;
+  userId: string;
   email: string;
   name: string;
   role: 'admin' | 'supervisor' | 'manager' | 'member';
@@ -14,109 +15,133 @@ const ROLE_HIERARCHY = {
   admin: { label: 'Admin (Founder)', level: 4, description: 'Full access' },
   supervisor: { label: 'Supervisor (Senior)', level: 3, description: 'Manage tasks & members' },
   manager: { label: 'Manager', level: 2, description: 'Manage assigned tasks' },
-  member: { label: 'Team Member', level: 1, description: 'Work on assigned tasks' }
-};
+  member: { label: 'Team Member', level: 1, description: 'Work on assigned tasks' },
+} as const;
+
+type Role = keyof typeof ROLE_HIERARCHY;
 
 export default function MembersManager({ projectId }: { projectId: string }) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [newEmail, setNewEmail] = useState('');
-  const [newRole, setNewRole] = useState<'member' | 'manager' | 'supervisor' | 'admin'>('member');
+  const [newRole, setNewRole] = useState<Role>('member');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const supabase = createClient();
+
+  const loadMembers = useCallback(async () => {
+    if (!projectId) return;
+
+    const { data: rows, error: rowsError } = await supabase
+      .from('project_members')
+      .select('id, role, user_id')
+      .eq('project_id', projectId);
+
+    if (rowsError) {
+      setError(rowsError.message);
+      return;
+    }
+
+    const ids = Array.from(new Set((rows || []).map((r: any) => r.user_id).filter(Boolean)));
+    let byId = new Map<string, { email: string; full_name: string | null }>();
+
+    if (ids.length) {
+      const { data: people } = await supabase
+        .from('users')
+        .select('id, email, full_name')
+        .in('id', ids);
+      byId = new Map((people || []).map((p: any) => [p.id, { email: p.email, full_name: p.full_name }]));
+    }
+
+    setError(null);
+    setMembers(
+      (rows || []).map((m: any) => {
+        const person = byId.get(m.user_id);
+        return {
+          id: m.id,
+          userId: m.user_id,
+          email: person?.email || '',
+          name: person?.full_name || person?.email || 'Unknown',
+          role: m.role,
+        };
+      })
+    );
+  }, [projectId, supabase]);
 
   useEffect(() => {
     loadMembers();
-  }, [projectId]);
-
-  async function loadMembers() {
-    const { data } = await supabase
-      .from('project_members')
-      .select(`
-        id,
-        role,
-        auth.users (
-          id,
-          email,
-          user_metadata
-        )
-      `)
-      .eq('project_id', projectId);
-
-    if (data) {
-      setMembers(
-        data.map((m: any) => ({
-          id: m.id,
-          email: m.auth.users.email,
-          name: m.auth.users.user_metadata?.name || m.auth.users.email,
-          role: m.role
-        }))
-      );
-    }
-  }
+  }, [loadMembers]);
 
   async function addMember() {
-    if (!newEmail) return;
+    const email = newEmail.trim().toLowerCase();
+    if (!email) return;
 
     setLoading(true);
+    setError(null);
     try {
-      const { data: userData } = await supabase.auth.admin.getUserByEmail(newEmail);
+      const { data: person } = await supabase
+        .from('users')
+        .select('id')
+        .ilike('email', email)
+        .maybeSingle();
 
-      if (!userData?.user) {
-        alert('User not found');
+      if (!person) {
+        setError('No account found with that email address.');
         return;
       }
 
-      const { error } = await supabase
+      const { error: insertError } = await supabase
         .from('project_members')
-        .insert({
-          project_id: projectId,
-          user_id: userData.user.id,
-          role: newRole
-        });
+        .insert({ project_id: projectId, user_id: person.id, role: newRole });
 
-      if (error) {
-        alert(error.message);
+      if (insertError) {
+        setError(insertError.message);
         return;
       }
 
       setNewEmail('');
       setNewRole('member');
-      loadMembers();
+      await loadMembers();
     } finally {
       setLoading(false);
     }
   }
 
   async function removeMember(memberId: string) {
-    const { error } = await supabase
+    const { error: deleteError } = await supabase
       .from('project_members')
       .delete()
       .eq('id', memberId);
 
-    if (error) {
-      alert(error.message);
+    if (deleteError) {
+      setError(deleteError.message);
       return;
     }
-    loadMembers();
+    await loadMembers();
   }
 
-  async function updateRole(memberId: string, newRole: string) {
-    const { error } = await supabase
+  async function updateRole(memberId: string, role: string) {
+    const { error: updateError } = await supabase
       .from('project_members')
-      .update({ role: newRole })
+      .update({ role })
       .eq('id', memberId);
 
-    if (error) {
-      alert(error.message);
+    if (updateError) {
+      setError(updateError.message);
       return;
     }
-    loadMembers();
+    await loadMembers();
   }
 
   return (
     <div className="bg-gray-900 rounded-lg p-6 space-y-6">
       <div>
         <h2 className="text-xl font-bold text-white mb-4">Team Members</h2>
+
+        {error && (
+          <div className="bg-red-900/40 border border-red-700 text-red-200 text-sm px-4 py-2 rounded mb-4">
+            {error}
+          </div>
+        )}
 
         <div className="bg-gray-800 p-4 rounded-lg mb-6 space-y-4">
           <div className="flex gap-4 flex-col sm:flex-row">
@@ -129,7 +154,7 @@ export default function MembersManager({ projectId }: { projectId: string }) {
             />
             <select
               value={newRole}
-              onChange={(e) => setNewRole(e.target.value as any)}
+              onChange={(e) => setNewRole(e.target.value as Role)}
               className="bg-gray-700 text-white px-4 py-2 rounded border border-gray-600 focus:border-blue-500"
             >
               {Object.entries(ROLE_HIERARCHY).map(([key, val]) => (
@@ -172,6 +197,9 @@ export default function MembersManager({ projectId }: { projectId: string }) {
               </div>
             </div>
           ))}
+          {members.length === 0 && (
+            <p className="text-gray-500 text-sm">No members on this project yet.</p>
+          )}
         </div>
       </div>
     </div>
