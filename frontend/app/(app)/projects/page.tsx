@@ -202,7 +202,7 @@ export default function ProjectsPage() {
           {isSuper && (
             <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly">
               <option value="">No project manager</option>
-              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           )}
           <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
@@ -295,7 +295,7 @@ export default function ProjectsPage() {
                           {isSuper && (
                             <select value={project.manager_id || ""} onChange={(e) => update(project.id, { manager_id: e.target.value || null })} className={`${inputCls} text-xs`} aria-label="Project manager (#22)">
                               <option value="">No project manager</option>
-                              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+                              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                             </select>
                           )}
                         </div>
