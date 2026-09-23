@@ -287,7 +287,7 @@ export async function projectMemberIds(
 export async function logActivity(
   supabase: any,
   entry: {
-    entity_type: "task" | "project" | "okr";
+    entity_type: "task" | "project" | "okr" | "desk";
     entity_id: string;
     action: string;
     performed_by: string;
