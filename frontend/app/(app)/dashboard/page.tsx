@@ -29,7 +29,7 @@ const SORT_OPTIONS = [
 ];
 
 // Board column for cards whose value has no column of its own (an old
-// status, a deleted section/department, someone no longer on the desk).
+// status, a deleted section or project, someone no longer on the desk).
 const OTHER_COLUMN = "__other";
 
 const BOARD_GROUPS = [
@@ -37,7 +37,7 @@ const BOARD_GROUPS = [
   { value: "section", label: "Section" },
   { value: "priority", label: "Priority" },
   { value: "assignee", label: "Assignee" },
-  { value: "department", label: "Department" },
+  { value: "project", label: "Project" },
 ];
 
 // Which task field a board column stands for.
@@ -46,12 +46,12 @@ const BOARD_FIELD: Record<string, string> = {
   section: "stage_id",
   priority: "priority",
   assignee: "assigned_to",
-  department: "department_id",
+  project: "project_id",
 };
 
 type View = "list" | "board" | "gantt";
 
-const emptyLookups: Lookups = { people: [], projects: [], teams: [], departments: [], groups: [], keyResults: [], me: null };
+const emptyLookups: Lookups = { people: [], projects: [], keyResults: [], me: null };
 
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -88,9 +88,6 @@ export default function DashboardPage() {
     project: "",
     section: "",
     assignee: "",
-    team: "",
-    department: "",
-    group: "",
     color: "",
   });
   const [creating, setCreating] = useState(false);
@@ -121,11 +118,10 @@ export default function DashboardPage() {
           const r = await fetch(u, { cache: "no-store" });
           return r.ok ? r.json() : null;
         };
-        const [t, m, p, tm, okr, tpl] = await Promise.all([
+        const [t, m, p, okr, tpl] = await Promise.all([
           fetch("/api/tasks", { cache: "no-store" }),
           get("/api/team/members"),
           get("/api/projects"),
-          get("/api/teams"),
           get("/api/okr"),
           get("/api/templates"),
         ]);
@@ -153,9 +149,6 @@ export default function DashboardPage() {
           people: m?.members || [],
           me: m?.me || null,
           projects: p?.projects || [],
-          teams: tm?.teams || [],
-          departments: tm?.departments || [],
-          groups: tm?.groups || [],
           keyResults: okr?.keyResults || [],
         });
         setMyRole(m?.myRole || "member");
@@ -236,13 +229,10 @@ export default function DashboardPage() {
         project_id: form.project || projectF || null,
         stage_id: form.section || null,
         assigned_to: form.assignee || null,
-        team_id: form.team || null,
-        department_id: form.department || null,
-        group_id: form.group || null,
         color: form.color || null,
       });
       setTasks((prev) => [data.task, ...prev]);
-      setForm({ ...form, title: "", description: "", start: "", due: "", assignee: "", team: "", department: "", group: "", color: "" });
+      setForm({ ...form, title: "", description: "", start: "", due: "", assignee: "", color: "" });
       // A new task may have created a project's first section; refresh the lookups quietly.
       if (!sectionsFor(lookups.projects, data.task.project_id).some((x) => x.id === data.task.stage_id)) refreshProjects();
       showInfo("Task created.");
@@ -306,15 +296,15 @@ export default function DashboardPage() {
 
   const activeFilters = [statusF, priorityF, assigneeF, projectF, mine ? "mine" : ""].filter(Boolean).length;
 
-  // Board columns for the chosen grouping (checklist #16 / #17, SOW #26).
+  // Board columns for the chosen arrangement (checklist #16 / #17, SOW #26).
   const projectSections = sectionsFor(lookups.projects, projectF);
   const columns = useMemo(() => {
     if (boardBy === "section") return projectSections.map((sec) => ({ key: sec.id, label: sec.name }));
     if (boardBy === "priority") return PRIORITIES.map((p) => ({ key: p.value, label: p.label }));
     if (boardBy === "assignee")
       return [{ key: "", label: "Unassigned" }, ...lookups.people.map((p) => ({ key: p.id, label: p.name }))];
-    if (boardBy === "department")
-      return [{ key: "", label: "No department" }, ...lookups.departments.map((d) => ({ key: d.id, label: d.name }))];
+    if (boardBy === "project")
+      return [{ key: "", label: "No project" }, ...lookups.projects.map((p) => ({ key: p.id, label: p.name }))];
     return STATUSES.map((s) => ({ key: s.value, label: s.label }));
   }, [boardBy, lookups, projectSections]);
 
@@ -325,9 +315,8 @@ export default function DashboardPage() {
       ? t.priority
       : boardBy === "assignee"
       ? t.assigned_to || ""
-      : boardBy === "department"
-      ? // Work given to a team shows under that team's department.
-        t.department_id || lookups.teams.find((x) => x.id === t.team_id)?.department_id || ""
+      : boardBy === "project"
+      ? t.project_id || ""
       : t.status || "pending";
 
   const knownColumns = new Set(columns.map((c) => c.key));
@@ -487,27 +476,6 @@ export default function DashboardPage() {
                 </select>
               </label>
             )}
-            <label className="flex flex-col text-xs text-slate-400 gap-1">
-              Team
-              <select value={form.team} onChange={(e) => setForm({ ...form, team: e.target.value })} className={inputCls}>
-                <option value="">No team</option>
-                {lookups.teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </label>
-            <label className="flex flex-col text-xs text-slate-400 gap-1">
-              Department
-              <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} className={inputCls}>
-                <option value="">No department</option>
-                {lookups.departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-            </label>
-            <label className="flex flex-col text-xs text-slate-400 gap-1">
-              Custom group
-              <select value={form.group} onChange={(e) => setForm({ ...form, group: e.target.value })} className={inputCls}>
-                <option value="">No group</option>
-                {lookups.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-              </select>
-            </label>
             {templates.length > 0 && (
               <label className="flex flex-col text-xs text-slate-400 gap-1">
                 Or start from a template
@@ -566,8 +534,8 @@ export default function DashboardPage() {
           </select>
         )}
         {view === "board" && (
-          <select value={boardBy} onChange={(e) => setBoardBy(e.target.value)} className={inputCls} aria-label="Group board by">
-            {BOARD_GROUPS.map((o) => <option key={o.value} value={o.value}>Group by: {o.label}</option>)}
+          <select value={boardBy} onChange={(e) => setBoardBy(e.target.value)} className={inputCls} aria-label="Arrange board by">
+            {BOARD_GROUPS.map((o) => <option key={o.value} value={o.value}>Arrange by: {o.label}</option>)}
           </select>
         )}
       </div>

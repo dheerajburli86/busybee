@@ -23,9 +23,6 @@ export async function namesForChanges(supabase: any, rows: { changes?: any }[]):
     ["users", "id, full_name, email", "person"],
     ["projects", "id, name", "project"],
     ["stages", "id, name", "section"],
-    ["teams", "id, name", "team"],
-    ["departments", "id, name", "department"],
-    ["groups", "id, name", "group"],
     ["key_results", "id, title", "key result"],
     // Task titles are left out on purpose: whether someone may see a task is
     // decided by the app, not the database, so a title could leak here.

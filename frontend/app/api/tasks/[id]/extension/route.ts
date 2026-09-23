@@ -22,8 +22,8 @@ type Params = { params: Promise<{ id: string }> };
 
 /**
  * Everyone who can decide on a request: the task's creator, task manager and
- * extra assignors, and the manager of the team the task (or its project) was
- * given to. If that leaves nobody but the requester, the desk's supervisors.
+ * extra assignors, and the manager of the project the task belongs to. If
+ * that leaves nobody but the requester, the desk's supervisors.
  */
 async function decidersFor(supabase: any, task: any, requester: string): Promise<string[]> {
   const ids = new Set<string>();
@@ -31,18 +31,12 @@ async function decidersFor(supabase: any, task: any, requester: string): Promise
   const { data: extra } = await supabase.from("task_assignors").select("user_id").eq("task_id", task.id);
   (extra || []).forEach((x: any) => x.user_id && ids.add(x.user_id));
 
-  const teamIds: string[] = [];
-  if (task.team_id) teamIds.push(task.team_id);
   if (task.project_id) {
-    const { data: project } = await supabase.from("projects").select("team_id").eq("id", task.project_id).maybeSingle();
-    if (project?.team_id) teamIds.push(project.team_id);
-  }
-  if (teamIds.length) {
-    const [{ data: led }, { data: managers }] = await Promise.all([
-      supabase.from("teams").select("manager_id").in("id", teamIds),
-      supabase.from("team_members").select("user_id").in("team_id", teamIds).eq("role", "manager"),
+    const [{ data: project }, { data: managers }] = await Promise.all([
+      supabase.from("projects").select("manager_id").eq("id", task.project_id).maybeSingle(),
+      supabase.from("project_members").select("user_id").eq("project_id", task.project_id).eq("role", "manager"),
     ]);
-    (led || []).forEach((t: any) => t.manager_id && ids.add(t.manager_id));
+    if (project?.manager_id) ids.add(project.manager_id);
     (managers || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
   }
 

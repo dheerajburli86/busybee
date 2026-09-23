@@ -90,9 +90,6 @@ const FIELD_LABELS: Record<string, string> = {
   assigned_to: "assignee",
   task_manager_id: "task manager",
   key_result_id: "OKR link",
-  team_id: "team",
-  department_id: "department",
-  group_id: "group",
   due_date: "due date",
   start_date: "start date",
   progress_percent: "progress",
@@ -761,7 +758,7 @@ export function TaskDetail({
                 </label>
               </div>
 
-              {/* Assignment (checklist #4): person, team, department, custom group */}
+              {/* Assignment (checklist #4): person and task manager */}
               <div className={section}>
                 <h4 className={h4}>Assigned to</h4>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
@@ -770,27 +767,6 @@ export function TaskDetail({
                     <select value={task.assigned_to || ""} disabled={!canManage} onChange={(e) => patch({ assigned_to: e.target.value || null })} className={input}>
                       <option value="">Nobody</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-slate-400 text-xs">Team</span>
-                    <select value={task.team_id || ""} disabled={!canManage} onChange={(e) => patch({ team_id: e.target.value || null })} className={input}>
-                      <option value="">No team</option>
-                      {lookups.teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-slate-400 text-xs">Department</span>
-                    <select value={task.department_id || ""} disabled={!canManage} onChange={(e) => patch({ department_id: e.target.value || null })} className={input}>
-                      <option value="">No department</option>
-                      {lookups.departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                    </select>
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-slate-400 text-xs">Custom group</span>
-                    <select value={task.group_id || ""} disabled={!canManage} onChange={(e) => patch({ group_id: e.target.value || null })} className={input}>
-                      <option value="">No group</option>
-                      {lookups.groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                     </select>
                   </label>
                   <label className="flex flex-col gap-1">
@@ -1156,7 +1132,7 @@ export function TaskDetail({
                   onChange={setNewComment}
                   lookups={lookups}
                   rows={3}
-                  placeholder={privateTo ? "Private comment - only the people you pick will see it..." : "Add a comment... type @ to tag people, teams, departments or groups"}
+                  placeholder={privateTo ? "Private comment - only the people you pick will see it..." : "Add a comment... type @ to tag people or projects"}
                   className={`${input} w-full resize-y ${privateTo ? "border-amber-600" : ""}`}
                 />
                 <div className="flex flex-wrap items-center gap-3 mt-2">

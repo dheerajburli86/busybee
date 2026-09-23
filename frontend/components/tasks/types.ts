@@ -14,9 +14,6 @@ export type Task = {
   project_id: string | null;
   stage_id?: string | null;
   archived_at: string | null;
-  team_id: string | null;
-  department_id: string | null;
-  group_id: string | null;
   task_manager_id: string | null;
   key_result_id: string | null;
   progress_type: string | null;
@@ -30,7 +27,7 @@ export type Task = {
   personal?: boolean;
   /** "Remind me at" (#2). */
   remind_at?: string | null;
-  /** On this person's own plate: theirs by name, or their unit's with nobody named. */
+  /** On this person's own plate: theirs by name, or unassigned in a project they're on. */
   for_me?: boolean;
   /** Checklist #19: an optional custom color, shown as an accent on cards and bars. Overrides nothing about status/priority logic - purely visual. */
   color?: string | null;
@@ -43,23 +40,19 @@ export type Named = { id: string; name: string };
 
 export type Project = Named & {
   description?: string | null;
-  team_id?: string | null;
   can_manage?: boolean;
   auto_advance?: boolean;
   auto_complete?: boolean;
   sections?: Section[];
   /** Checklist #19: an optional custom color for this project's badge. */
   color?: string | null;
-  /** Checklist #22: a person set as this project's manager (independent of team). */
+  /** Checklist #22: the person who runs this project. */
   manager_id?: string | null;
 };
 
 export type Lookups = {
   people: Person[];
   projects: Project[];
-  teams: (Named & { department_id?: string | null })[];
-  departments: Named[];
-  groups: Named[];
   keyResults: { id: string; title: string }[];
   me: string | null;
 };

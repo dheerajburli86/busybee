@@ -40,7 +40,7 @@ export async function GET(request: NextRequest) {
 
     let docQuery = supabase
       .from("documents")
-      .select("id, name, folder_id, file_size, file_type, visibility, team_id, department_id, uploaded_by, created_at")
+      .select("id, name, folder_id, file_size, file_type, visibility, project_id, uploaded_by, created_at")
       .eq("desk_id", ctx.deskId)
       .order("created_at", { ascending: false });
     docQuery = folderId ? docQuery.eq("folder_id", folderId) : docQuery.is("folder_id", null);
@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
     if (!ctx) return NextResponse.json({ error: "No desk found" }, { status: 400 });
 
     const body = await request.json();
-    const { storage_path, name, file_size, file_type, folder_id, visibility = "desk", team_id, department_id } = body;
+    const { storage_path, name, file_size, file_type, folder_id, visibility = "desk", project_id } = body;
     if (!storage_path || !name) return NextResponse.json({ error: "storage_path and name required" }, { status: 400 });
     if (!VISIBILITIES.includes(visibility)) return NextResponse.json({ error: "Unknown visibility" }, { status: 400 });
 
@@ -96,13 +96,9 @@ export async function POST(request: NextRequest) {
       const { data: f } = await supabase.from("document_folders").select("desk_id").eq("id", folder_id).maybeSingle();
       if (!f || f.desk_id !== ctx.deskId) return NextResponse.json({ error: "Folder not found" }, { status: 404 });
     }
-    if (visibility === "team" && team_id) {
-      const { data: t } = await supabase.from("teams").select("desk_id").eq("id", team_id).maybeSingle();
-      if (!t || t.desk_id !== ctx.deskId) return NextResponse.json({ error: "Team not found" }, { status: 404 });
-    }
-    if (visibility === "department" && department_id) {
-      const { data: d } = await supabase.from("departments").select("desk_id").eq("id", department_id).maybeSingle();
-      if (!d || d.desk_id !== ctx.deskId) return NextResponse.json({ error: "Department not found" }, { status: 404 });
+    if (visibility === "project" && project_id) {
+      const { data: pr } = await supabase.from("projects").select("desk_id").eq("id", project_id).maybeSingle();
+      if (!pr || pr.desk_id !== ctx.deskId) return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
     const { data, error } = await supabase
@@ -115,11 +111,10 @@ export async function POST(request: NextRequest) {
         file_size: file_size || null,
         file_type: file_type || null,
         visibility,
-        team_id: visibility === "team" ? team_id || null : null,
-        department_id: visibility === "department" ? department_id || null : null,
+        project_id: visibility === "project" ? project_id || null : null,
         uploaded_by: user.id,
       })
-      .select("id, name, folder_id, file_size, file_type, visibility, team_id, department_id, uploaded_by, created_at")
+      .select("id, name, folder_id, file_size, file_type, visibility, project_id, uploaded_by, created_at")
       .single();
     if (error) throw error;
 
@@ -159,8 +154,7 @@ export async function PUT(request: NextRequest) {
     if ("visibility" in body) {
       if (!VISIBILITIES.includes(body.visibility)) return NextResponse.json({ error: "Unknown visibility" }, { status: 400 });
       patch.visibility = body.visibility;
-      patch.team_id = body.visibility === "team" ? body.team_id || null : null;
-      patch.department_id = body.visibility === "department" ? body.department_id || null : null;
+      patch.project_id = body.visibility === "project" ? body.project_id || null : null;
     }
     if (Object.keys(patch).length === 0) return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
 
@@ -168,7 +162,7 @@ export async function PUT(request: NextRequest) {
       .from("documents")
       .update(patch)
       .eq("id", id)
-      .select("id, name, folder_id, file_size, file_type, visibility, team_id, department_id, uploaded_by, created_at")
+      .select("id, name, folder_id, file_size, file_type, visibility, project_id, uploaded_by, created_at")
       .single();
     if (error) throw error;
     return NextResponse.json({ ...data, can_manage: true });

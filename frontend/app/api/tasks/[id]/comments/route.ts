@@ -1,7 +1,7 @@
 // app/api/tasks/[id]/comments/route.ts
 //
 // Checklist #29 / SOW #23: a comment trail with author and time, @tagging of
-// people, teams, departments and groups, and edit/delete of your own comments.
+// people and projects, and edit/delete of your own comments.
 // Checklist #31: a comment can be private - sent to chosen people and hidden
 // from everyone else on the task. The database enforces that too (see the
 // comments policies in the migration), so it holds for search as well.
@@ -57,31 +57,17 @@ async function mentionedPeople(supabase: any, deskId: string, content: string): 
     if (mentions.some((m) => handles.includes(m))) recipients.add(u.id);
   }
 
-  const [{ data: teams }, { data: departments }, { data: groups }] = await Promise.all([
-    supabase.from("teams").select("id, name").eq("desk_id", deskId),
-    supabase.from("departments").select("id, name").eq("desk_id", deskId),
-    supabase.from("groups").select("id, name").eq("desk_id", deskId),
-  ]);
-  const teamIds = (teams || []).filter((t: any) => mentions.includes(slug(t.name))).map((t: any) => t.id);
-  const deptIds = (departments || []).filter((d: any) => mentions.includes(slug(d.name))).map((d: any) => d.id);
-  const groupIds = (groups || []).filter((g: any) => mentions.includes(slug(g.name))).map((g: any) => g.id);
+  const { data: projects } = await supabase.from("projects").select("id, name").eq("desk_id", deskId);
+  const projectIds = (projects || []).filter((p: any) => mentions.includes(slug(p.name))).map((p: any) => p.id);
 
-  if (deptIds.length) {
-    const { data } = await supabase.from("teams").select("id").in("department_id", deptIds);
-    (data || []).forEach((t: any) => !teamIds.includes(t.id) && teamIds.push(t.id));
-  }
-  if (teamIds.length) {
-    const [{ data }, { data: led }] = await Promise.all([
-      supabase.from("team_members").select("user_id").in("team_id", teamIds),
-      supabase.from("teams").select("manager_id").in("id", teamIds),
+  if (projectIds.length) {
+    const [{ data: members }, { data: led }] = await Promise.all([
+      supabase.from("project_members").select("user_id").in("project_id", projectIds),
+      supabase.from("projects").select("manager_id").in("id", projectIds),
     ]);
-    (data || []).forEach((m: any) => m.user_id && recipients.add(m.user_id));
-    // A team's manager is part of the team for tagging too.
-    (led || []).forEach((t: any) => t.manager_id && recipients.add(t.manager_id));
-  }
-  if (groupIds.length) {
-    const { data } = await supabase.from("group_members").select("user_id").in("group_id", groupIds);
-    (data || []).forEach((m: any) => m.user_id && recipients.add(m.user_id));
+    (members || []).forEach((m: any) => m.user_id && recipients.add(m.user_id));
+    // A project's manager is part of the project for tagging too.
+    (led || []).forEach((p: any) => p.manager_id && recipients.add(p.manager_id));
   }
   return recipients;
 }

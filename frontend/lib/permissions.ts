@@ -1,17 +1,19 @@
 // Server-side permission checks. Every write route goes through here so the
 // rules live in one place instead of being re-implemented per endpoint.
 //
+// Access is project-based: a person sees and does work through the projects
+// they are a member of, and the project's manager runs it.
+//
 // Roles (desk_members.role):
-//   admin, supervisor  - Project Manager / super user: can manage everything
-//   manager            - Team/Group manager: manages the teams they run and
-//                        the tasks and projects given to those teams
-//   member             - Team member: works on what they are given
+//   admin, supervisor  - super user: can manage everything on the desk
+//   manager            - manages the projects they run and the work in them
+//   member             - works on what they are given
 //
 // A person's relationship to a task adds to their role:
 //   assignor   - created the task, is its task manager, or was added as an
 //                extra assignor
-//   worker     - is the assignee, or is assigned one of its subtasks, or
-//                belongs to the team / department / group it was given to
+//   worker     - is the assignee, is assigned one of its subtasks, or is a
+//                member of the project the task belongs to
 //
 // Personal to-do items (tasks.personal) belong to their owner alone: nobody
 // else sees them, supervisors included.
@@ -43,7 +45,6 @@ export type TaskAccess = {
   role: string;
   isSuper: boolean;
   isAssignor: boolean;
-  isTeamManager: boolean;
   isProjectManager: boolean;
   isWorker: boolean;
   /** May edit the task's definition: dates, assignment, priority, archive. */
@@ -79,21 +80,29 @@ export function topRole(memberships: Membership[]): string {
   );
 }
 
-/** Team ids the user manages (as teams.manager_id or a 'manager' team member). */
-export async function managedTeamIds(supabase: any, userId: string): Promise<string[]> {
+/**
+ * Project ids the user runs: projects.manager_id (#22) plus any project they
+ * sit on as a 'manager'.
+ */
+export async function managedProjectIds(supabase: any, userId: string): Promise<string[]> {
   const [{ data: led }, { data: asMember }] = await Promise.all([
-    supabase.from("teams").select("id").eq("manager_id", userId),
-    supabase.from("team_members").select("team_id").eq("user_id", userId).eq("role", "manager"),
+    supabase.from("projects").select("id").eq("manager_id", userId),
+    supabase.from("project_members").select("project_id").eq("user_id", userId).eq("role", "manager"),
   ]);
   return Array.from(
-    new Set([...(led || []).map((t: any) => t.id), ...(asMember || []).map((t: any) => t.team_id)])
+    new Set([...(led || []).map((p: any) => p.id), ...(asMember || []).map((p: any) => p.project_id)])
   );
+}
+
+/** Project ids the user is a member of, whatever their role on them. */
+export async function userProjectIds(supabase: any, userId: string): Promise<string[]> {
+  const { data } = await supabase.from("project_members").select("project_id").eq("user_id", userId);
+  return Array.from(new Set((data || []).map((p: any) => p.project_id).filter(Boolean)));
 }
 
 /**
  * What the user may do with a project: see it (on their desk) and manage it
- * (supervisor/admin, this project's own manager (#22), or manager of the
- * team the project is assigned to).
+ * (supervisor/admin, or this project's own manager (#22)).
  */
 export async function projectAccess(supabase: any, userId: string, projectId: string) {
   const { data: project } = await supabase.from("projects").select("*").eq("id", projectId).maybeSingle();
@@ -101,27 +110,10 @@ export async function projectAccess(supabase: any, userId: string, projectId: st
   const memberships = await getMemberships(supabase, userId);
   if (!memberships.some((m) => m.desk_id === project.desk_id)) return null;
   const role = roleIn(memberships, project.desk_id);
-  const managed = project.team_id ? await managedTeamIds(supabase, userId) : [];
-  const isProjectManager = project.manager_id === userId;
-  const canManage = SUPER_ROLES.includes(role) || isProjectManager || (!!project.team_id && managed.includes(project.team_id));
+  const managed = await managedProjectIds(supabase, userId);
+  const isProjectManager = project.manager_id === userId || managed.includes(project.id);
+  const canManage = SUPER_ROLES.includes(role) || isProjectManager;
   return { project, role, canManage, isProjectManager };
-}
-
-/** Team, department and group ids the user belongs to. */
-export async function userUnits(supabase: any, userId: string) {
-  const [{ data: tm }, { data: gm }] = await Promise.all([
-    supabase.from("team_members").select("team_id").eq("user_id", userId),
-    supabase.from("group_members").select("group_id").eq("user_id", userId),
-  ]);
-  const teamIds: string[] = (tm || []).map((t: any) => t.team_id);
-  let departmentIds: string[] = [];
-  if (teamIds.length) {
-    const { data: teams } = await supabase.from("teams").select("department_id").in("id", teamIds);
-    departmentIds = Array.from(
-      new Set((teams || []).map((t: any) => t.department_id).filter(Boolean))
-    ) as string[];
-  }
-  return { teamIds, departmentIds, groupIds: (gm || []).map((g: any) => g.group_id) as string[] };
 }
 
 /**
@@ -143,14 +135,11 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
   const role = roleIn(memberships, task.desk_id);
   const isSuper = SUPER_ROLES.includes(role);
 
-  const [{ data: extra }, { data: subs }, managed, units, project] = await Promise.all([
+  const [{ data: extra }, { data: subs }, managed, myProjects] = await Promise.all([
     supabase.from("task_assignors").select("user_id").eq("task_id", taskId),
     supabase.from("subtasks").select("assigned_to").eq("task_id", taskId),
-    managedTeamIds(supabase, userId),
-    userUnits(supabase, userId),
-    task.project_id
-      ? supabase.from("projects").select("team_id, manager_id").eq("id", task.project_id).maybeSingle()
-      : Promise.resolve({ data: null }),
+    managedProjectIds(supabase, userId),
+    userProjectIds(supabase, userId),
   ]);
 
   const isAssignor =
@@ -158,23 +147,15 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     task.task_manager_id === userId ||
     (extra || []).some((a: any) => a.user_id === userId);
 
-  const projectTeam = (project as any)?.data?.team_id ?? null;
-  // Checklist #22: whoever is named this project's manager runs its tasks too,
-  // independent of any team.
-  const isProjectManager = (project as any)?.data?.manager_id === userId;
-  // Whoever is named manager of the task's team (or its project's team) runs it.
-  const isTeamManager =
-    (task.team_id && managed.includes(task.team_id)) || (projectTeam && managed.includes(projectTeam));
+  // Checklist #22: whoever runs this task's project runs its tasks too.
+  const isProjectManager = !!task.project_id && managed.includes(task.project_id);
 
   const isWorker =
     task.assigned_to === userId ||
     (subs || []).some((s: any) => s.assigned_to === userId) ||
-    (task.team_id && units.teamIds.includes(task.team_id)) ||
-    (task.department_id && units.departmentIds.includes(task.department_id)) ||
-    (task.group_id && units.groupIds.includes(task.group_id)) ||
-    (projectTeam && units.teamIds.includes(projectTeam));
+    (!!task.project_id && myProjects.includes(task.project_id));
 
-  const canManage = isSuper || isAssignor || !!isTeamManager || isProjectManager;
+  const canManage = isSuper || isAssignor || isProjectManager;
   const canWork = canManage || !!isWorker;
 
   return {
@@ -182,7 +163,6 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     role,
     isSuper,
     isAssignor,
-    isTeamManager: !!isTeamManager,
     isProjectManager,
     isWorker: !!isWorker,
     canManage,
@@ -194,97 +174,77 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
 /**
  * Filter a list of desk tasks down to the ones this user may see.
  * Supervisors/admins see everything on their desks; everyone else sees work
- * they created, manage, do, or that was given to a unit they belong to.
+ * they created, manage, do, or that sits in a project they belong to.
  */
 export async function visibleTasks(supabase: any, userId: string, tasks: any[]): Promise<any[]> {
   if (tasks.length === 0) return tasks;
   const memberships = await getMemberships(supabase, userId);
 
   // Filtered by person only - a list of every task id would not fit in a URL.
-  const [extra, subs, managed, units, projects] = await Promise.all([
+  const [extra, subs, managed, myProjects] = await Promise.all([
     selectAll<any>(() => supabase.from("task_assignors").select("task_id").eq("user_id", userId).order("id")),
     selectAll<any>(() => supabase.from("subtasks").select("task_id").eq("assigned_to", userId).order("id")),
-    managedTeamIds(supabase, userId),
-    userUnits(supabase, userId),
-    selectAll<any>(() => supabase.from("projects").select("id, team_id, manager_id").in("desk_id", memberships.map((m) => m.desk_id)).order("id")),
+    managedProjectIds(supabase, userId),
+    userProjectIds(supabase, userId),
   ]);
 
   const extraIds = new Set((extra || []).map((x: any) => x.task_id));
   const subIds = new Set((subs || []).map((x: any) => x.task_id));
-  const projectTeam = new Map<string, string | null>(
-    (projects || []).map((p: any) => [p.id, p.team_id ?? null])
-  );
-  // Checklist #22: projects this user manages, independent of any team.
-  const managedProjects = new Set(
-    (projects || []).filter((p: any) => p.manager_id === userId).map((p: any) => p.id)
-  );
+  // Checklist #22: projects this user manages, plus the ones they are on.
+  const myProjectIds = new Set<string>([...managed, ...myProjects]);
 
   return tasks.filter((t) => {
     if (isPrivateToSomeoneElse(t, userId)) return false;
     const role = roleIn(memberships, t.desk_id);
     if (SUPER_ROLES.includes(role)) return true;
-    const pTeam = t.project_id ? projectTeam.get(t.project_id) ?? null : null;
     return (
       t.created_by === userId ||
       t.assigned_to === userId ||
       t.task_manager_id === userId ||
       extraIds.has(t.id) ||
       subIds.has(t.id) ||
-      (t.team_id && (units.teamIds.includes(t.team_id) || managed.includes(t.team_id))) ||
-      (t.department_id && units.departmentIds.includes(t.department_id)) ||
-      (t.group_id && units.groupIds.includes(t.group_id)) ||
-      (pTeam && (units.teamIds.includes(pTeam) || managed.includes(pTeam))) ||
-      (t.project_id && managedProjects.has(t.project_id))
+      (!!t.project_id && myProjectIds.has(t.project_id))
     );
   });
 }
 
 /**
- * Is this task on the person's own plate? Given to them by name, or given to
- * a team, department or group they belong to with nobody named.
+ * Is this task on the person's own plate? Given to them by name, or sitting
+ * unassigned in a project they are a member of.
  */
-export function isForMe(
-  task: any,
-  userId: string,
-  units: { teamIds: string[]; departmentIds: string[]; groupIds: string[] }
-): boolean {
+export function isForMe(task: any, userId: string, projectIds: string[]): boolean {
   if (task.assigned_to) return task.assigned_to === userId;
-  return (
-    (!!task.team_id && units.teamIds.includes(task.team_id)) ||
-    (!!task.department_id && units.departmentIds.includes(task.department_id)) ||
-    (!!task.group_id && units.groupIds.includes(task.group_id))
-  );
+  return !!task.project_id && projectIds.includes(task.project_id);
 }
 
 /**
  * Projects the user can see: supervisors see all on their desks; others see
- * unassigned projects, their teams' projects, and any project holding a task
- * they can see. `can_manage` marks the ones they run.
+ * the projects they run, the ones they are a member of, and any project
+ * holding a task they can see. `can_manage` marks the ones they run.
  */
 export async function visibleProjects(supabase: any, userId: string): Promise<any[]> {
   const memberships = await getMemberships(supabase, userId);
   const deskIds = memberships.map((m) => m.desk_id);
   if (!deskIds.length) return [];
-  const [projects, managed, units, tasks] = await Promise.all([
+  const [projects, managed, myProjects, tasks] = await Promise.all([
     selectAll<any>(() => supabase.from("projects").select("*").in("desk_id", deskIds).order("created_at", { ascending: false }).order("id")),
-    managedTeamIds(supabase, userId),
-    userUnits(supabase, userId),
+    managedProjectIds(supabase, userId),
+    userProjectIds(supabase, userId),
     selectAll<any>(() => supabase.from("tasks").select("*").in("desk_id", deskIds).is("archived_at", null).order("id")),
   ]);
   const withTasks = new Set((await visibleTasks(supabase, userId, tasks)).map((t: any) => t.project_id));
   return projects
     .filter((p: any) => {
       if (SUPER_ROLES.includes(roleIn(memberships, p.desk_id))) return true;
-      if (p.manager_id === userId) return true;
-      if (!p.team_id) return true;
-      return managed.includes(p.team_id) || units.teamIds.includes(p.team_id) || withTasks.has(p.id);
+      if (p.manager_id === userId || managed.includes(p.id)) return true;
+      return myProjects.includes(p.id) || withTasks.has(p.id);
     })
     .map((p: any) => ({
       ...p,
       can_manage:
         SUPER_ROLES.includes(roleIn(memberships, p.desk_id)) ||
         p.manager_id === userId ||
-        (!!p.team_id && managed.includes(p.team_id)),
+        managed.includes(p.id),
     }));
 }
 
@@ -302,37 +262,24 @@ export async function taskAudience(supabase: any, task: any): Promise<string[]> 
   (subs || []).forEach((x: any) => x.assigned_to && ids.add(x.assigned_to));
   (commenters || []).forEach((x: any) => x.author_id && ids.add(x.author_id));
 
-  const unitMembers = await unitMemberIds(supabase, {
-    teamId: task.team_id,
-    departmentId: task.department_id,
-    groupId: task.group_id,
-  });
-  unitMembers.forEach((x) => ids.add(x));
+  const members = await projectMemberIds(supabase, task.project_id);
+  members.forEach((x) => ids.add(x));
   return Array.from(ids);
 }
 
-/** Members of a team, department (all its teams) and/or custom group. */
-export async function unitMemberIds(
+/** Everyone on a project: its members plus whoever manages it. */
+export async function projectMemberIds(
   supabase: any,
-  units: { teamId?: string | null; departmentId?: string | null; groupId?: string | null }
+  projectId: string | null | undefined
 ): Promise<string[]> {
+  if (!projectId) return [];
   const ids = new Set<string>();
-  const teamIds: string[] = [];
-  if (units.teamId) teamIds.push(units.teamId);
-  if (units.departmentId) {
-    const { data } = await supabase.from("teams").select("id").eq("department_id", units.departmentId);
-    (data || []).forEach((t: any) => teamIds.push(t.id));
-  }
-  if (teamIds.length) {
-    const { data } = await supabase.from("team_members").select("user_id").in("team_id", teamIds);
-    (data || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
-    const { data: mgrs } = await supabase.from("teams").select("manager_id").in("id", teamIds);
-    (mgrs || []).forEach((m: any) => m.manager_id && ids.add(m.manager_id));
-  }
-  if (units.groupId) {
-    const { data } = await supabase.from("group_members").select("user_id").eq("group_id", units.groupId);
-    (data || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
-  }
+  const [{ data: members }, { data: project }] = await Promise.all([
+    supabase.from("project_members").select("user_id").eq("project_id", projectId),
+    supabase.from("projects").select("manager_id").eq("id", projectId).maybeSingle(),
+  ]);
+  (members || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
+  if (project?.manager_id) ids.add(project.manager_id);
   return Array.from(ids);
 }
 
@@ -340,7 +287,7 @@ export async function unitMemberIds(
 export async function logActivity(
   supabase: any,
   entry: {
-    entity_type: "task" | "project" | "team" | "department" | "group" | "okr";
+    entity_type: "task" | "project" | "okr";
     entity_id: string;
     action: string;
     performed_by: string;
@@ -404,16 +351,16 @@ export async function requireUser(supabase: any) {
 }
 
 /**
- * The people and units a task (or subtask) is given to must be on the same
+ * The people and project a task (or subtask) is given to must be on the same
  * desk. Returns a message for the first one that isn't, or null. Shared by
- * every route that writes assigned_to/task_manager_id/team_id/etc. so this
+ * every route that writes assigned_to/task_manager_id/project_id so this
  * check can't silently drift between them (subtasks used to skip it
  * entirely - see round-2 audit).
  */
 export async function notOnDesk(
   supabase: any,
   deskId: string,
-  refs: { assigned_to?: any; task_manager_id?: any; team_id?: any; department_id?: any; group_id?: any }
+  refs: { assigned_to?: any; task_manager_id?: any; project_id?: any }
 ): Promise<string | null> {
   for (const [key, what] of [["assigned_to", "That person"], ["task_manager_id", "That task manager"]] as const) {
     const v = refs[key];
@@ -421,15 +368,9 @@ export async function notOnDesk(
     const { data } = await supabase.from("desk_members").select("user_id").eq("desk_id", deskId).eq("user_id", v).limit(1);
     if (!data || data.length === 0) return `${what} isn't on this desk`;
   }
-  for (const [key, table, what] of [
-    ["team_id", "teams", "That team"],
-    ["department_id", "departments", "That department"],
-    ["group_id", "groups", "That group"],
-  ] as const) {
-    const v = refs[key];
-    if (!v) continue;
-    const { data } = await supabase.from(table).select("desk_id").eq("id", v).maybeSingle();
-    if (!data || data.desk_id !== deskId) return `${what} isn't on this desk`;
+  if (refs.project_id) {
+    const { data } = await supabase.from("projects").select("desk_id").eq("id", refs.project_id).maybeSingle();
+    if (!data || data.desk_id !== deskId) return "That project isn't on this desk";
   }
   return null;
 }

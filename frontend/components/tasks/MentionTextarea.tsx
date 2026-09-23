@@ -1,7 +1,7 @@
 "use client";
 
-// Checklist #30: typing "@" in a comment offers the people, teams,
-// departments and groups that can be tagged, so nobody has to guess a handle.
+// Checklist #30: typing "@" in a comment offers the people and projects
+// that can be tagged, so nobody has to guess a handle.
 // The handles match what the server looks for (lib: comments route).
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -19,9 +19,7 @@ export function mentionOptions(lookups: Lookups): Option[] {
     kind: "person",
   }));
   const units = [
-    ...lookups.teams.map((t) => ({ handle: slug(t.name), label: t.name, kind: "team" })),
-    ...lookups.departments.map((d) => ({ handle: slug(d.name), label: d.name, kind: "department" })),
-    ...lookups.groups.map((g) => ({ handle: slug(g.name), label: g.name, kind: "group" })),
+    ...lookups.projects.map((p) => ({ handle: slug(p.name), label: p.name, kind: "project" })),
   ];
   return [...people, ...units].filter((o) => /^[a-z0-9._-]+$/.test(o.handle));
 }

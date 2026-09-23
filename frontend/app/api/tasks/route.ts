@@ -13,8 +13,8 @@ import {
   requireUser,
   taskAccess,
   taskAudience,
-  unitMemberIds,
-  userUnits,
+  projectMemberIds,
+  userProjectIds,
   visibleTasks,
 } from "@/lib/permissions";
 import { isFinished, PRIORITY_VALUES, STATUS_VALUES } from "@/lib/status";
@@ -23,7 +23,7 @@ import { normalizeTimestamp } from "@/lib/format";
 import { inChunks, selectAll } from "@/lib/chunks";
 import { completionMove, firstSection, notifyCompleted, sectionInProject } from "@/lib/workflow";
 
-// Fields only an assignor / task manager / team manager / supervisor may change.
+// Fields only an assignor / task manager / project manager / supervisor may change.
 const MANAGE_FIELDS = [
   "title",
   "description",
@@ -33,9 +33,6 @@ const MANAGE_FIELDS = [
   "assigned_to",
   "milestone",
   "archived_at",
-  "team_id",
-  "department_id",
-  "group_id",
   "task_manager_id",
   "key_result_id",
   "progress_type",
@@ -63,9 +60,6 @@ const FIELD_LABEL: Record<string, string> = {
   progress_type: "progress measure",
   project_id: "project",
   stage_id: "section",
-  team_id: "team",
-  department_id: "department",
-  group_id: "group",
   archived_at: "archive",
   remind_at: "reminder",
 };
@@ -116,14 +110,13 @@ async function resolveContext(supabase: any, userId: string, projectId?: string 
     if (!data || !memberships.some((m) => m.desk_id === data.desk_id)) return null;
     project = data;
   } else {
-    // No project chosen: use the desk's general project - one that isn't
-    // given to a team - so the task isn't shared with a team by accident.
+    // No project chosen: fall back to the desk's oldest project so the task
+    // still lands somewhere its members can see.
     const deskIds = memberships.map((m) => m.desk_id);
     const { data: general } = await supabase
       .from("projects")
       .select("id, desk_id")
       .in("desk_id", deskIds)
-      .is("team_id", null)
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -174,9 +167,9 @@ export async function GET(request: NextRequest) {
       return q.order("created_at", { ascending: false }).order("id");
     });
 
-    const [visible, units, reminders] = await Promise.all([
+    const [visible, myProjects, reminders] = await Promise.all([
       visibleTasks(supabase, user.id, tasks || []),
-      userUnits(supabase, user.id),
+      userProjectIds(supabase, user.id),
       myReminders(supabase, user.id),
     ]);
 
@@ -192,7 +185,7 @@ export async function GET(request: NextRequest) {
         // Your own "remind me at" time, not whoever else set one on the task.
         ...(reminders ? { remind_at: reminders.get(t.id) ?? null } : {}),
         subtask_count: counts[t.id] || 0,
-        for_me: isForMe(t, user.id, units),
+        for_me: isForMe(t, user.id, myProjects),
       })),
     });
   } catch (error: any) {
@@ -218,9 +211,6 @@ export async function POST(request: NextRequest) {
       progress_percent = 0,
       project_id,
       assigned_to,
-      team_id,
-      department_id,
-      group_id,
       stage_id,
       remind_at,
       color,
@@ -248,7 +238,7 @@ export async function POST(request: NextRequest) {
     if (!ctx) return NextResponse.json({ error: "No project is set up for your desk yet" }, { status: 400 });
 
     if (!personal) {
-      const problem = await notOnDesk(supabase, ctx.desk_id, { assigned_to, team_id, department_id, group_id });
+      const problem = await notOnDesk(supabase, ctx.desk_id, { assigned_to, project_id });
       if (problem) return NextResponse.json({ error: problem }, { status: 400 });
     }
 
@@ -277,9 +267,6 @@ export async function POST(request: NextRequest) {
         start_date: start,
         progress_percent: clampPercent(progress_percent),
         assigned_to: personal ? user.id : assigned_to || null,
-        team_id: personal ? null : team_id || null,
-        department_id: personal ? null : department_id || null,
-        group_id: personal ? null : group_id || null,
         created_by: user.id,
         color: color || null,
         ...(personal ? { personal: true } : {}),
@@ -304,12 +291,10 @@ export async function POST(request: NextRequest) {
       changes: { title: task.title, due_date: task.due_date },
     });
 
-    // Tell whoever the work was given to - a person and/or a whole unit.
+    // Tell whoever the work was given to - a person and/or the whole project.
     const recipients = new Set<string>();
     if (task.assigned_to) recipients.add(task.assigned_to);
-    (await unitMemberIds(supabase, { teamId: task.team_id, departmentId: task.department_id, groupId: task.group_id })).forEach(
-      (id) => recipients.add(id)
-    );
+    (await projectMemberIds(supabase, task.project_id)).forEach((id) => recipients.add(id));
     recipients.delete(user.id);
     if (recipients.size) {
       await notifyMany(supabase, Array.from(recipients), {
@@ -326,8 +311,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const units = await userUnits(supabase, user.id);
-    return NextResponse.json({ task: { ...task, subtask_count: 0, for_me: isForMe(task, user.id, units) } });
+    const myProjects = await userProjectIds(supabase, user.id);
+    return NextResponse.json({ task: { ...task, subtask_count: 0, for_me: isForMe(task, user.id, myProjects) } });
   } catch (error: any) {
     console.error("POST /api/tasks failed:", error);
     return NextResponse.json({ error: error?.message || "Failed to create task" }, { status: 500 });
@@ -365,11 +350,11 @@ export async function PUT(request: NextRequest) {
       if (Object.prototype.hasOwnProperty.call(patch, "due_date")) {
         return deny("Only the assignor or a supervisor can change a due date. Request an extension instead.");
       }
-      return deny("Only the assignor, task manager, team manager or a supervisor can change that.");
+      return deny("Only the assignor, task manager, project manager or a supervisor can change that.");
     }
     // Round-1 audit fix: checklist #17 / SOW #23 restrict priority changes to
     // "the assignor/supervisor", narrower than the general canManage (which
-    // also includes a team manager who neither assigned nor supervises this
+    // also includes a project manager who neither assigned nor supervises this
     // particular task). canManage above already lets the write through, so
     // add a dedicated, tighter check just for priority.
     if (Object.prototype.hasOwnProperty.call(patch, "priority") && !(access.isSuper || access.isAssignor)) {
@@ -449,12 +434,12 @@ export async function PUT(request: NextRequest) {
         patch.reminder_sent_at = null;
       }
       if (Object.keys(patch).length === 0) {
-        const [{ count }, units] = await Promise.all([
+        const [{ count }, myProjects] = await Promise.all([
           supabase.from("subtasks").select("id", { count: "exact", head: true }).eq("task_id", id),
-          userUnits(supabase, user.id),
+          userProjectIds(supabase, user.id),
         ]);
         return NextResponse.json({
-          task: { ...before, remind_at: myReminder ?? null, subtask_count: count || 0, for_me: isForMe(before, user.id, units) },
+          task: { ...before, remind_at: myReminder ?? null, subtask_count: count || 0, for_me: isForMe(before, user.id, myProjects) },
         });
       }
     }
@@ -545,15 +530,12 @@ export async function PUT(request: NextRequest) {
       });
     }
 
-    // Assignment: a person, or everyone in a newly chosen team/department/group.
+    // Assignment: a person, or everyone in a newly chosen project.
     const newlyAssigned = new Set<string>();
     if (changes.assigned_to && task.assigned_to) newlyAssigned.add(task.assigned_to);
-    const unitIds = await unitMemberIds(supabase, {
-      teamId: changes.team_id ? task.team_id : null,
-      departmentId: changes.department_id ? task.department_id : null,
-      groupId: changes.group_id ? task.group_id : null,
-    });
-    unitIds.forEach((x) => newlyAssigned.add(x));
+    if (changes.project_id) {
+      (await projectMemberIds(supabase, task.project_id)).forEach((x) => newlyAssigned.add(x));
+    }
     newlyAssigned.delete(user.id);
     if (newlyAssigned.size) {
       await notifyMany(supabase, Array.from(newlyAssigned), {
@@ -586,9 +568,9 @@ export async function PUT(request: NextRequest) {
     if (changes.status && isFinished(task.status) && !isFinished(before.status)) {
       await notifyCompleted(supabase, task, user.id);
     } else {
-      // SOW #2: tell the team when something meaningful changes.
+      // SOW #2: tell the project when something meaningful changes.
       const meaningful = Object.keys(changes).filter(
-        (k) => !["assigned_to", "team_id", "department_id", "group_id", "remind_at"].includes(k)
+        (k) => !["assigned_to", "project_id", "remind_at"].includes(k)
       );
       if (meaningful.length) {
         await notifyMany(
@@ -604,16 +586,16 @@ export async function PUT(request: NextRequest) {
       }
     }
 
-    const [{ count }, units, reminders] = await Promise.all([
+    const [{ count }, myProjects, reminders] = await Promise.all([
       supabase.from("subtasks").select("id", { count: "exact", head: true }).eq("task_id", id),
-      userUnits(supabase, user.id),
+      userProjectIds(supabase, user.id),
       myReminder === undefined ? myReminders(supabase, user.id) : Promise.resolve(null),
     ]);
     const shownReminder =
       myReminder !== undefined ? myReminder : reminders ? reminders.get(id) ?? null : task.remind_at ?? null;
 
     return NextResponse.json({
-      task: { ...task, remind_at: shownReminder, subtask_count: count || 0, for_me: isForMe(task, user.id, units) },
+      task: { ...task, remind_at: shownReminder, subtask_count: count || 0, for_me: isForMe(task, user.id, myProjects) },
     });
   } catch (error: any) {
     console.error("PUT /api/tasks failed:", error);

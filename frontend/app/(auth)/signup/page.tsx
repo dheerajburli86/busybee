@@ -36,7 +36,7 @@ export default function SignupPage() {
         {error && <p className="text-red-500 mb-4">{error}</p>}
         {sent && (
           <p className="text-green-400 mb-4 text-sm">
-            Account created. Check your email to confirm it, then log in. A supervisor will then add you to the team.
+            Account created. Check your email to confirm it, then log in. A supervisor will then give you access.
           </p>
         )}
         <form onSubmit={handleSignup} className="space-y-4">

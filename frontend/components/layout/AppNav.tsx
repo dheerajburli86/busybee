@@ -18,7 +18,7 @@ const LINKS = [
   { href: "/chat", label: "Chat" },
   { href: "/okr", label: "OKR" },
   { href: "/documents", label: "Documents" },
-  { href: "/teams", label: "Teams" },
+  { href: "/people", label: "People" },
   { href: "/timesheet", label: "Timesheet" },
 ];
 

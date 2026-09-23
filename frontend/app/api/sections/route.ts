@@ -8,7 +8,7 @@
 //                                        (default: the first other section)
 //
 // Anyone on the desk can read them; the project's managers (a supervisor, or
-// the manager of the team the project belongs to) change them.
+// the project's manager) change them.
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
@@ -48,7 +48,7 @@ export async function POST(req: Request) {
 
     const a = await access(supabase, user.id, project_id);
     if (!a) return NextResponse.json({ error: "Project not found" }, { status: 404 });
-    if (!a.canManage) return deny("Only a supervisor or the project's team manager can change its sections.");
+    if (!a.canManage) return deny("Only a supervisor or the project's manager can change its sections.");
 
     const clean = String(name || "").trim().slice(0, MAX_NAME);
     if (!clean) return NextResponse.json({ error: "Give the section a name" }, { status: 400 });
@@ -88,7 +88,7 @@ export async function PUT(req: Request) {
     if (Array.isArray(body.order)) {
       const a = await access(supabase, user.id, body.project_id);
       if (!a) return NextResponse.json({ error: "Project not found" }, { status: 404 });
-      if (!a.canManage) return deny("Only a supervisor or the project's team manager can change its sections.");
+      if (!a.canManage) return deny("Only a supervisor or the project's manager can change its sections.");
       const existing = await sectionsOf(supabase, a.project.id);
       const order: string[] = body.order;
       const same = order.length === existing.length && existing.every((s) => order.includes(s.id));
@@ -109,7 +109,7 @@ export async function PUT(req: Request) {
     if (!stage) return NextResponse.json({ error: "Section not found" }, { status: 404 });
     const a = await access(supabase, user.id, stage.project_id);
     if (!a) return NextResponse.json({ error: "Section not found" }, { status: 404 });
-    if (!a.canManage) return deny("Only a supervisor or the project's team manager can change its sections.");
+    if (!a.canManage) return deny("Only a supervisor or the project's manager can change its sections.");
 
     const clean = String(body.name || "").trim().slice(0, MAX_NAME);
     if (!clean) return NextResponse.json({ error: "Give the section a name" }, { status: 400 });
@@ -142,7 +142,7 @@ export async function DELETE(req: Request) {
     if (!stage) return NextResponse.json({ error: "Section not found" }, { status: 404 });
     const a = await access(supabase, user.id, stage.project_id);
     if (!a) return NextResponse.json({ error: "Section not found" }, { status: 404 });
-    if (!a.canManage) return deny("Only a supervisor or the project's team manager can change its sections.");
+    if (!a.canManage) return deny("Only a supervisor or the project's manager can change its sections.");
 
     const others = (await sectionsOf(supabase, stage.project_id)).filter((s) => s.id !== stage.id);
     if (others.length === 0) return NextResponse.json({ error: "A project needs at least one section" }, { status: 400 });

@@ -3,8 +3,8 @@
 // Checklist #1 / #2 / #5: My To-Do.
 //   - private items you add yourself (only you can see them), with an
 //     optional "remind me at" time on top of the automatic deadline reminders
-//   - every task on your plate: given to you by name, or given to a team,
-//     department or group you're in with nobody named
+//   - every task on your plate: given to you by name, or given to a project
+//     you're in with nobody named
 //   - checklist items (subtasks) assigned to you on other people's tasks
 
 import { useEffect, useState } from "react";
@@ -261,7 +261,7 @@ export default function TodoPage() {
                     <span>{PRIORITY_LABEL[t.priority] ?? t.priority}</span>
                     <span>{t.progress_percent}%</span>
                     {t.due_date && <span>Due {formatDue(t.due_date)}</span>}
-                    {!t.assigned_to && <span>for your team</span>}
+                    {!t.assigned_to && <span>for your project</span>}
                     {t.milestone && <span>📍 {milestoneLabel(t.milestone)}</span>}
                     {isOverdue(t) && <span className="text-red-400 font-semibold">OVERDUE</span>}
                     <label className="flex items-center gap-1">

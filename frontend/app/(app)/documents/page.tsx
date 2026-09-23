@@ -2,7 +2,7 @@
 
 // Checklist #46: a standalone document library, separate from per-task
 // attachments (#32). Files sit in folders and carry their own visibility
-// (#47: desk-wide, one team, one department, or private to the uploader).
+// (#47: desk-wide, one project, or private to the uploader).
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -16,9 +16,8 @@ type Doc = {
   folder_id: string | null;
   file_size: number | null;
   file_type: string | null;
-  visibility: "desk" | "team" | "department" | "private";
-  team_id: string | null;
-  department_id: string | null;
+  visibility: "desk" | "project" | "private";
+  project_id: string | null;
   uploaded_by: string;
   uploaded_by_name?: string;
   created_at: string;
@@ -28,8 +27,7 @@ type Crumb = { id: string; name: string };
 
 const VIS_LABEL: Record<string, string> = {
   desk: "Everyone",
-  team: "One team",
-  department: "One department",
+  project: "One project",
   private: "Just me",
 };
 
@@ -60,16 +58,14 @@ export default function DocumentsPage() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [docs, setDocs] = useState<Doc[]>([]);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
-  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [newFolder, setNewFolder] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [uploadVis, setUploadVis] = useState<{ visibility: string; team_id: string; department_id: string }>({
+  const [uploadVis, setUploadVis] = useState<{ visibility: string; project_id: string }>({
     visibility: "desk",
-    team_id: "",
-    department_id: "",
+    project_id: "",
   });
   const fileInput = useRef<HTMLInputElement>(null);
   const busy = useRef(false);
@@ -98,11 +94,10 @@ export default function DocumentsPage() {
 
   useEffect(() => {
     (async () => {
-      const r = await fetch("/api/teams", { cache: "no-store" });
+      const r = await fetch("/api/projects", { cache: "no-store" });
       if (r.ok) {
         const d = await r.json();
-        setTeams(d.teams || []);
-        setDepartments(d.departments || []);
+        setProjects(d.projects || []);
       }
     })();
   }, []);
@@ -153,8 +148,7 @@ export default function DocumentsPage() {
         file_type: file.type || null,
         folder_id: folderId,
         visibility: uploadVis.visibility,
-        team_id: uploadVis.team_id || null,
-        department_id: uploadVis.department_id || null,
+        project_id: uploadVis.project_id || null,
       });
       setDocs((prev) => [doc, ...prev]);
     } catch (e: any) {
@@ -165,9 +159,9 @@ export default function DocumentsPage() {
     }
   };
 
-  const setVisibility = async (doc: Doc, visibility: string, team_id?: string, department_id?: string) => {
+  const setVisibility = async (doc: Doc, visibility: string, project_id?: string) => {
     try {
-      const data = await sendJSON("/api/documents", "PUT", { id: doc.id, visibility, team_id, department_id });
+      const data = await sendJSON("/api/documents", "PUT", { id: doc.id, visibility, project_id });
       setDocs((prev) => prev.map((d) => (d.id === doc.id ? { ...d, ...data } : d)));
     } catch (e: any) {
       setError(e.message);
@@ -220,26 +214,16 @@ export default function DocumentsPage() {
             Who can see it
             <select value={uploadVis.visibility} onChange={(e) => setUploadVis({ ...uploadVis, visibility: e.target.value })} className={inputCls}>
               <option value="desk">Everyone (desk-wide)</option>
-              <option value="team">One team</option>
-              <option value="department">One department</option>
+              <option value="project">One project</option>
               <option value="private">Just me</option>
             </select>
           </label>
-          {uploadVis.visibility === "team" && (
+          {uploadVis.visibility === "project" && (
             <label className="flex flex-col text-xs text-slate-400 gap-1">
-              Team
-              <select value={uploadVis.team_id} onChange={(e) => setUploadVis({ ...uploadVis, team_id: e.target.value })} className={inputCls}>
-                <option value="">Choose a team...</option>
-                {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </label>
-          )}
-          {uploadVis.visibility === "department" && (
-            <label className="flex flex-col text-xs text-slate-400 gap-1">
-              Department
-              <select value={uploadVis.department_id} onChange={(e) => setUploadVis({ ...uploadVis, department_id: e.target.value })} className={inputCls}>
-                <option value="">Choose a department...</option>
-                {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              Project
+              <select value={uploadVis.project_id} onChange={(e) => setUploadVis({ ...uploadVis, project_id: e.target.value })} className={inputCls}>
+                <option value="">Choose a project...</option>
+                {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </label>
           )}
@@ -289,12 +273,8 @@ export default function DocumentsPage() {
                 <select
                   value={d.visibility}
                   onChange={(e) => {
-                    if (e.target.value === "team") {
-                      const team_id = teams[0]?.id;
-                      setVisibility(d, "team", team_id, undefined);
-                    } else if (e.target.value === "department") {
-                      const department_id = departments[0]?.id;
-                      setVisibility(d, "department", undefined, department_id);
+                    if (e.target.value === "project") {
+                      setVisibility(d, "project", d.project_id || projects[0]?.id);
                     } else {
                       setVisibility(d, e.target.value);
                     }
@@ -303,8 +283,7 @@ export default function DocumentsPage() {
                   aria-label={`Visibility for ${d.name}`}
                 >
                   <option value="desk">Everyone</option>
-                  <option value="team">One team</option>
-                  <option value="department">One department</option>
+                  <option value="project">One project</option>
                   <option value="private">Just me</option>
                 </select>
               ) : (

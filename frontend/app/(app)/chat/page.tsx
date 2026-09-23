@@ -1,7 +1,7 @@
 "use client";
 
-// Checklist #27: chat rooms (organisation, department, team, private and
-// custom), room creation and management, message search, and who's online.
+// Checklist #27: chat rooms (organisation, project, private and custom),
+// room creation and management, message search, and who's online.
 // New messages arrive live through Supabase Realtime, with polling as a
 // fallback if the live connection isn't available.
 
@@ -13,7 +13,7 @@ import { PeoplePicker } from "@/components/tasks/TaskDetail";
 type Room = {
   id: string;
   name: string;
-  kind: "org" | "department" | "team" | "private" | "custom";
+  kind: "org" | "project" | "private" | "custom";
   created_by: string | null;
   members: string[];
   last_message_at: string | null;
@@ -23,8 +23,7 @@ type Member = { id: string; name: string; email: string };
 
 const KIND_LABEL: Record<string, string> = {
   org: "Organisation",
-  department: "Departments",
-  team: "Teams",
+  project: "Projects",
   private: "Private",
   custom: "Custom rooms",
 };
@@ -223,7 +222,7 @@ export default function ChatPage() {
   };
 
   const unread = (r: Room) => r.last_message_at && r.id !== roomId && (!lastSeen[r.id] || r.last_message_at > lastSeen[r.id]);
-  const grouped = (["org", "department", "team", "private", "custom"] as const)
+  const roomSections = (["org", "project", "private", "custom"] as const)
     .map((k) => ({ kind: k, list: rooms.filter((r) => r.kind === k) }))
     .filter((g) => g.list.length);
 
@@ -270,7 +269,7 @@ export default function ChatPage() {
                 <button onClick={() => setCreating({ kind: "private", name: "", people: [] })} className="flex-1 px-2 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs">+ Private chat</button>
                 <button onClick={() => setCreating({ kind: "custom", name: "", people: [] })} className="flex-1 px-2 py-1.5 bg-slate-700 hover:bg-slate-600 rounded text-xs">+ Room</button>
               </div>
-              {grouped.map((g) => (
+              {roomSections.map((g) => (
                 <div key={g.kind} className="mb-3">
                   <p className="text-[11px] uppercase tracking-wide text-slate-500 mb-1">{KIND_LABEL[g.kind]}</p>
                   {g.list.map((r) => {

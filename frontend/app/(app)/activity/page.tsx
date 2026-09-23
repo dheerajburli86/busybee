@@ -23,9 +23,6 @@ const FIELD_LABELS: Record<string, string> = {
   assigned_to: "assignee",
   task_manager_id: "task manager",
   key_result_id: "OKR link",
-  team_id: "team",
-  department_id: "department",
-  group_id: "group",
   due_date: "due date",
   start_date: "start date",
   progress_percent: "progress",
@@ -96,7 +93,7 @@ export default function ActivityPage() {
 
   const inputCls = "px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm";
 
-  // Group by day for readability.
+  // Collected by day for readability.
   const byDay = entries.reduce((acc, e) => {
     const k = new Date(e.created_at).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
     (acc[k] ||= []).push(e);

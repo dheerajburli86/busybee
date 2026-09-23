@@ -13,8 +13,8 @@ type Results = {
 };
 
 const ROLE_LABEL: Record<string, string> = {
-  member: "Team member",
-  manager: "Team manager",
+  member: "Member",
+  manager: "Manager",
   supervisor: "Supervisor",
   admin: "Admin",
 };
@@ -140,7 +140,7 @@ export default function SearchPage() {
             <div key={p.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex justify-between gap-2">
               <div>
                 <p className="font-semibold">{p.name}</p>
-                <p className="text-xs text-slate-500">{p.email} · {ROLE_LABEL[p.role] || "Team member"}</p>
+                <p className="text-xs text-slate-500">{p.email} · {ROLE_LABEL[p.role] || "Member"}</p>
               </div>
               <a href={`/dashboard?assignee=${p.id}`} className="text-xs text-blue-400 self-center">
                 Their tasks

@@ -109,7 +109,7 @@ export async function PUT(req: Request) {
     const { data: room } = await supabase.from("chat_rooms").select("*").eq("id", room_id).maybeSingle();
     const memberships = await getMemberships(supabase, user.id);
     if (!room || !memberships.some((m) => m.desk_id === room.desk_id)) return NextResponse.json({ error: "Room not found" }, { status: 404 });
-    if (!["private", "custom"].includes(room.kind)) return deny("Team, department and organisation rooms are managed automatically.");
+    if (!["private", "custom"].includes(room.kind)) return deny("Project and organisation rooms are managed automatically.");
     if (room.created_by !== user.id && !SUPER_ROLES.includes(roleIn(memberships, room.desk_id))) {
       return deny("Only the person who made this room can change it.");
     }

@@ -1,8 +1,8 @@
 "use client";
 
 // Checklist #38 / SOW #42: daily, weekly and monthly MIS reports - task
-// completion, status distribution, team and member performance, overdue work
-// and the activity log for the period - with CSV export and print-to-PDF.
+// completion, status distribution, project and member performance, overdue
+// work and the activity log for the period - with CSV export and print-to-PDF.
 
 import { useEffect, useState } from "react";
 
@@ -12,7 +12,6 @@ type Report = {
   summary: { open: number; created: number; completed: number; completed_late: number; overdue: number; avg_progress: number; hours: number };
   statusDistribution: { status: string; label: string; count: number }[];
   byMember: { id: string; name: string; assigned_open: number; completed: number; on_time_rate: number | null; overdue: number; actions: number; hours: number }[];
-  byTeam: { id: string; name: string; members: number; open: number; completed: number; on_time_rate: number | null; overdue: number; actions: number }[];
   byProject: { id: string; name: string; total: number; done: number; completed_in_period: number; overdue: number; progress: number }[];
   days: { date: string; completed: number; created: number }[];
   overdue: { id: string; title: string; assignee: string; project: string | null; due_date: string; days_late: number; progress: number }[];
@@ -81,9 +80,8 @@ export default function ReportsPage() {
     const sections: [string, Record<string, any>[]][] = [
       ["Summary", [{ period: report.period, from: report.window.start, to: report.window.end, ...report.summary }]],
       ["Status distribution", report.statusDistribution.map(({ label, count }) => ({ status: label, tasks: count }))],
-      ["By team", report.byTeam.map(({ id, ...r }) => r)],
-      ["By member", report.byMember.map(({ id, ...r }) => r)],
       ["By project", report.byProject.map(({ id, ...r }) => r)],
+      ["By member", report.byMember.map(({ id, ...r }) => r)],
       ["Completed in period", report.completed.map(({ id, ...r }) => r)],
       ["Overdue", report.overdue.map(({ id, ...r }) => r)],
       ["Activity", report.activity.map((a) => ({ when: a.created_at, who: a.user_name, task: a.task_title, action: a.action }))],
@@ -195,14 +193,11 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          <Table title="Team performance" empty="No teams yet." headers={["Team", "Members", "Open", "Completed", "On time", "Overdue", "Actions"]}
-            rows={report.byTeam.map((t) => [t.name, t.members, t.open, t.completed, t.on_time_rate === null ? "–" : `${t.on_time_rate}%`, t.overdue, t.actions])} />
-
-          <Table title="By team member" empty="No activity in this period." headers={["Member", "Open", "Completed", "On time", "Overdue", "Actions", "Hours"]}
-            rows={report.byMember.map((m) => [m.name, m.assigned_open, m.completed, m.on_time_rate === null ? "–" : `${m.on_time_rate}%`, m.overdue, m.actions, m.hours])} />
-
-          <Table title="By project" empty="No project work in this period." headers={["Project", "Tasks", "Done", "Done this period", "Overdue", "Progress"]}
+          <Table title="Project performance" empty="No project work in this period." headers={["Project", "Tasks", "Done", "Done this period", "Overdue", "Progress"]}
             rows={report.byProject.map((p) => [p.name, p.total, p.done, p.completed_in_period, p.overdue, `${p.progress}%`])} />
+
+          <Table title="By member" empty="No activity in this period." headers={["Member", "Open", "Completed", "On time", "Overdue", "Actions", "Hours"]}
+            rows={report.byMember.map((m) => [m.name, m.assigned_open, m.completed, m.on_time_rate === null ? "–" : `${m.on_time_rate}%`, m.overdue, m.actions, m.hours])} />
 
           <Table title={`Completed this period (${report.completed.length})`} empty="Nothing completed in this period." headers={["Task", "By", "Finished", "Due", ""]}
             rows={report.completed.map((c) => [c.title, c.assignee, new Date(c.completed_at).toLocaleString(), c.due_date ? new Date(c.due_date).toLocaleString() : "–", c.on_time ? "on time" : "late"])} />

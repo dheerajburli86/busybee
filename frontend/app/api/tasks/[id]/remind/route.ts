@@ -1,7 +1,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { sendMail } from "@/lib/email";
-import { deny, logActivity, requireUser, taskAccess, unitMemberIds } from "@/lib/permissions";
+import { deny, logActivity, projectMemberIds, requireUser, taskAccess } from "@/lib/permissions";
 
 // SOW #24 (supervisor seeks an update) and #39 (manual reminder).
 // Both are the same action: send a notification about this task to someone.
@@ -30,11 +30,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const task = access.task;
 
     // It goes to whoever is doing the work: the named assignee, or - for work
-    // given to a team, department or group with nobody named - everyone in
-    // that unit.
+    // sitting in a project with nobody named - everyone on that project.
     const doers: string[] = task.assigned_to
       ? [task.assigned_to]
-      : await unitMemberIds(supabase, { teamId: task.team_id, departmentId: task.department_id, groupId: task.group_id });
+      : await projectMemberIds(supabase, task.project_id);
     const targets = Array.from(new Set(doers.filter((x) => x && x !== user.id)));
     if (targets.length === 0) {
       return NextResponse.json(

@@ -74,14 +74,10 @@ export async function GET(request: NextRequest) {
     const all = await visibleTasks(supabase, user.id, raw);
     const live = all.filter((t: any) => !t.archived_at);
 
-    const [{ data: projects }, { data: teams }, { data: mates }] = await Promise.all([
+    const [{ data: projects }, { data: mates }] = await Promise.all([
       supabase.from("projects").select("id, name").in("desk_id", deskIds),
-      supabase.from("teams").select("id, name, manager_id").in("desk_id", deskIds),
       supabase.from("desk_members").select("user_id, users(id, full_name, email)").in("desk_id", deskIds),
     ]);
-    const { data: teamMembers } = (teams || []).length
-      ? await supabase.from("team_members").select("team_id, user_id").in("team_id", (teams || []).map((t: any) => t.id))
-      : { data: [] };
 
     const people = new Map<string, string>();
     (mates || []).forEach((m: any) => people.set(m.user_id, m.users?.full_name || m.users?.email || "Someone"));
@@ -142,25 +138,6 @@ export async function GET(request: NextRequest) {
         overdue: mine.filter((t: any) => !t.archived_at && isOverdue(t)).length,
         actions: activity.filter((a: any) => a.performed_by === id).length,
         hours: Math.round((hours || []).filter((h: any) => h.user_id === id).reduce((s: number, h: any) => s + Number(h.hours || 0), 0) * 10) / 10,
-      };
-    });
-
-    // Per team: work given to the team, or to anyone in it.
-    const byTeam = (teams || []).map((team: any) => {
-      const memberIds = new Set((teamMembers || []).filter((m: any) => m.team_id === team.id).map((m: any) => m.user_id));
-      if (team.manager_id) memberIds.add(team.manager_id);
-      const theirs = all.filter((t: any) => t.team_id === team.id || (t.assigned_to && memberIds.has(t.assigned_to)));
-      const doneWin = theirs.filter((t: any) => isFinished(t.status) && inWindow(t.completed_at));
-      const late = doneWin.filter((t: any) => t.due_date && new Date(t.completed_at) > new Date(t.due_date));
-      return {
-        id: team.id,
-        name: team.name,
-        members: memberIds.size,
-        open: theirs.filter((t: any) => !t.archived_at && !isFinished(t.status)).length,
-        completed: doneWin.length,
-        on_time_rate: doneWin.length ? Math.round(((doneWin.length - late.length) / doneWin.length) * 100) : null,
-        overdue: theirs.filter((t: any) => !t.archived_at && isOverdue(t)).length,
-        actions: activity.filter((a: any) => memberIds.has(a.performed_by)).length,
       };
     });
 
@@ -235,7 +212,6 @@ export async function GET(request: NextRequest) {
       },
       statusDistribution,
       byMember: byMember.filter((m) => m.assigned_open || m.completed || m.overdue || m.actions || m.hours),
-      byTeam,
       byProject,
       days,
       overdue: overdueList,

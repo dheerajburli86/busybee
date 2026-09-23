@@ -50,7 +50,7 @@ export async function POST(request: NextRequest, { params }: Params) {
 
     const access = await taskAccess(supabase, user.id, taskId);
     if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
-    // SOW #14: team members working on the task may break it down further.
+    // SOW #14: people working on the task may break it down further.
     if (!access.canWork) return deny("Only people working on this task can add subtasks.");
 
     const body = await request.json();
@@ -162,7 +162,7 @@ export async function PUT(request: NextRequest, { params }: Params) {
     // audit fix: this used to compare against `!access.canWork`, which is
     // always false for anyone who reached this line - since canWork already
     // includes canManage, and line 133 above already required canWork or
-    // mine - so the guard could never actually stop a plain team member from
+    // mine - so the guard could never actually stop a plain member from
     // reassigning or re-dating a checklist item. Compare against `mine`
     // instead, so only the current subtask assignee or someone with
     // canManage may change who does it or when.)

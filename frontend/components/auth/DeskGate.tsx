@@ -62,8 +62,8 @@ export function DeskGate({ children }: { children: ReactNode }) {
         <p className="text-4xl">🐝</p>
         <h1 className="text-xl font-bold">Waiting for access</h1>
         <p className="text-sm text-slate-300">
-          You&apos;re signed in{waiting.email ? ` as ${waiting.email}` : ""}, but a supervisor still needs to add you to the team.
-          They&apos;ll see your name under <b>Teams → Waiting for access</b>.
+          You&apos;re signed in{waiting.email ? ` as ${waiting.email}` : ""}, but a supervisor still needs to give you access.
+          They&apos;ll see your name under <b>People → Waiting for access</b>.
         </p>
         <div className="flex justify-center gap-2 pt-2">
           <button onClick={check} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Check again</button>

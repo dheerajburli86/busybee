@@ -12,7 +12,6 @@ interface Project {
   id: string;
   name: string;
   description: string | null;
-  team_id: string | null;
   manager_id?: string | null;
   color?: string | null;
   created_at: string;
@@ -27,9 +26,7 @@ type Stats = { progress: number; total: number; done: number; overdue: number };
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [stats, setStats] = useState<Record<string, Stats>>({});
-  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
   const [people, setPeople] = useState<Person[]>([]);
-  const [managedTeams, setManagedTeams] = useState<string[]>([]);
   const [role, setRole] = useState("member");
   const [loading, setLoading] = useState(true);
   // Stops a double click from creating a project or comment twice.
@@ -44,15 +41,15 @@ export default function ProjectsPage() {
   const [draft, setDraft] = useState("");
   const [descDraft, setDescDraft] = useState("");
   const [search, setSearch] = useState("");
-  const [creating, setCreating] = useState({ name: "", description: "", team: "", manager: "", color: "" });
+  const [creating, setCreating] = useState({ name: "", description: "", manager: "", color: "" });
 
   const isSuper = ["admin", "supervisor"].includes(role);
-  const canCreate = isSuper || managedTeams.length > 0;
+  const canCreate = isSuper;
 
   useEffect(() => {
     (async () => {
       try {
-        const [p, t, tm, pm] = await Promise.all([fetch("/api/projects"), fetch("/api/tasks"), fetch("/api/teams"), fetch("/api/team/members")]);
+        const [p, t, m] = await Promise.all([fetch("/api/projects"), fetch("/api/tasks"), fetch("/api/team/members")]);
         const pd = await p.json();
         if (!p.ok) throw new Error(pd.error || "Could not load projects");
         setProjects(pd.projects || []);
@@ -71,15 +68,10 @@ export default function ProjectsPage() {
           setSectionCounts(serverSections);
         }
 
-        if (tm.ok) {
-          const d = await tm.json();
-          setTeams(d.teams || []);
-          setRole(d.role || "member");
-          setManagedTeams(d.managedTeams || []);
-        }
-        if (pm.ok) {
-          const d = await pm.json();
+        if (m.ok) {
+          const d = await m.json();
           setPeople(d.members || []);
+          setRole(d.myRole || "member");
         }
 
         // Older server without figures: roll up the tasks this person can see.
@@ -159,12 +151,11 @@ export default function ProjectsPage() {
       const p = await sendJSON("/api/projects", "POST", {
         name: creating.name.trim(),
         description: creating.description.trim() || null,
-        team_id: creating.team || null,
         manager_id: creating.manager || null,
         color: creating.color || null,
       });
       setProjects((prev) => [p, ...prev]);
-      setCreating({ name: "", description: "", team: "", manager: "", color: "" });
+      setCreating({ name: "", description: "", manager: "", color: "" });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -188,11 +179,10 @@ export default function ProjectsPage() {
 
   if (loading) return <p className="text-slate-400 p-6">Loading projects...</p>;
 
-  const teamName = (id: string | null) => teams.find((t) => t.id === id)?.name;
   const personName = (id: string | null | undefined) => (id ? people.find((p) => p.id === id)?.name || "Someone" : null);
   const inputCls = "px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm";
   const visible = projects.filter((p) =>
-    `${p.name} ${p.description || ""} ${teamName(p.team_id) || ""}`.toLowerCase().includes(search.toLowerCase())
+    `${p.name} ${p.description || ""} ${personName(p.manager_id) || ""}`.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
@@ -209,23 +199,19 @@ export default function ProjectsPage() {
         <form onSubmit={create} className="bg-slate-800 border border-slate-700 rounded p-3 sm:p-4 mb-4 flex flex-wrap gap-2">
           <input value={creating.name} onChange={(e) => setCreating({ ...creating, name: e.target.value })} placeholder="New project name..." className={`${inputCls} flex-1 min-w-48`} />
           <input value={creating.description} onChange={(e) => setCreating({ ...creating, description: e.target.value })} placeholder="Description (optional)" className={`${inputCls} flex-1 min-w-48`} />
-          <select value={creating.team} onChange={(e) => setCreating({ ...creating, team: e.target.value })} className={inputCls} aria-label="Assign to team">
-            <option value="">{isSuper ? "No team yet" : "Pick your team"}</option>
-            {teams.filter((t) => isSuper || managedTeams.includes(t.id)).map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
           {isSuper && (
-            <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly, independent of any team">
+            <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly">
               <option value="">No project manager</option>
               {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
             </select>
           )}
-          <div className="flex gap-1 items-center" role="group" aria-label="Project color">
+          <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
             {COLOR_SWATCHES.map((c) => (
               <button
                 key={c.value || "none"}
                 type="button"
+                role="radio"
+                aria-checked={creating.color === c.value}
                 title={c.label}
                 aria-label={`Color: ${c.label}`}
                 onClick={() => setCreating({ ...creating, color: c.value })}
@@ -268,8 +254,7 @@ export default function ProjectsPage() {
                 </div>
                 <p className="text-slate-400 text-sm">{project.description || "No description"}</p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Team: {teamName(project.team_id) || "not assigned"}
-                  {project.manager_id && <> · Project Manager: {personName(project.manager_id)}</>}
+                  Project Manager: {personName(project.manager_id) || "not assigned"}
                   {" "}· created {new Date(project.created_at).toLocaleDateString()}
                 </p>
 
@@ -308,24 +293,20 @@ export default function ProjectsPage() {
                         <div className="flex flex-wrap gap-2 items-center">
                           <button onClick={() => update(project.id, { description: descDraft })} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs">Save description</button>
                           {isSuper && (
-                            <select value={project.team_id || ""} onChange={(e) => update(project.id, { team_id: e.target.value || null })} className={`${inputCls} text-xs`} aria-label="Team">
-                              <option value="">No team</option>
-                              {teams.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                            </select>
-                          )}
-                          {isSuper && (
                             <select value={project.manager_id || ""} onChange={(e) => update(project.id, { manager_id: e.target.value || null })} className={`${inputCls} text-xs`} aria-label="Project manager (#22)">
                               <option value="">No project manager</option>
                               {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
                             </select>
                           )}
                         </div>
-                        <div className="flex gap-1 items-center" role="group" aria-label="Project color">
+                        <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
                           <span className="text-xs text-slate-400 mr-1">Color:</span>
                           {COLOR_SWATCHES.map((c) => (
                             <button
                               key={c.value || "none"}
                               type="button"
+                              role="radio"
+                              aria-checked={(project.color || "") === c.value}
                               title={c.label}
                               aria-label={`Color: ${c.label}`}
                               onClick={() => update(project.id, { color: c.value || null })}
@@ -338,6 +319,8 @@ export default function ProjectsPage() {
                         </div>
                       </div>
                     )}
+
+                    <ProjectMembers project={project} people={people} />
 
                     <div>
                       <p className="text-sm font-semibold text-slate-300 mb-2">Comments ({comments.length})</p>
@@ -362,6 +345,137 @@ export default function ProjectsPage() {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Who works on this project. Being a member is what lets someone see and work
+ * on the project's tasks; a member marked "manager" runs it alongside the
+ * project manager.
+ */
+function ProjectMembers({ project, people }: { project: Project; people: Person[] }) {
+  type Member = { id: string; user_id: string; role: string; name: string; email: string | null };
+  const [members, setMembers] = useState<Member[]>([]);
+  const [canManage, setCanManage] = useState(false);
+  const [pick, setPick] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const inputCls = "px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm";
+
+  const load = async () => {
+    try {
+      const r = await fetch(`/api/projects/members?project_id=${project.id}`, { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      setMembers(d.members || []);
+      setCanManage(!!d.can_manage);
+    } catch {
+      /* leave the list as it is */
+    }
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
+
+  const run = async (fn: () => Promise<any>) => {
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+      await load();
+    } catch (e: any) {
+      setError(e.message || "That didn't work");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = () => {
+    if (!pick) return;
+    run(async () => {
+      await sendJSON("/api/projects/members", "POST", { project_id: project.id, user_id: pick, role: "member" });
+      setPick("");
+    });
+  };
+
+  const setRole = (id: string, role: string) =>
+    run(() => sendJSON("/api/projects/members", "PUT", { id, role }));
+
+  const remove = (id: string) =>
+    run(async () => {
+      const r = await fetch(`/api/projects/members?id=${id}`, { method: "DELETE" });
+      if (!r.ok) throw new Error((await r.json())?.error || "Could not remove them");
+    });
+
+  const onProject = new Set(members.map((m) => m.user_id));
+  const addable = people.filter((p) => !onProject.has(p.id));
+
+  return (
+    <div>
+      <p className="text-sm font-semibold text-slate-300 mb-2">Project members ({members.length})</p>
+      {error && <p className="text-xs text-red-400 mb-2">{error}</p>}
+
+      {members.length === 0 ? (
+        <p className="text-xs text-slate-500 mb-2">Nobody on this project yet.</p>
+      ) : (
+        <div className="space-y-1 mb-2">
+          {members.map((m) => (
+            <div key={m.id} className="flex items-center justify-between gap-2 bg-slate-700 rounded px-3 py-2">
+              <div className="min-w-0">
+                <p className="text-sm text-slate-100 truncate">{m.name}</p>
+                {m.email && <p className="text-xs text-slate-400 truncate">{m.email}</p>}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {canManage ? (
+                  <select
+                    value={m.role}
+                    disabled={busy}
+                    onChange={(e) => setRole(m.id, e.target.value)}
+                    className={`${inputCls} text-xs py-1`}
+                    aria-label={`Role for ${m.name}`}
+                  >
+                    <option value="member">Member</option>
+                    <option value="manager">Manager</option>
+                  </select>
+                ) : (
+                  <span className="text-xs text-slate-400">{m.role === "manager" ? "Manager" : "Member"}</span>
+                )}
+                {canManage && (
+                  <button
+                    onClick={() => remove(m.id)}
+                    disabled={busy}
+                    className="text-xs text-slate-400 hover:text-red-400 disabled:opacity-50"
+                    aria-label={`Remove ${m.name} from this project`}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {canManage && addable.length > 0 && (
+        <div className="flex gap-2">
+          <select value={pick} onChange={(e) => setPick(e.target.value)} className={`${inputCls} flex-1 text-sm`} aria-label="Add someone to this project">
+            <option value="">Add someone…</option>
+            {addable.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={add}
+            disabled={busy || !pick}
+            className="px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm"
+          >
+            Add
+          </button>
         </div>
       )}
     </div>
@@ -397,7 +511,7 @@ function SectionsPanel({
     <div className="mt-4 pt-4 border-t border-slate-700 space-y-3">
       <p className="text-sm font-semibold text-slate-300">Sections</p>
       <p className="text-xs text-slate-400">
-        Group this project&apos;s tasks, e.g. Design, Development, Writing. On the Tasks page, pick this project and choose Board → Group by: Section to drag tasks between them.
+        Organise this project&apos;s tasks, e.g. Design, Development, Writing. On the Tasks page, pick this project and choose Board → Arrange by: Section to drag tasks between them.
       </p>
       <ol className="space-y-2">
         {sections.map((sec, i) => (
@@ -476,7 +590,7 @@ function SectionsPanel({
           <input type="checkbox" checked={!!project.auto_advance} disabled={!can} onChange={(e) => onWorkflow({ auto_advance: e.target.checked })} className="mt-1" />
           <span>When a task is completed, move it to the <b>next section</b> (it shows there as Completed).</span>
         </label>
-        {!can && <p className="text-xs text-slate-500">Only a supervisor or this project&apos;s team manager can change sections and workflow.</p>}
+        {!can && <p className="text-xs text-slate-500">Only a supervisor or this project&apos;s manager can change sections and workflow.</p>}
       </div>
     </div>
   );

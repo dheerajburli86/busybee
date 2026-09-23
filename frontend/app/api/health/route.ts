@@ -1,5 +1,5 @@
 // System check for supervisors: is the database migration in place, is email
-// set up, is the scheduler running? Shown on the Teams page.
+// set up, is the scheduler running? Shown on the People page.
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
@@ -10,20 +10,16 @@ import { formatForPeople } from "@/lib/format";
 // Every column the app reads or writes, table by table. A missing one shows up
 // here by name instead of as a failing screen.
 const SCHEMA: [string, string, string][] = [
-  ["Tasks", "tasks", "id, desk_id, project_id, stage_id, title, description, priority, status, progress_percent, due_date, start_date, completed_at, assigned_to, created_by, task_manager_id, team_id, department_id, group_id, milestone, key_result_id, progress_type, progress_target, progress_current, archived_at, personal, remind_at, remind_to, reminder_sent_at, created_at, updated_at"],
+  ["Tasks", "tasks", "id, desk_id, project_id, stage_id, title, description, priority, status, progress_percent, due_date, start_date, completed_at, assigned_to, created_by, task_manager_id, milestone, key_result_id, progress_type, progress_target, progress_current, archived_at, personal, remind_at, remind_to, reminder_sent_at, created_at, updated_at"],
   ["Checklist items", "subtasks", "id, task_id, title, done, progress_percent, position, assigned_to, due_date, progress_type, progress_target, progress_current, created_by, created_at, updated_at"],
   ["Comments", "comments", "id, task_id, author_id, content, created_at, updated_at, edited, is_private"],
   ["Private comment recipients", "comment_recipients", "id, comment_id, user_id"],
-  ["Projects", "projects", "id, desk_id, name, description, team_id, auto_advance, auto_complete, created_at"],
+  ["Projects", "projects", "id, desk_id, name, description, manager_id, auto_advance, auto_complete, created_at"],
   ["Sections", "stages", "id, project_id, name, position, created_at"],
   ["People on the desk", "desk_members", "desk_id, user_id, role"],
   ["Profiles", "users", "id, email, full_name, created_at"],
-  ["Departments", "departments", "id, desk_id, name, description, created_at"],
-  ["Teams", "teams", "id, desk_id, name, description, department_id, manager_id, created_at"],
-  ["Team members", "team_members", "id, team_id, user_id, role"],
-  ["Custom groups", "groups", "id, desk_id, name, created_by"],
-  ["Group members", "group_members", "id, group_id, user_id"],
-  ["Chat rooms", "chat_rooms", "id, desk_id, name, kind, team_id, department_id, created_by"],
+  ["Project members", "project_members", "id, project_id, user_id, role"],
+  ["Chat rooms", "chat_rooms", "id, desk_id, name, kind, project_id, created_by"],
   ["Chat room members", "chat_room_members", "id, room_id, user_id"],
   ["Chat messages", "chat_messages", "id, desk_id, room_id, author_id, content, created_at"],
   ["Online status", "user_presence", "user_id, last_seen_at"],

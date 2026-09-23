@@ -83,11 +83,11 @@ export async function GET(request: NextRequest) {
       taskRows = recent.filter((r: any) => titles.has(r.entity_id));
     }
 
-    // Desk-level changes (teams, departments, groups, projects, roles) for supervisors.
+    // Desk-level changes (projects, roles) for supervisors.
     let deskRows: any[] = [];
     if (!projectId && isSuper) {
       const { data } = await filters(
-        supabase.from("activity_log").select(COLS).in("desk_id", deskIds).in("entity_type", ["team", "department", "group", "project", "okr"])
+        supabase.from("activity_log").select(COLS).in("desk_id", deskIds).in("entity_type", ["project", "okr"])
       )
         .order("created_at", { ascending: false })
         .limit(200);
