@@ -202,7 +202,7 @@ export default function ProjectsPage() {
           {isSuper && (
             <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly">
               <option value="">No project manager</option>
-              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           )}
           <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
@@ -237,10 +237,10 @@ export default function ProjectsPage() {
             return (
               <div key={project.id} className="p-4 sm:p-6 bg-slate-800 rounded border border-slate-700">
                 <div className="flex flex-wrap justify-between items-start gap-3 mb-2">
-                  <a href={`/dashboard?project=${project.id}`} className="text-xl font-bold hover:text-blue-400 flex items-center gap-2">
+                  <button onClick={() => (openProject === project.id ? setOpenProject(null) : openPanel(project))} className="text-xl font-bold hover:text-blue-400 flex items-center gap-2 text-left">
                     {project.color && <span className="inline-block w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: project.color }} title="Custom color" />}
                     {project.name}
-                  </a>
+                  </button>
                   <div className="flex flex-wrap gap-3 text-xs">
                     <a href={`/search?project_id=${project.id}`} className="text-slate-400 hover:text-white">Search in project</a>
                     <a href={`/activity?project_id=${project.id}`} className="text-slate-400 hover:text-white">History</a>
@@ -295,7 +295,7 @@ export default function ProjectsPage() {
                           {isSuper && (
                             <select value={project.manager_id || ""} onChange={(e) => update(project.id, { manager_id: e.target.value || null })} className={`${inputCls} text-xs`} aria-label="Project manager (#22)">
                               <option value="">No project manager</option>
-                              {people.map((p) => <option key={p.id} value={p.id}>{p.name} — Project Manager</option>)}
+                              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                             </select>
                           )}
                         </div>

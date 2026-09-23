@@ -217,14 +217,13 @@ export default function DashboardPage() {
     e.preventDefault();
     if (!form.title.trim()) return;
     const due = fromLocalInput(form.due);
-    if (!due) return showError("A due date and time is required before a task can be created.");
     setCreating(true);
     try {
       const data = await sendJSON("/api/tasks", "POST", {
         title: form.title.trim(),
         description: form.description.trim() || null,
         priority: form.priority,
-        due_date: due,
+        due_date: due || null,
         start_date: fromLocalInput(form.start),
         project_id: form.project || projectF || null,
         stage_id: form.section || null,
@@ -430,8 +429,8 @@ export default function DashboardPage() {
         />
         <div className="flex flex-wrap gap-2 items-end">
           <label className="flex flex-col text-xs text-slate-400 gap-1">
-            Due (required)
-            <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} required className={inputCls} />
+            Due (optional)
+            <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} className={inputCls} />
           </label>
           <label className="flex flex-col text-xs text-slate-400 gap-1">
             Priority
