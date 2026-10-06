@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.blocking import BlockingScheduler
 from supabase import create_client
 
-VERSION = "2026-09-22"
+VERSION = "2026-10-06"
 
 
 def _env_number(name: str, default, cast=int):
@@ -80,6 +80,12 @@ BOD_HOUR = _env_hour("BOD_HOUR", 9)
 EOD_HOUR = _env_hour("EOD_HOUR", 18)
 TZ_OFFSET_HOURS = _env_offset("TZ_OFFSET_HOURS", 5.5)
 UPDATE_REQUEST_DAYS = _env_number("UPDATE_REQUEST_DAYS", 3)
+# The hour (office time) for the once-a-day countdown to every live deadline.
+DAILY_REMINDER_HOUR = _env_hour("DAILY_REMINDER_HOUR", 10)
+# How long the daily "still overdue" note keeps going after a deadline. Without
+# a cap, the first run would ping everyone about every task that went overdue
+# months ago and was simply never closed.
+OVERDUE_DAILY_DAYS = _env_number("OVERDUE_DAILY_DAYS", 14)
 AUTO_ARCHIVE_DAYS = _env_number("AUTO_ARCHIVE_DAYS", 7)
 APP_URL = (os.environ.get("APP_URL") or "").strip().rstrip("/")
 
@@ -307,7 +313,7 @@ def _category_of(ntype: str) -> str:
         return "comments"
     if t in ("extension_request", "extension_reviewed", "assignor_added"):
         return "extensions"
-    if t == "overdue" or t == "checklist_due" or t.startswith("reminder"):
+    if t == "overdue" or t == "checklist_due" or t.startswith("reminder") or t.startswith("review_pending"):
         return "reminders"
     if t in ("bod_summary", "eod_summary", "update_request"):
         return "daily_summary"
@@ -499,6 +505,152 @@ def deadline_reminders() -> None:
 
     if sent:
         log(f"deadline reminders: {sent} task(s)")
+
+
+def daily_countdown() -> None:
+    """Step 6 of the assignment flow: one reminder a day, every day, from the
+    moment work is assigned until its deadline passes.
+
+    This is deliberately separate from deadline_reminders() above, which fires
+    at 24/8/6 hours out. Those are the last-minute warnings; this is the steady
+    drumbeat that stops a three-week deadline being remembered in week three.
+
+    Once the deadline has gone, the same daily note keeps going out and the
+    assignors are copied in - an overdue task that nobody is told about again
+    after the first alert is an overdue task everybody forgets.
+    """
+    now = now_utc()
+    today = now.astimezone(LOCAL_TZ).date().isoformat()
+    tasks = [t for t in open_tasks() if t.get("due_date")]
+    if not tasks:
+        return
+    units, extras, desks = Units(), extra_assignors(), Desks()
+    sent = 0
+
+    for task in tasks:
+        try:
+            # Private to-dos have their own "remind me at"; they answer to nobody.
+            if task.get("personal"):
+                continue
+            due = parse(task["due_date"])
+            if not due:
+                continue
+            if now - due > timedelta(days=OVERDUE_DAILY_DAYS):
+                continue
+
+            # One per task per day, whatever happens to the process in between.
+            marker = f"reminder_daily_{today}"
+            if already_sent(task["id"], marker, now - timedelta(hours=20)):
+                continue
+
+            hours_left = (due - now).total_seconds() / 3600
+            # Inside the last day the 24/8/6-hour reminders are already doing
+            # this job, and better. Don't say it twice.
+            if 0 < hours_left <= 24:
+                continue
+
+            people = doers(task, units)
+            if hours_left <= 0:
+                days_over = max(1, int((now - due).total_seconds() // 86400))
+                title = f"Overdue by {days_over} day{'' if days_over == 1 else 's'}"
+                body = (
+                    f"{task['title']} was due {local(due)} and is still open. "
+                    "Finish it, or ask for more time from the task."
+                )
+                # Escalation: whoever assigned it hears about it too.
+                people = people | assignors(task, extras)
+            else:
+                days_left = max(1, int(hours_left // 24))
+                title = f"{days_left} day{'' if days_left == 1 else 's'} left"
+                body = f"{task['title']} is due {local(due)}."
+
+            recipients = desks.only_on_desk(task.get("desk_id"), people)
+            if not recipients:
+                continue
+            for r in recipients:
+                notify(r, task["id"], marker, title, body, subject=f"{title}: {task['title']}")
+            sent += 1
+        except Exception as exc:
+            warn(f"daily_countdown: skipping task {task.get('id')}: {exc!r}")
+            continue
+
+    if sent:
+        log(f"daily countdown: {sent} task(s)")
+
+
+def review_reminders() -> None:
+    """Step 9: nudge supervisors about work that is finished and waiting to be
+    signed off, so a review queue never quietly becomes a backlog.
+
+    Sent once a day, to the people who can actually decide (the assignors), and
+    only for tasks that have been sitting unreviewed since yesterday - work
+    finished an hour ago does not need chasing.
+    """
+    now = now_utc()
+    today = now.astimezone(LOCAL_TZ).date().isoformat()
+    try:
+        rows = fetch_all(
+            lambda: supabase.table("tasks")
+            .select(TASK_COLUMNS + ", review_status, project_id")
+            .eq("status", "done")
+            .eq("review_status", "pending")
+            .is_("archived_at", "null")
+            .order("id")
+        )
+    except Exception as exc:
+        # The migration adding review_status has not been run yet.
+        warn(f"review_reminders: skipped ({exc!r})")
+        return
+
+    extras, desks, units = extra_assignors(), Desks(), Units()
+    # Project managers can review too.
+    try:
+        managers = {
+            p["id"]: p.get("manager_id")
+            for p in fetch_all(lambda: supabase.table("projects").select("id, manager_id").order("id"))
+        }
+    except Exception:
+        managers = {}
+    sent = 0
+    for task in rows:
+        try:
+            if task.get("personal"):
+                continue
+            finished = parse(task.get("updated_at")) or parse(task.get("created_at"))
+            if finished and now - finished < timedelta(hours=18):
+                continue
+            marker = f"review_pending_{today}"
+            if already_sent(task["id"], marker, now - timedelta(hours=20)):
+                continue
+            # Everyone who can sign it off: its assignors, the project's manager
+            # and the desk's supervisors - minus anyone who did the work, since
+            # they can't review it.
+            deciders = assignors(task, extras)
+            if managers.get(task.get("project_id")):
+                deciders.add(managers[task["project_id"]])
+            deciders |= {
+                uid for uid, p in desks.people.items() if task.get("desk_id") in p["leads"]
+            }
+            workers = {task.get("assigned_to")} | units.members(task)
+            recipients = desks.only_on_desk(task.get("desk_id"), deciders - workers)
+            if not recipients:
+                continue
+            for r in recipients:
+                notify(
+                    r,
+                    task["id"],
+                    marker,
+                    "Waiting for your review",
+                    f"{task['title']} is finished and waiting to be signed off.",
+                    subject=f"Waiting for review: {task['title']}",
+                )
+            sent += 1
+        except Exception as exc:
+            warn(f"review_reminders: skipping task {task.get('id')}: {exc!r}")
+            continue
+
+    if sent:
+        log(f"review reminders: {sent} task(s)")
 
 
 def checklist_reminders() -> None:
@@ -812,6 +964,10 @@ if __name__ == "__main__":
     scheduler.add_job(safe(checklist_reminders), "interval", minutes=10, id="checklist_reminders")
     scheduler.add_job(safe(personal_reminders), "interval", minutes=5, id="personal_reminders")
 
+    # Once a day: the countdown to every live deadline, and the review queue.
+    scheduler.add_job(safe(daily_countdown), "cron", hour=DAILY_REMINDER_HOUR, minute=5, id="daily_countdown")
+    scheduler.add_job(safe(review_reminders), "cron", hour=DAILY_REMINDER_HOUR, minute=20, id="review_reminders")
+
     scheduler.add_job(safe(start_of_day), "cron", hour=BOD_HOUR, minute=0, id="bod")
     scheduler.add_job(safe(end_of_day), "cron", hour=EOD_HOUR, minute=0, id="eod")
     # Midnight local time: quiet-task nudges and archiving.
@@ -820,6 +976,7 @@ if __name__ == "__main__":
 
     log(
         f"scheduler {VERSION} up: reminders every 10m, remind-me every 5m, "
+        f"daily countdown + review queue at {DAILY_REMINDER_HOUR}:00, "
         f"BOD {BOD_HOUR}:00, EOD {EOD_HOUR}:00 (UTC{TZ_OFFSET_HOURS:+g}), "
         f"update requests every {UPDATE_REQUEST_DAYS or 'never'} days, "
         f"auto-archive after {AUTO_ARCHIVE_DAYS or 'never'} days, "
