@@ -10,7 +10,6 @@ import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { deny, logActivity, notifyMany, requireUser, taskAccess, SUPER_ROLES } from "@/lib/permissions";
 import { handleFor, mentionsIn } from "@/lib/mentions";
-import { sendMail } from "@/lib/email";
 
 type Params = { params: Promise<{ id: string }> };
 const COLUMNS = "id, content, author_id, created_at, updated_at, edited, is_private";
@@ -158,14 +157,15 @@ export async function POST(request: NextRequest, { params }: Params) {
         type: "private_comment",
         title: "Private comment for you",
         message: `On "${access.task.title}": ${content.slice(0, 140)}`,
+        email: { subject: `Private comment on ${access.task.title}`, body: content },
       });
-      await sendMail({ userIds: privateTo, subject: `Private comment on ${access.task.title}`, body: content, type: "private_comment" });
     } else {
       await notifyMany(supabase, Array.from(tagged), {
         task_id: taskId,
         type: "mention",
         title: "You were mentioned",
-        message: content.slice(0, 140),
+        message: `On "${access.task.title}": ${content.slice(0, 140)}`,
+        email: { subject: `You were mentioned on ${access.task.title}`, body: content },
       });
     }
 

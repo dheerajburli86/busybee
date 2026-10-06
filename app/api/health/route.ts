@@ -5,6 +5,8 @@ import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { getMemberships, requireUser, topRole, SUPER_ROLES } from "@/lib/permissions";
 import { mailConfigured } from "@/lib/email";
+import { appUrl, botUsername, telegramConfigured, tg } from "@/lib/telegram";
+import { adminConfigured, telegramConnected } from "@/lib/supabase-admin";
 import { formatForPeople } from "@/lib/format";
 
 // Every column the app reads or writes, table by table. A missing one shows up
@@ -35,6 +37,10 @@ const SCHEMA: [string, string, string][] = [
   ["Project comments", "project_comments", "id, project_id, author_id, content, created_at"],
   ["Objectives", "objectives", "id, desk_id, title, description, period, owner_id, created_at"],
   ["Key results", "key_results", "id, objective_id, title, target_value, current_value, unit"],
+  ["Deadline acceptances", "task_acceptances", "task_id, user_id, desk_id, decision, note, due_date_at_decision, created_at"],
+  ["Rewards & penalties", "task_adjustments", "id, task_id, desk_id, user_id, kind, amount, reason, effective_month, created_by, created_at, voided_at, voided_by, void_reason"],
+  ["Telegram connections", "user_telegram", "user_id, chat_id, username, linked_at"],
+  ["Notification settings", "notification_prefs", "user_id, email_enabled, telegram_enabled, categories"],
 ];
 
 export async function GET() {
@@ -124,6 +130,67 @@ export async function GET() {
         ? "RESEND_API_KEY is set, but MAIL_FROM is Resend's test sender, which only delivers to the Resend account's own address - set MAIL_FROM to an address on your verified domain"
         : `sending as ${from}`,
     });
+
+    // The server key lets alerts honour everyone's own settings and is what
+    // links Telegram chats safely.
+    checks.push({
+      name: "Server key (SUPABASE_SERVICE_ROLE_KEY)",
+      ok: adminConfigured(),
+      detail: adminConfigured()
+        ? "set"
+        : "Not set in Vercel - Telegram can't be connected, and alert settings people choose are only partly honoured",
+    });
+
+    // Telegram: token works, webhook points here, and who has connected.
+    if (!telegramConfigured()) {
+      checks.push({
+        name: "Telegram alerts",
+        ok: false,
+        detail: "Not set up - add TELEGRAM_BOT_TOKEN in Vercel (and Railway for the scheduler)",
+      });
+    } else {
+      const bot = await botUsername();
+      const info = bot ? await tg("getWebhookInfo") : null;
+      const want = `${appUrl()}/api/telegram/webhook`;
+      const hookUrl: string = info?.result?.url || "";
+      checks.push({
+        name: "Telegram bot",
+        ok: !!bot,
+        detail: bot ? `@${bot}` : "TELEGRAM_BOT_TOKEN is set but Telegram rejects it - copy it again from @BotFather",
+      });
+      if (bot) {
+        const lastError = info?.result?.last_error_message;
+        checks.push({
+          name: "Telegram webhook",
+          ok: !!hookUrl && hookUrl === want && !lastError,
+          detail: !hookUrl
+            ? "not registered yet - press \"Reconnect Telegram bot\" (or it registers itself on the first Connect)"
+            : hookUrl !== want
+            ? `points at ${hookUrl}, expected ${want} - press "Reconnect Telegram bot"`
+            : lastError
+            ? `Telegram reports: ${lastError} - press "Reconnect Telegram bot"`
+            : "receiving",
+        });
+      }
+      const ids = Array.from(
+        new Set(((await supabase.from("desk_members").select("user_id").eq("desk_id", superDesk.desk_id)).data || []).map((r: any) => r.user_id))
+      ) as string[];
+      const linked = await telegramConnected(ids);
+      if (linked) {
+        const missing = ids.length - linked.size;
+        checks.push({
+          name: "People on Telegram",
+          ok: missing === 0,
+          detail: `${linked.size} of ${ids.length} connected${missing ? " - the rest see a Connect bar at the top of BusyBee" : ""}`,
+        });
+      } else {
+        checks.push({
+          name: "People on Telegram",
+          ok: false,
+          detail: adminConfigured() ? "run supabase/migrations/20261007_telegram_and_email_alerts.sql" : "needs SUPABASE_SERVICE_ROLE_KEY",
+        });
+      }
+    }
 
     // The round-2 scheduler records a heartbeat every few minutes.
     const { data: beat } = await supabase.from("bb_meta").select("value, updated_at").eq("key", "scheduler").maybeSingle();

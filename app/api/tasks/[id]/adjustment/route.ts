@@ -1,7 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { deny, logActivity, notifyMany, requireUser, taskAccess } from "@/lib/permissions";
-import { sendMail } from "@/lib/email";
 import { schemaMissing } from "@/lib/workflow";
 
 // Steps 10-11 of the assignment flow: a reward or a penalty, in rupees,
@@ -186,12 +185,10 @@ export async function POST(req: Request, { params }: Params) {
       type: notifType,
       title: kind === "reward" ? `Reward: ${rupees}` : `Penalty: ${rupees}`,
       message,
-    });
-    await sendMail({
-      userIds: [targetUser],
-      subject: kind === "reward" ? `Reward recorded: ${rupees}` : `Penalty recorded: ${rupees}`,
-      body: mailBody,
-      type: notifType,
+      email: {
+        subject: kind === "reward" ? `Reward recorded: ${rupees}` : `Penalty recorded: ${rupees}`,
+        body: mailBody,
+      },
     });
 
     return NextResponse.json(data);
@@ -268,12 +265,7 @@ export async function DELETE(req: Request, { params }: Params) {
       type: "adjustment_voided",
       title: `${existing.kind === "reward" ? "Reward" : "Penalty"} cancelled`,
       message,
-    });
-    await sendMail({
-      userIds: [existing.user_id],
-      subject: `${existing.kind === "reward" ? "Reward" : "Penalty"} cancelled: ${rupees}`,
-      body: `${message}`,
-      type: "adjustment_voided",
+      email: { subject: `${existing.kind === "reward" ? "Reward" : "Penalty"} cancelled: ${rupees}` },
     });
 
     return NextResponse.json(data);

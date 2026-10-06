@@ -20,7 +20,7 @@
 
 import { NextResponse } from "next/server";
 import { selectAll } from "@/lib/chunks";
-import { getPrefsMap, wantsInApp } from "@/lib/notifications";
+import { Alert, AlertResult, sendAlert } from "@/lib/alerts";
 
 export const SUPER_ROLES = ["admin", "supervisor"];
 export const MANAGER_ROLES = ["admin", "supervisor", "manager"];
@@ -364,29 +364,19 @@ export async function logActivity(
  * every in-app notification) is skipped here rather than at read time, so
  * their bell count and list never show it in the first place.
  */
-export async function notifyMany(
-  supabase: any,
-  userIds: string[],
-  n: { task_id?: string | null; type: string; title: string; message: string }
-) {
-  const ids = Array.from(new Set(userIds.filter(Boolean)));
-  if (ids.length === 0) return;
-  const prefs = await getPrefsMap(supabase, ids);
-  const rows = ids
-    .filter((uid) => wantsInApp(prefs.get(uid)!, n.type))
-    .map((uid) => ({
-      user_id: uid,
-      task_id: n.task_id ?? null,
-      type: n.type,
-      title: n.title,
-      message: n.message,
-      read: false,
-    }));
-  if (rows.length === 0) return;
+/**
+ * Tell people about something: in the bell, by email and on Telegram, each
+ * according to their own settings (see lib/alerts.ts). Never throws.
+ *
+ * Pass `email: { subject, body }` for a fuller email than the bell text, or
+ * `email: false` to keep it to the bell and Telegram.
+ */
+export async function notifyMany(supabase: any, userIds: string[], n: Alert): Promise<AlertResult> {
   try {
-    await supabase.from("notifications").insert(rows);
-  } catch {
-    /* ignore */
+    return await sendAlert(supabase, userIds, n);
+  } catch (err: any) {
+    console.error("notifyMany failed:", err);
+    return { in_app: 0, email: 0, telegram: 0, in_app_error: err?.message || "failed" };
   }
 }
 

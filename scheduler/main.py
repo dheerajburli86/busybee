@@ -24,7 +24,9 @@ Deploy on Railway with these environment variables:
                           (Resend's default test sender only delivers to the
                           Resend account's own address)
   APP_URL               - optional, e.g. https://busybee-xi.vercel.app, to put
-                          a link to the task in emails
+                          a link to the task in emails and Telegram messages
+  TELEGRAM_BOT_TOKEN    - optional, the same bot token as the web app, to send
+                          every alert to people's Telegram as well
 """
 
 import json as _json
@@ -292,11 +294,43 @@ def already_sent(task_id: str, marker: str, since: datetime) -> bool:
             .limit(1)
             .execute()
         )
-        return bool(res.data)
+        if res.data:
+            return True
     except Exception as exc:
         warn(f"dedupe check failed for {task_id}: {exc!r}")
         # Fail closed so a database blip cannot cause a burst of duplicates.
         return True
+    # Sent only by email/Telegram (the bell was muted), so no notification row.
+    try:
+        res = (
+            supabase.table("scheduler_sent")
+            .select("task_id")
+            .eq("task_id", task_id)
+            .eq("marker", marker)
+            .gte("sent_at", since.isoformat())
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception as exc:
+        text = repr(exc)
+        if "scheduler_sent" in text and ("PGRST205" in text or "42P01" in text or "does not exist" in text or "Could not find" in text):
+            # Table not there yet (Telegram migration not run): behave as before.
+            return False
+        warn(f"dedupe check failed for {task_id}: {exc!r}")
+        return True  # fail closed, like the check above
+
+
+def mark_sent(task_id, marker: str) -> None:
+    if not task_id:
+        return
+    try:
+        supabase.table("scheduler_sent").upsert(
+            {"task_id": task_id, "marker": marker, "sent_at": now_utc().isoformat()},
+            on_conflict="task_id,marker",
+        ).execute()
+    except Exception:
+        pass  # before the migration; the notification row still dedupes as before
 
 
 # Checklist #48: notification preferences, mirroring frontend/lib/notifications.ts
@@ -324,12 +358,23 @@ def _prefs_for(user_id: str) -> dict:
     cached = _prefs.get(user_id)
     if cached and time.time() - cached[1] < 300:
         return cached[0]
-    prefs = {"email_enabled": True, "categories": {}}
+    prefs = {"email_enabled": True, "telegram_enabled": True, "categories": {}}
     try:
-        res = supabase.table("notification_prefs").select("email_enabled, categories").eq("user_id", user_id).limit(1).execute()
+        try:
+            res = (
+                supabase.table("notification_prefs")
+                .select("email_enabled, telegram_enabled, categories")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            # Before the Telegram migration there is no telegram_enabled column.
+            res = supabase.table("notification_prefs").select("email_enabled, categories").eq("user_id", user_id).limit(1).execute()
         row = (res.data or [None])[0]
         if row:
             prefs["email_enabled"] = row.get("email_enabled") is not False
+            prefs["telegram_enabled"] = row.get("telegram_enabled") is not False
             prefs["categories"] = row.get("categories") or {}
     except Exception as exc:
         # Table missing or unreachable: fail open (everything on), same default
@@ -342,6 +387,8 @@ def _prefs_for(user_id: str) -> dict:
 def _wants(user_id: str, ntype: str, channel: str) -> bool:
     prefs = _prefs_for(user_id)
     if channel == "email" and not prefs["email_enabled"]:
+        return False
+    if channel == "telegram" and not prefs.get("telegram_enabled", True):
         return False
     cat = prefs["categories"].get(_category_of(ntype)) or {}
     return cat.get(channel) is not False
@@ -405,6 +452,110 @@ def send_mail(user_id: str, subject: str, body: str) -> bool:
     return False
 
 
+# Telegram, the phone half of every alert. A no-op until TELEGRAM_BOT_TOKEN is
+# set, and for anyone who hasn't connected their chat in Settings.
+TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+_chats = {}
+_last_tg = [0.0]
+_tg_table_warned = [False]
+
+TG_ICONS = {
+    "overdue": "🚨",
+    "review_pending": "🔍",
+    "checklist_due": "⏰",
+    "bod_summary": "☀️",
+    "eod_summary": "🌙",
+    "update_request": "📝",
+}
+
+
+def _html(text) -> str:
+    return str(text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _chat_for(user_id: str):
+    cached = _chats.get(user_id)
+    if cached and time.time() - cached[1] < 600:
+        return cached[0]
+    try:
+        res = supabase.table("user_telegram").select("chat_id").eq("user_id", user_id).limit(1).execute()
+    except Exception as exc:
+        if not _tg_table_warned[0]:
+            warn(f"Telegram connections table not readable (run the Telegram migration?): {exc!r}")
+            _tg_table_warned[0] = True
+        return None
+    chat = (res.data or [{}])[0].get("chat_id")
+    _chats[user_id] = (chat, time.time())
+    return chat
+
+
+def _forget_chat(user_id: str) -> None:
+    """They blocked the bot or deleted the chat: stop trying until they reconnect."""
+    _chats[user_id] = (None, time.time())
+    try:
+        supabase.table("user_telegram").delete().eq("user_id", user_id).execute()
+        log(f"Telegram chat for {user_id} is gone (blocked the bot?) - disconnected; they can reconnect in Settings")
+    except Exception as exc:
+        warn(f"could not disconnect stale Telegram chat for {user_id}: {exc!r}")
+
+
+def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=None) -> bool:
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+    chat = _chat_for(user_id)
+    if not chat:
+        return False
+    icon = TG_ICONS.get(ntype) or ("⏰" if (ntype or "").startswith("reminder") else "🔔")
+    payload = {
+        "chat_id": int(chat),
+        "text": f"{icon} <b>{_html(title)}</b>\n{_html(str(message)[:3500])}",
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    if APP_URL.startswith("https://"):
+        link = f"{APP_URL}/dashboard" + (f"?task={task_id}" if task_id else "")
+        payload["reply_markup"] = {"inline_keyboard": [[{"text": "Open in BusyBee", "url": link}]]}
+    data = _json.dumps(payload).encode()
+    for attempt in range(2):
+        # Telegram allows about one message a second to the same chat and 30 a
+        # second overall; spacing every send keeps well inside both.
+        wait = 0.05 - (time.time() - _last_tg[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_tg[0] = time.time()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            retry_after = 1
+            try:
+                body = _json.loads(exc.read().decode() or "{}")
+                detail = body.get("description") or ""
+                retry_after = int((body.get("parameters") or {}).get("retry_after") or 1)
+            except Exception:
+                pass
+            if exc.code == 429 and attempt == 0:
+                time.sleep(min(retry_after, 5))
+                continue
+            if exc.code == 403 or (exc.code == 400 and "chat not found" in detail.lower()):
+                _forget_chat(user_id)
+                return False
+            warn(f"Telegram to {user_id} failed: HTTP {exc.code} {detail}")
+            return False
+        except Exception as exc:
+            # A Telegram failure must never stop the scheduler loop.
+            warn(f"Telegram to {user_id} failed: {exc!r}")
+            return False
+    return False
+
+
 def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "") -> bool:
     """In-app notification, then the same by email. No email if the in-app one
     couldn't be saved: the saved row is what stops it being sent again.
@@ -425,7 +576,12 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
         body = message
         if APP_URL:
             body += f"\n\nOpen BusyBee: {APP_URL}/dashboard" + (f"?task={task_id}" if task_id else "")
+            body += f"\n\nChoose which alerts you get: {APP_URL}/settings"
         send_mail(user_id, subject or title, body)
+    if _wants(user_id, ntype, "telegram"):
+        send_telegram(user_id, ntype, title, message, task_id)
+    if not wrote:
+        mark_sent(task_id, ntype)
     return wrote
 
 
@@ -980,7 +1136,8 @@ if __name__ == "__main__":
         f"BOD {BOD_HOUR}:00, EOD {EOD_HOUR}:00 (UTC{TZ_OFFSET_HOURS:+g}), "
         f"update requests every {UPDATE_REQUEST_DAYS or 'never'} days, "
         f"auto-archive after {AUTO_ARCHIVE_DAYS or 'never'} days, "
-        f"email {'on' if os.environ.get('RESEND_API_KEY') else 'off'}"
+        f"email {'on' if os.environ.get('RESEND_API_KEY') else 'off'}, "
+        f"telegram {'on' if TELEGRAM_BOT_TOKEN else 'off'}"
     )
 
     # Run once at boot so a deploy does not wait for the first tick.

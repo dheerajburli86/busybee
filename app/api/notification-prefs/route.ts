@@ -7,6 +7,9 @@ import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/permissions";
 import { CATEGORY_KEYS, NOTIFICATION_CATEGORIES, getPrefsFor } from "@/lib/notifications";
+import { mailConfigured } from "@/lib/email";
+import { telegramConfigured } from "@/lib/telegram";
+import { adminConfigured } from "@/lib/supabase-admin";
 
 export async function GET() {
   try {
@@ -15,7 +18,12 @@ export async function GET() {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const prefs = await getPrefsFor(supabase, user.id);
-    return NextResponse.json({ ...prefs, mail_configured: !!process.env.RESEND_API_KEY, categories_meta: NOTIFICATION_CATEGORIES });
+    return NextResponse.json({
+      ...prefs,
+      mail_configured: mailConfigured(),
+      telegram_configured: telegramConfigured() && adminConfigured(),
+      categories_meta: NOTIFICATION_CATEGORIES,
+    });
   } catch (error: any) {
     console.error("GET /api/notification-prefs failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });
@@ -30,18 +38,23 @@ export async function PUT(request: NextRequest) {
 
     const body = await request.json();
     const email_enabled = body.email_enabled !== false;
-    const categories: Record<string, { in_app: boolean; email: boolean }> = {};
+    const telegram_enabled = body.telegram_enabled !== false;
+    const categories: Record<string, { in_app: boolean; email: boolean; telegram: boolean }> = {};
     for (const key of CATEGORY_KEYS) {
       const c = body.categories?.[key] || {};
-      categories[key] = { in_app: c.in_app !== false, email: c.email !== false };
+      categories[key] = { in_app: c.in_app !== false, email: c.email !== false, telegram: c.telegram !== false };
     }
 
-    const { error } = await supabase
-      .from("notification_prefs")
-      .upsert({ user_id: user.id, email_enabled, categories, updated_at: new Date().toISOString() }, { onConflict: "user_id" });
+    const row = { user_id: user.id, email_enabled, telegram_enabled, categories, updated_at: new Date().toISOString() };
+    let { error } = await supabase.from("notification_prefs").upsert(row, { onConflict: "user_id" });
+    if (error) {
+      // Before the Telegram migration, there's no telegram_enabled column.
+      const { telegram_enabled: _skip, ...older } = row;
+      ({ error } = await supabase.from("notification_prefs").upsert(older, { onConflict: "user_id" }));
+    }
     if (error) throw error;
 
-    return NextResponse.json({ email_enabled, categories });
+    return NextResponse.json({ email_enabled, telegram_enabled, categories });
   } catch (error: any) {
     console.error("PUT /api/notification-prefs failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

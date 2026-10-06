@@ -3,6 +3,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { DESK_ROLE_VALUES, logActivity, normalizeRole } from "@/lib/permissions";
+import { telegramConnected } from "@/lib/supabase-admin";
 
 export async function GET(request: NextRequest) {
   try {
@@ -34,14 +35,29 @@ export async function GET(request: NextRequest) {
 
     const myRole = normalizeRole(data?.find((dm: any) => dm.user_id === user.id)?.role);
 
-    let pending: any[] = [];
-    if (["admin", "supervisor"].includes(myRole)) {
-      const { data: waiting } = await supabase.rpc("bb_pending_people", { p_desk: deskIds[0] });
-      pending = (waiting || []).map((p: any) => ({ id: p.id, email: p.email, name: p.full_name || p.email, created_at: p.created_at }));
-    }
-
     const seen = new Set<string>();
     const unique = members.filter((m: any) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
+
+    // Only the People page needs who is waiting for access and who has their
+    // phone connected. Every other page - the assignee picker above all - just
+    // wants the names, and those two extra round trips were what kept the
+    // picker showing "0 people you can assign to" while they finished. They
+    // are opt-in now, and run together rather than one after the other.
+    if (request.nextUrl.searchParams.get("full") !== "1") {
+      return NextResponse.json({ members: unique, me: user.id, myRole, onDesk: true, pending: [] });
+    }
+
+    const [waiting, linked] = await Promise.all([
+      ["admin", "supervisor"].includes(myRole)
+        ? supabase.rpc("bb_pending_people", { p_desk: deskIds[0] }).then(({ data: d }: any) => d)
+        : Promise.resolve([]),
+      // Who will get alerts on their phone. Only "connected or not" leaves the
+      // server, never the chat id itself.
+      telegramConnected(unique.map((m: any) => m.id)),
+    ]);
+
+    const pending = (waiting || []).map((p: any) => ({ id: p.id, email: p.email, name: p.full_name || p.email, created_at: p.created_at }));
+    if (linked) unique.forEach((m: any) => (m.telegram = linked.has(m.id)));
 
     return NextResponse.json({ members: unique, me: user.id, myRole, onDesk: true, pending });
   } catch (error: any) {

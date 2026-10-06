@@ -1,7 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { sendMail } from "@/lib/email";
-import { deny, logActivity, projectMemberIds, requireUser, taskAccess } from "@/lib/permissions";
+import { deny, logActivity, notifyMany, projectMemberIds, requireUser, taskAccess } from "@/lib/permissions";
 
 // SOW #24 (supervisor seeks an update) and #39 (manual reminder).
 // Both are the same action: send a notification about this task to someone.
@@ -62,17 +61,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (error) throw error;
 
-    // SOW #39: the reminder also goes out by email when mail is configured.
-    // A failed or unconfigured send must not fail the request, so the result
-    // is reported rather than thrown.
-    const emailed = await sendMail({
-      userIds: targets,
-      subject: isUpdateRequest
-        ? `Update requested: ${task.title}`
-        : `Reminder: ${task.title}`,
-      body: message,
+    // SOW #39: a chase from the assignor always lands in the bell (written
+    // above, regardless of settings), and also goes out by email and Telegram
+    // according to each person's settings. A failed or unconfigured send must
+    // not fail the request, so the result is reported rather than thrown.
+    const sent = await notifyMany(supabase, targets, {
+      task_id: id,
       type: isUpdateRequest ? "update_request" : "reminder",
+      title: isUpdateRequest ? "Update requested" : "Reminder",
+      message,
+      email: { subject: isUpdateRequest ? `Update requested: ${task.title}` : `Reminder: ${task.title}` },
+      in_app: false,
     });
+    const emailed = sent.email > 0;
 
     await logActivity(supabase, {
       entity_type: "task",
@@ -82,7 +83,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       desk_id: task.desk_id,
     });
 
-    return NextResponse.json({ success: true, emailed, sent_to: targets.length });
+    return NextResponse.json({ success: true, emailed, telegram: sent.telegram, sent_to: targets.length });
   } catch (error: any) {
     console.error("POST /api/tasks/[id]/remind failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });

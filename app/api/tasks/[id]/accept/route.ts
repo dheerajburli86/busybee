@@ -8,7 +8,6 @@ import {
   taskAccess,
   teamMemberIds,
 } from "@/lib/permissions";
-import { sendMail } from "@/lib/email";
 import { formatForPeople } from "@/lib/format";
 import { isFinished } from "@/lib/status";
 import { schemaMissing } from "@/lib/workflow";
@@ -177,15 +176,15 @@ export async function POST(req: Request, { params }: Params) {
       type: decision === "accepted" ? "deadline_accepted" : "deadline_declined",
       title: decision === "accepted" ? "Deadline accepted" : "Deadline declined",
       message,
+      // "Accepted" is routine (bell + Telegram); "declined" needs action, so it's emailed too.
+      email:
+        decision === "declined"
+          ? {
+              subject: `Deadline declined: ${access.task.title}`,
+              body: `${message}\n\nThey can now raise an extension request with a proposed new date.`,
+            }
+          : false,
     });
-    if (decision === "declined") {
-      await sendMail({
-        userIds: tell,
-        subject: `Deadline declined: ${access.task.title}`,
-        body: `${message}\n\nThey can now raise an extension request with a proposed new date.`,
-        type: "deadline_declined",
-      });
-    }
 
     return NextResponse.json(data);
   } catch (error: any) {

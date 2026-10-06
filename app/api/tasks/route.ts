@@ -1,7 +1,6 @@
 // app/api/tasks/route.ts
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { sendMail } from "@/lib/email";
 import {
   deny,
   getMemberships,
@@ -310,12 +309,7 @@ export async function POST(request: NextRequest) {
         type: "assigned",
         title: "New task assigned",
         message: `You were assigned: ${task.title}${ask}`,
-      });
-      await sendMail({
-        userIds: Array.from(recipients),
-        subject: `New task assigned: ${task.title}`,
-        body: `You were assigned: ${task.title}${ask}`,
-        type: "assigned",
+        email: { subject: `New task assigned: ${task.title}` },
       });
     }
 
@@ -577,12 +571,7 @@ export async function PUT(request: NextRequest) {
         type: "assigned",
         title: "New task assigned",
         message: `You were assigned: ${task.title}`,
-      });
-      await sendMail({
-        userIds: Array.from(newlyAssigned),
-        subject: `New task assigned: ${task.title}`,
-        body: `You were assigned: ${task.title}`,
-        type: "assigned",
+        email: { subject: `New task assigned: ${task.title}` },
       });
     }
 
@@ -593,6 +582,7 @@ export async function PUT(request: NextRequest) {
         type: "updated",
         title: "Task reassigned",
         message: `${task.title} was given to someone else`,
+        email: { subject: `Task reassigned: ${task.title}` },
       });
     }
 

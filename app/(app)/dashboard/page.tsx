@@ -120,12 +120,29 @@ export default function DashboardPage() {
           const r = await fetch(u, { cache: "no-store" });
           return r.ok ? r.json() : null;
         };
+        // All five go out at once, but the people list is what the form at the
+        // top needs first, so it is shown the moment it lands instead of
+        // waiting for the tasks, projects, OKRs and templates behind it.
+        const tasksReq = fetch("/api/tasks", { cache: "no-store" });
+        const membersReq = get("/api/team/members");
+        const projectsReq = get("/api/projects");
+        const okrReq = get("/api/okr");
+        const templatesReq = get("/api/templates");
+
+        membersReq
+          .then((m) => {
+            if (!m) return;
+            setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
+            setMyRole(m.myRole || "member");
+          })
+          .catch(() => {});
+
         const [t, m, p, okr, tpl] = await Promise.all([
-          fetch("/api/tasks", { cache: "no-store" }),
-          get("/api/team/members"),
-          get("/api/projects"),
-          get("/api/okr"),
-          get("/api/templates"),
+          tasksReq,
+          membersReq,
+          projectsReq,
+          okrReq,
+          templatesReq,
         ]);
         const td = await t.json();
         if (!t.ok) throw new Error(td.error || "Could not load tasks");
@@ -147,12 +164,12 @@ export default function DashboardPage() {
             showError("That task is no longer available to you.");
           }
         }
-        setLookups({
-          people: m?.members || [],
-          me: m?.me || null,
+        setLookups((cur) => ({
+          people: m?.members || cur.people,
+          me: m?.me || cur.me,
           projects: p?.projects || [],
           keyResults: okr?.keyResults || [],
-        });
+        }));
         setMyRole(m?.myRole || "member");
         setTemplates(tpl?.templates || []);
       } catch (e: any) {
@@ -453,6 +470,7 @@ export default function DashboardPage() {
           selected={form.assignees}
           onChange={(ids) => setForm({ ...form, assignees: ids })}
           disabled={creating}
+          loading={loading}
         />
         <input
           type="text"

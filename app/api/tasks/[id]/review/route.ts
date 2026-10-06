@@ -9,7 +9,6 @@ import {
   taskAudience,
 } from "@/lib/permissions";
 import { schemaMissing, workersOn } from "@/lib/workflow";
-import { sendMail } from "@/lib/email";
 
 // Step 9 of the assignment flow: a supervisor signs the finished work off, or
 // sends it back with a note.
@@ -137,12 +136,7 @@ export async function POST(req: Request, { params }: Params) {
       type: decision === "approved" ? "review_approved" : "review_sent_back",
       title: decision === "approved" ? "Work approved" : "Work sent back",
       message,
-    });
-    await sendMail({
-      userIds: workers.filter((x) => x !== user.id),
-      subject: decision === "approved" ? `Approved: ${access.task.title}` : `Sent back: ${access.task.title}`,
-      body: message,
-      type: decision === "approved" ? "review_approved" : "review_sent_back",
+      email: { subject: decision === "approved" ? `Approved: ${access.task.title}` : `Sent back: ${access.task.title}` },
     });
 
     return NextResponse.json(data);

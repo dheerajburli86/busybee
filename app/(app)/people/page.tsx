@@ -6,7 +6,7 @@
 import { useEffect, useState } from "react";
 import { sendJSON } from "@/lib/api";
 
-type Person = { id: string; name: string; email: string; role?: string };
+type Person = { id: string; name: string; email: string; role?: string; telegram?: boolean };
 
 const DESK_ROLES = [
   { value: "member", label: "Member", help: "Works on what they're given; can't move deadlines" },
@@ -32,7 +32,9 @@ export default function PeoplePage() {
 
   const load = async () => {
     try {
-      const m = await fetch("/api/team/members", { cache: "no-store" });
+      // full=1: this is the one page that shows who is waiting for access and
+      // who has their phone connected.
+      const m = await fetch("/api/team/members?full=1", { cache: "no-store" });
       if (!m.ok) throw new Error("Could not load people");
       const md = await m.json();
       setPeople(md.members || []);
@@ -65,6 +67,17 @@ export default function PeoplePage() {
       await load();
     } catch (e: any) {
       setError(e.message);
+    }
+  };
+
+  const [botNote, setBotNote] = useState("");
+  const reconnectBot = async () => {
+    setBotNote("Reconnecting...");
+    try {
+      const r = await sendJSON("/api/telegram/setup", "POST", {});
+      setBotNote(`Telegram bot connected to ${r.url}`);
+    } catch (e: any) {
+      setBotNote(e.message);
     }
   };
 
@@ -138,7 +151,15 @@ export default function PeoplePage() {
             <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 rounded px-3 py-2">
               <div className="min-w-0">
                 <p className="text-sm truncate">{p.name}{p.id === me && " (you)"}</p>
-                <p className="text-xs text-slate-500 truncate">{p.email}</p>
+                <p className="text-xs text-slate-500 truncate">
+                  {p.email}
+                  {p.telegram !== undefined && (
+                    <span className={p.telegram ? "text-sky-400" : "text-slate-600"}>
+                      {" · "}
+                      {p.telegram ? "Telegram connected" : "no Telegram yet"}
+                    </span>
+                  )}
+                </p>
               </div>
               {canEditRoles ? (
                 <select value={p.role || "member"} onChange={(e) => changeRole(p, e.target.value)} className={`${inputCls} text-xs py-1`} aria-label={`Role for ${p.name}`}>
@@ -157,9 +178,15 @@ export default function PeoplePage() {
           <h2 className="text-lg font-semibold mb-2">System check</h2>
           <div className={card}>
             <div className="flex flex-wrap justify-between items-center gap-2">
-              <p className="text-xs text-slate-400">Checks the database update is in place, email is set up and the reminder scheduler is running.</p>
-              <button onClick={runHealth} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">Run check</button>
+              <p className="text-xs text-slate-400">Checks the database update is in place, email and Telegram are set up and the reminder scheduler is running.</p>
+              <div className="flex gap-2">
+                <button onClick={reconnectBot} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm" title="Re-register the Telegram webhook (after changing the bot token or site address)">
+                  Reconnect Telegram bot
+                </button>
+                <button onClick={runHealth} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">Run check</button>
+              </div>
             </div>
+            {botNote && <p className="text-xs text-slate-400 mt-2 break-all">{botNote}</p>}
             {showHealth && !health && <p className="text-sm text-slate-400 mt-3">Checking...</p>}
             {health && (
               <ul className="mt-3 space-y-1 text-sm">

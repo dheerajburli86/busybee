@@ -8,7 +8,6 @@
 //                   (and keeps its Completed status there)
 
 import { logActivity, notifyMany, taskAudience, teamMemberIds } from "@/lib/permissions";
-import { sendMail } from "@/lib/email";
 import { isFinished } from "@/lib/status";
 
 export type Section = { id: string; project_id: string; name: string; position: number };
@@ -66,8 +65,8 @@ export async function notifyCompleted(supabase: any, task: any, actorId: string 
     type: "completed",
     title: `Task ${word}`,
     message: `Task marked ${word}${how}: ${task.title}`,
+    email: { subject: `Task ${word}: ${task.title}`, body: `${task.title} was marked ${word}${how}.` },
   });
-  await sendMail({ userIds: audience, subject: `Task ${word}: ${task.title}`, body: `${task.title} was marked ${word}${how}.`, type: "completed" });
 }
 
 /**

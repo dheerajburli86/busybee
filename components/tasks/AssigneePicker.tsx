@@ -17,12 +17,15 @@ export function AssigneePicker({
   selected,
   onChange,
   disabled,
+  loading,
 }: {
   people: Person[];
   me: string | null;
   selected: string[];
   onChange: (ids: string[]) => void;
   disabled?: boolean;
+  /** True until the names have arrived, so an empty list doesn't read as "nobody". */
+  loading?: boolean;
 }) {
   const [q, setQ] = useState("");
 
@@ -42,15 +45,22 @@ export function AssigneePicker({
     onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
 
   const available = people.filter((p) => p.id !== me).length;
+  const stillLoading = Boolean(loading) && people.length === 0;
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="text-sm text-slate-300">
-          <span className="font-semibold text-white">{available}</span>{" "}
-          {available === 1 ? "person" : "people"} you can assign to
-          {selected.length > 0 && (
-            <span className="text-blue-400"> · {selected.length} selected</span>
+          {stillLoading ? (
+            "Loading people..."
+          ) : (
+            <>
+              <span className="font-semibold text-white">{available}</span>{" "}
+              {available === 1 ? "person" : "people"} you can assign to
+              {selected.length > 0 && (
+                <span className="text-blue-400"> · {selected.length} selected</span>
+              )}
+            </>
           )}
         </p>
         <div className="flex gap-3 text-xs">
@@ -95,7 +105,9 @@ export function AssigneePicker({
             </button>
           );
         })}
-        {shown.length === 0 && <p className="text-xs text-slate-500">Nobody matches.</p>}
+        {shown.length === 0 && !stillLoading && (
+          <p className="text-xs text-slate-500">Nobody matches.</p>
+        )}
       </div>
 
       {selected.length > 1 && (

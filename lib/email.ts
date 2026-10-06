@@ -56,7 +56,7 @@ async function post(path: string, payload: unknown): Promise<boolean> {
  * recipients go in a single batch request (up to 100 per request) instead of
  * one request each, which Resend's per-second limit would partly refuse.
  */
-async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
+export async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
   if (to.length === 1) return post("/emails", { from: FROM, to, subject, text });
   let ok = false;
   for (let i = 0; i < to.length; i += 100) {

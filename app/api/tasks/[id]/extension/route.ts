@@ -10,7 +10,6 @@ import {
   taskAccess,
   taskAudience,
 } from "@/lib/permissions";
-import { sendMail } from "@/lib/email";
 import { formatForPeople, normalizeTimestamp } from "@/lib/format";
 
 // Checklist #43 / #44, SOW #45: overdue module.
@@ -153,12 +152,10 @@ export async function POST(req: Request, { params }: Params) {
       type: "extension_request",
       title: "Extension requested",
       message: `More time was requested for: ${access.task.title} - until ${formatForPeople(data.requested_date)} - "${reason.trim().slice(0, 100)}"`,
-    });
-    await sendMail({
-      userIds: deciders,
-      subject: `Extension requested: ${access.task.title}`,
-      body: `Reason: ${reason.trim()}\nCurrent deadline: ${formatForPeople(access.task.due_date)}\nRequested new deadline: ${formatForPeople(data.requested_date)}`,
-      type: "extension_request",
+      email: {
+        subject: `Extension requested: ${access.task.title}`,
+        body: `Reason: ${reason.trim()}\nCurrent deadline: ${formatForPeople(access.task.due_date)}\nRequested new deadline: ${formatForPeople(data.requested_date)}`,
+      },
     });
 
     return NextResponse.json({ ...data, can_review: false });
@@ -271,12 +268,9 @@ export async function PUT(req: Request, { params }: Params) {
       type: "extension_reviewed",
       title: status === "approved" ? "Extension approved" : "Extension rejected",
       message,
-    });
-    await sendMail({
-      userIds: [existing.requested_by],
-      subject: status === "approved" ? "Extension approved" : "Extension rejected",
-      body: message,
-      type: "extension_reviewed",
+      email: {
+        subject: `${status === "approved" ? "Extension approved" : "Extension rejected"}: ${access.task.title}`,
+      },
     });
 
     // Like any other deadline change, everyone else on the task hears about it.
@@ -289,6 +283,7 @@ export async function PUT(req: Request, { params }: Params) {
         type: "updated",
         title: "Deadline moved",
         message: `New deadline for ${access.task.title}: ${formatForPeople(finalDate)} (extension approved)`,
+        email: { subject: `Deadline moved: ${access.task.title}` },
       });
     }
 
