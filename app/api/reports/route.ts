@@ -88,7 +88,7 @@ export async function GET(request: NextRequest) {
     const createdInWindow = all.filter((t: any) => inWindow(t.created_at));
     const overdueNow = live.filter((t: any) => isOverdue(t));
     const open = live.filter((t: any) => !isFinished(t.status));
-    const avgProgress = live.length ? Math.round(live.reduce((s: number, t: any) => s + (t.progress_percent || 0), 0) / live.length) : 0;
+    const avgProgress = open.length ? Math.round(open.reduce((s: number, t: any) => s + (t.progress_percent || 0), 0) / open.length) : 0;
 
     // Status distribution (live tasks).
     const statusDistribution = STATUSES.map((s) => ({

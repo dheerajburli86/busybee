@@ -33,6 +33,12 @@ const STATUS_COLORS: Record<string, string> = {
   closed: "bg-slate-400",
 };
 
+const TZ = "Asia/Kolkata";
+const fmtDate = (iso: string) => new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: TZ });
+const fmtDateTime = (iso: string) =>
+  new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: TZ });
+const lateLabel = (days: number) => (days < 1 ? "Today" : days === 1 ? "1 day" : `${days} days`);
+
 function toCsv(rows: Record<string, any>[]): string {
   if (!rows.length) return "";
   const cols = Object.keys(rows[0]);
@@ -135,28 +141,48 @@ export default function ReportsPage() {
       {report && !loading && (
         <>
           <p className="text-sm text-slate-400 mb-4">
-            {new Date(report.window.start).toLocaleDateString()} – {new Date(report.window.end).toLocaleDateString()}
+            {fmtDate(report.window.start) === fmtDate(report.window.end)
+              ? fmtDate(report.window.start)
+              : `${fmtDate(report.window.start)} – ${fmtDate(report.window.end)}`}
           </p>
 
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
-            {[
-              ["Open now", report.summary.open, ""],
-              ["Created", report.summary.created, "text-blue-400"],
-              ["Completed", report.summary.completed, "text-green-500"],
-              ["Finished late", report.summary.completed_late, "text-amber-400"],
-              ["Overdue now", report.summary.overdue, "text-red-500"],
-              ["Hours logged", report.summary.hours, "text-slate-200"],
-            ].map(([label, value, cls]) => (
-              <div key={label as string} className={card}>
-                <p className={`text-2xl font-bold ${cls}`}>{value as number}</p>
-                <p className="text-slate-400 text-xs">{label}</p>
+          {[
+            {
+              title: "Right now (all open work, not limited to the period)",
+              cols: "grid-cols-2",
+              items: [
+                ["Open tasks", report.summary.open, ""],
+                ["of which overdue", report.summary.overdue, "text-red-500"],
+              ],
+            },
+            {
+              title: "In this period",
+              cols: "grid-cols-2 md:grid-cols-4",
+              items: [
+                ["Created", report.summary.created, "text-blue-400"],
+                ["Completed", report.summary.completed, "text-green-500"],
+                ["Completed late", report.summary.completed_late, "text-amber-400"],
+                ["Hours logged", report.summary.hours, "text-slate-200"],
+              ],
+            },
+          ].map((g) => (
+            <div key={g.title} className="mb-5">
+              <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">{g.title}</p>
+              <div className={`grid ${g.cols} gap-3`}>
+                {g.items.map(([label, value, cls]) => (
+                  <div key={label as string} className={card}>
+                    <p className={`text-2xl font-bold ${cls}`}>{value as number}</p>
+                    <p className="text-slate-400 text-xs">{label}</p>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
 
           <div className="grid lg:grid-cols-2 gap-4 mb-6">
             <div className={card}>
-              <h2 className="font-semibold mb-3">Status distribution</h2>
+              <h2 className="font-semibold mb-1">Status distribution</h2>
+              <p className="text-xs text-slate-500 mb-3">All current tasks</p>
               <div className="flex h-4 rounded overflow-hidden mb-3">
                 {report.statusDistribution.map((s) => (
                   <div key={s.status} className={STATUS_COLORS[s.status]} style={{ width: `${(s.count / totalStatus) * 100}%` }} title={`${s.label}: ${s.count}`} />
@@ -167,13 +193,20 @@ export default function ReportsPage() {
                   <li key={s.status}><span className={`inline-block w-3 h-3 rounded mr-2 align-middle ${STATUS_COLORS[s.status]}`} />{s.label}: {s.count}</li>
                 ))}
               </ul>
-              <p className="text-xs text-slate-400 mt-3">Average progress on open work: {report.summary.avg_progress}%</p>
+              <p className="text-xs text-slate-400 mt-3">Average progress on open tasks: {report.summary.avg_progress}%</p>
             </div>
 
             <div className={card}>
-              <h2 className="font-semibold mb-3">Created vs completed per day</h2>
+              <h2 className="font-semibold mb-1">Created vs completed per day</h2>
+              <p className="text-xs text-slate-500 mb-3">Peak: {maxDay} in a day</p>
               <div className="flex items-end gap-1 h-32 overflow-x-auto">
-                {report.days.map((d) => (
+                {report.days.length === 1 && (
+                  <div className="text-sm text-slate-300 py-6 w-full">
+                    <span className="text-blue-400 font-semibold">{report.days[0].created}</span> created,{" "}
+                    <span className="text-green-500 font-semibold">{report.days[0].completed}</span> completed today
+                  </div>
+                )}
+                {report.days.length > 1 && report.days.map((d) => (
                   <div key={d.date} className="flex flex-col items-center justify-end h-full min-w-[14px] flex-1" title={`${d.date}: ${d.created} created, ${d.completed} completed`}>
                     <div className="flex items-end gap-px h-full w-full justify-center">
                       <div className="bg-blue-500 w-1/2 rounded-t" style={{ height: `${(d.created / maxDay) * 100}%` }} />
@@ -182,10 +215,12 @@ export default function ReportsPage() {
                   </div>
                 ))}
               </div>
-              <div className="flex justify-between text-[10px] text-slate-500 mt-1">
-                <span>{report.days[0]?.date}</span>
-                <span>{report.days[report.days.length - 1]?.date}</span>
-              </div>
+              {report.days.length > 1 && (
+                <div className="flex justify-between text-[10px] text-slate-500 mt-1">
+                  <span>{fmtDate(report.days[0].date)}</span>
+                  <span>{fmtDate(report.days[report.days.length - 1].date)}</span>
+                </div>
+              )}
               <p className="text-xs text-slate-400 mt-2">
                 <span className="inline-block w-3 h-3 bg-blue-500 rounded mr-1 align-middle" />Created
                 <span className="inline-block w-3 h-3 bg-green-500 rounded mx-1 ml-3 align-middle" />Completed
@@ -193,17 +228,17 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          <Table title="Project performance" empty="No project work in this period." headers={["Project", "Tasks", "Done", "Done this period", "Overdue", "Progress"]}
+          <Table title="Project performance" empty="No project work in this period." headers={["Project", "Open + done tasks", "Done (total)", "Done this period", "Overdue now", "Avg progress"]}
             rows={report.byProject.map((p) => [p.name, p.total, p.done, p.completed_in_period, p.overdue, `${p.progress}%`])} />
 
-          <Table title="By member" empty="No activity in this period." headers={["Member", "Open", "Completed", "On time", "Overdue", "Actions", "Hours"]}
+          <Table title="By member" empty="No activity in this period." headers={["Member", "Open now", "Done this period", "On-time rate", "Overdue now", "Actions this period", "Hours this period"]}
             rows={report.byMember.map((m) => [m.name, m.assigned_open, m.completed, m.on_time_rate === null ? "–" : `${m.on_time_rate}%`, m.overdue, m.actions, m.hours])} />
 
-          <Table title={`Completed this period (${report.completed.length})`} empty="Nothing completed in this period." headers={["Task", "By", "Finished", "Due", ""]}
-            rows={report.completed.map((c) => [c.title, c.assignee, new Date(c.completed_at).toLocaleString(), c.due_date ? new Date(c.due_date).toLocaleString() : "–", c.on_time ? "on time" : "late"])} />
+          <Table title={`Completed this period (${report.completed.length})`} empty="Nothing completed in this period." headers={["Task", "By", "Finished", "Due", "Result"]}
+            rows={report.completed.map((c) => [c.title, c.assignee, fmtDateTime(c.completed_at), c.due_date ? fmtDateTime(c.due_date) : "–", c.on_time ? "on time" : "late"])} />
 
-          <Table title={`Overdue (${report.overdue.length})`} empty="Nothing overdue." headers={["Task", "Assignee", "Project", "Due", "Days late", "Progress"]}
-            rows={report.overdue.map((o) => [o.title, o.assignee, o.project || "–", new Date(o.due_date).toLocaleString(), o.days_late, `${o.progress}%`])} />
+          <Table title={`Overdue (${report.overdue.length})`} empty="Nothing overdue." headers={["Task", "Assignee", "Project", "Due", "Late by", "Progress"]}
+            rows={report.overdue.map((o) => [o.title, o.assignee, o.project || "–", fmtDateTime(o.due_date), lateLabel(o.days_late), `${o.progress}%`])} />
 
           <div className={`${card} mb-6`}>
             <h2 className="font-semibold mb-3">Activity in this period ({report.activity.length})</h2>
@@ -213,7 +248,7 @@ export default function ReportsPage() {
               <ul className="space-y-1 text-sm max-h-96 overflow-y-auto print:max-h-none">
                 {report.activity.map((a) => (
                   <li key={a.id} className="flex flex-wrap gap-x-2">
-                    <span className="text-slate-500 text-xs w-36 shrink-0">{new Date(a.created_at).toLocaleString()}</span>
+                    <span className="text-slate-500 text-xs w-36 shrink-0">{fmtDateTime(a.created_at)}</span>
                     <span className="font-semibold text-slate-200">{a.user_name}</span>
                     <span className="text-slate-300">{a.action}</span>
                     {a.task_title && <span className="text-slate-400">on "{a.task_title}"</span>}
