@@ -1,23 +1,73 @@
 // SOW #30 / #39: email alongside in-app notifications.
 //
-// This calls Resend's REST endpoint directly rather than pulling in an SDK, so
-// nothing needs installing and the bundle is unchanged. To switch providers,
-// replace the body of deliver() - everything else works off sendMail().
-//
-// Until RESEND_API_KEY is set the whole thing is a no-op: it logs and returns
-// false. Nothing that calls sendMail treats that as an error, so the app keeps
-// working normally with in-app notifications only.
+// Two ways to send, whichever is set up:
+//   * Gmail - GMAIL_USER plus GMAIL_APP_PASSWORD (a 16-letter app password,
+//     not the account password). Sends from that Gmail address over SMTP.
+//   * Resend - RESEND_API_KEY, sending from MAIL_FROM on a verified domain.
+// Gmail wins if both are set. With neither, the whole thing is a no-op: it
+// returns false and the app carries on with in-app notifications only.
 
+import nodemailer from "nodemailer";
 import { createServerSideClient } from "@/lib/supabase-server";
 import { getPrefsMap, wantsEmail } from "@/lib/notifications";
 
-const FROM = process.env.MAIL_FROM || "BusyBee <onboarding@resend.dev>";
+const gmailUser = () => (process.env.GMAIL_USER || "").trim();
+// Google shows app passwords in groups of four with spaces; accept it pasted
+// either way.
+const gmailPass = () => (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+
+export function mailProvider(): "gmail" | "resend" | null {
+  if (gmailUser() && gmailPass()) return "gmail";
+  if (process.env.RESEND_API_KEY) return "resend";
+  return null;
+}
 
 export function mailConfigured(): boolean {
-  return Boolean(process.env.RESEND_API_KEY);
+  return mailProvider() !== null;
+}
+
+/** The address mail goes out from, for the system check. */
+export function mailSender(): string {
+  if (mailProvider() === "gmail") return `BusyBee <${gmailUser()}>`;
+  return process.env.MAIL_FROM || "BusyBee <onboarding@resend.dev>";
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let transport: nodemailer.Transporter | null = null;
+function gmail(): nodemailer.Transporter {
+  if (!transport) {
+    transport = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: gmailUser(), pass: gmailPass() },
+      pool: true,
+      maxConnections: 1,
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    });
+  }
+  return transport;
+}
+
+/** One message per recipient over Gmail, so nobody sees anyone else's address. */
+async function viaGmail(to: string[], subject: string, text: string): Promise<boolean> {
+  let ok = false;
+  for (const addr of to) {
+    try {
+      await gmail().sendMail({ from: mailSender(), to: addr, subject, text });
+      ok = true;
+    } catch (err: any) {
+      // A failed email must never take down the request that triggered it.
+      console.error("gmail send failed:", addr, err?.responseCode || "", err?.message || err);
+      // Bad login fails the same way for everyone - stop rather than repeat it.
+      if (err?.code === "EAUTH") return ok;
+    }
+  }
+  return ok;
+}
 
 /** POST to Resend, retrying once if it says we're sending too fast. */
 async function post(path: string, payload: unknown): Promise<boolean> {
@@ -40,7 +90,6 @@ async function post(path: string, payload: unknown): Promise<boolean> {
         await sleep(1100);
         continue;
       }
-      // A failed email must never take down the request that triggered it.
       console.error("email send failed:", res.status, await res.text());
       return false;
     } catch (err) {
@@ -52,15 +101,18 @@ async function post(path: string, payload: unknown): Promise<boolean> {
 }
 
 /**
- * One message per recipient, so nobody sees anyone else's address. Several
- * recipients go in a single batch request (up to 100 per request) instead of
- * one request each, which Resend's per-second limit would partly refuse.
+ * One message per recipient, so nobody sees anyone else's address. On Resend,
+ * several recipients go in one batch request (up to 100 per request).
  */
 export async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
-  if (to.length === 1) return post("/emails", { from: FROM, to, subject, text });
+  const provider = mailProvider();
+  if (provider === "gmail") return viaGmail(to, subject, text);
+  if (provider !== "resend") return false;
+  const from = mailSender();
+  if (to.length === 1) return post("/emails", { from, to, subject, text });
   let ok = false;
   for (let i = 0; i < to.length; i += 100) {
-    const part = to.slice(i, i + 100).map((addr) => ({ from: FROM, to: [addr], subject, text }));
+    const part = to.slice(i, i + 100).map((addr) => ({ from, to: [addr], subject, text }));
     if (await post("/emails/batch", part)) ok = true;
   }
   return ok;

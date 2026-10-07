@@ -6,7 +6,7 @@
 //   * their own settings decide (Settings page), except pay alerts, which
 //     nobody can switch off - see ALWAYS_DELIVERED
 //   * email skips routine edits (EMAIL_QUIET) so it stays worth reading
-//   * a channel that isn't configured (no RESEND_API_KEY, no
+//   * a channel that isn't configured (no email provider, no
 //     TELEGRAM_BOT_TOKEN) is skipped silently
 //   * a failure on one channel never stops the others, and never fails the
 //     request that caused the alert

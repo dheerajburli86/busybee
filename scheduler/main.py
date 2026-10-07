@@ -19,8 +19,10 @@ Deploy on Railway with these environment variables:
   TZ_OFFSET_HOURS       - optional, defaults to 5.5 for IST
   UPDATE_REQUEST_DAYS   - optional, defaults to 3 (0 switches it off)
   AUTO_ARCHIVE_DAYS     - optional, defaults to 7 (0 switches it off)
-  RESEND_API_KEY        - optional, to send email as well
-  MAIL_FROM             - optional, e.g. "BusyBee <busybee@yourdomain.com>"
+  GMAIL_USER            - optional, Gmail address to send email from
+  GMAIL_APP_PASSWORD    - optional, that account's 16-letter app password
+  RESEND_API_KEY        - optional alternative to Gmail
+  MAIL_FROM             - optional, Resend sender, e.g. "BusyBee <busybee@yourdomain.com>"
                           (Resend's default test sender only delivers to the
                           Resend account's own address)
   APP_URL               - optional, e.g. https://busybee-xi.vercel.app, to put
@@ -30,6 +32,9 @@ Deploy on Railway with these environment variables:
 """
 
 import json as _json
+import smtplib
+import ssl
+from email.message import EmailMessage
 import os
 import sys
 import time
@@ -394,9 +399,21 @@ def _wants(user_id: str, ntype: str, channel: str) -> bool:
     return cat.get(channel) is not False
 
 
-# SOW #30: email alongside the in-app notification, through Resend's REST API
-# via the standard library. A no-op until RESEND_API_KEY is set.
-MAIL_FROM = (os.environ.get("MAIL_FROM") or "").strip() or "BusyBee <onboarding@resend.dev>"
+# SOW #30: email alongside the in-app notification. Gmail (GMAIL_USER +
+# GMAIL_APP_PASSWORD) over SMTP if set, otherwise Resend's REST API if
+# RESEND_API_KEY is set, otherwise a no-op.
+GMAIL_USER = (os.environ.get("GMAIL_USER") or "").strip()
+GMAIL_APP_PASSWORD = "".join((os.environ.get("GMAIL_APP_PASSWORD") or "").split())
+MAIL_FROM = (
+    f"BusyBee <{GMAIL_USER}>"
+    if GMAIL_USER and GMAIL_APP_PASSWORD
+    else (os.environ.get("MAIL_FROM") or "").strip() or "BusyBee <onboarding@resend.dev>"
+)
+_gmail_dead = [False]
+
+
+def mail_on() -> bool:
+    return bool((GMAIL_USER and GMAIL_APP_PASSWORD) or os.environ.get("RESEND_API_KEY"))
 _emails = {}
 _last_mail = [0.0]
 
@@ -416,13 +433,45 @@ def _email_for(user_id: str):
     return address
 
 
+def _send_gmail(user_id: str, address: str, subject: str, body: str) -> bool:
+    if _gmail_dead[0]:
+        return False
+    msg = EmailMessage()
+    msg["From"] = MAIL_FROM
+    msg["To"] = address
+    msg["Subject"] = subject
+    msg.set_content(body)
+    # Gmail doesn't like bursts; keep a small gap between messages.
+    wait = 1.0 - (time.time() - _last_mail[0])
+    if wait > 0:
+        time.sleep(wait)
+    _last_mail[0] = time.time()
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=15) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+        return True
+    except smtplib.SMTPAuthenticationError as exc:
+        # Wrong app password fails identically every time - say so once and
+        # stop trying until the next deploy.
+        _gmail_dead[0] = True
+        warn(f"Gmail refused the login for {GMAIL_USER} - check GMAIL_APP_PASSWORD: {exc!r}")
+        return False
+    except Exception as exc:
+        warn(f"email to {user_id} failed: {exc!r}")
+        return False
+
+
 def send_mail(user_id: str, subject: str, body: str) -> bool:
+    gmail = bool(GMAIL_USER and GMAIL_APP_PASSWORD)
     key = os.environ.get("RESEND_API_KEY")
-    if not key:
+    if not gmail and not key:
         return False
     address = _email_for(user_id)
     if not address:
         return False
+    if gmail:
+        return _send_gmail(user_id, address, subject, body)
     payload = _json.dumps({"from": MAIL_FROM, "to": [address], "subject": subject, "text": body}).encode()
     for attempt in range(2):
         # Resend allows a couple of requests a second; space them out.
@@ -1136,7 +1185,7 @@ if __name__ == "__main__":
         f"BOD {BOD_HOUR}:00, EOD {EOD_HOUR}:00 (UTC{TZ_OFFSET_HOURS:+g}), "
         f"update requests every {UPDATE_REQUEST_DAYS or 'never'} days, "
         f"auto-archive after {AUTO_ARCHIVE_DAYS or 'never'} days, "
-        f"email {'on' if os.environ.get('RESEND_API_KEY') else 'off'}, "
+        f"email {'on' if mail_on() else 'off'}, "
         f"telegram {'on' if TELEGRAM_BOT_TOKEN else 'off'}"
     )
 

@@ -4,7 +4,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
 import { getMemberships, requireUser, topRole, SUPER_ROLES } from "@/lib/permissions";
-import { mailConfigured } from "@/lib/email";
+import { mailConfigured, mailProvider, mailSender } from "@/lib/email";
 import { appUrl, botUsername, telegramConfigured, tg } from "@/lib/telegram";
 import { adminConfigured, telegramConnected } from "@/lib/supabase-admin";
 import { formatForPeople } from "@/lib/format";
@@ -119,16 +119,17 @@ export async function GET() {
         : "on for every table",
     });
 
-    const from = process.env.MAIL_FROM || "";
-    const testSender = !from || /@resend\.dev>?$/i.test(from.trim());
+    const provider = mailProvider();
+    const from = mailSender();
+    const testSender = provider === "resend" && /@resend\.dev>?$/i.test(from.trim());
     checks.push({
       name: "Email notifications",
       ok: mailConfigured() && !testSender,
-      detail: !mailConfigured()
-        ? "Not set up - notifications are in-app only (set RESEND_API_KEY to add email)"
+      detail: !provider
+        ? "Not set up - notifications are in-app only (set GMAIL_USER and GMAIL_APP_PASSWORD to add email)"
         : testSender
         ? "RESEND_API_KEY is set, but MAIL_FROM is Resend's test sender, which only delivers to the Resend account's own address - set MAIL_FROM to an address on your verified domain"
-        : `sending as ${from}`,
+        : `sending as ${from} via ${provider === "gmail" ? "Gmail" : "Resend"}`,
     });
 
     // The server key lets alerts honour everyone's own settings and is what
