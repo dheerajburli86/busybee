@@ -1,6 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { deny, getMemberships, notifyMany, requireUser, roleIn, SUPER_ROLES } from "@/lib/permissions";
+import { deny, getMemberships, logActivity, notifyMany, requireUser, roleIn, SUPER_ROLES } from "@/lib/permissions";
 import { schemaMissing } from "@/lib/workflow";
 
 // Step 11: what finance actually reads.
@@ -79,6 +79,30 @@ export async function GET(req: Request) {
         .sort((a: any, b: any) => a.name.localeCompare(b.name));
     }
 
+    // Tasks a supervisor can attach one to: not private, and either finished or
+    // past their deadline (the database refuses anything else).
+    let task_list: any[] = [];
+    if (isSupervisor) {
+      const { data: ts } = await supabase
+        .from("tasks")
+        .select("id, title, status, due_date, assigned_to, completed_at, personal")
+        .eq("desk_id", deskId)
+        .order("due_date", { ascending: false })
+        .limit(500);
+      const now = Date.now();
+      task_list = (ts || [])
+        .filter((t: any) => !t.personal)
+        .filter((t: any) => ["done", "closed"].includes(t.status) || (t.due_date && new Date(t.due_date).getTime() < now))
+        .map((t: any) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          due_date: t.due_date,
+          assigned_to: t.assigned_to,
+          finished: ["done", "closed"].includes(t.status),
+        }));
+    }
+
     const entries = raw || [];
     const ids = Array.from(
       new Set(entries.flatMap((e: any) => [e.user_id, e.created_by]).filter(Boolean) as string[])
@@ -124,6 +148,7 @@ export async function GET(req: Request) {
       desk_id: deskId,
       desks,
       people: people_list,
+      tasks: task_list,
       rows,
       totals: {
         reward: Math.round(rows.reduce((s, r) => s + r.reward, 0) * 100) / 100,
@@ -144,10 +169,11 @@ export async function GET(req: Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Record a reward or penalty straight from the Payroll page, for a person and a
-// month, without picking a task first. Same rules as the task route: only a
-// supervisor or admin, never against yourself, a reason is always required,
-// and the person is told at once. The database enforces the same limits.
+// Record a reward or penalty from the Payroll page: pick a person, a task (it
+// must be finished or past its deadline), an amount and a reason. Same rules as
+// the task panel: only a supervisor or admin, never against yourself, a reason
+// is always required, and the person is told at once. The database enforces
+// the same limits, including that every entry hangs off a task.
 // ---------------------------------------------------------------------------
 
 const MAX_AMOUNT = 1_000_000;
@@ -159,9 +185,11 @@ export async function POST(req: Request) {
     const amount = Number(body?.amount);
     const reason: string = typeof body?.reason === "string" ? body.reason.trim() : "";
     const targetUser: string = typeof body?.user_id === "string" ? body.user_id : "";
+    const taskId: string = typeof body?.task_id === "string" ? body.task_id : "";
 
     if (!["reward", "penalty"].includes(kind)) return NextResponse.json({ error: "Choose reward or penalty" }, { status: 400 });
     if (!targetUser) return NextResponse.json({ error: "Choose who this applies to" }, { status: 400 });
+    if (!taskId) return NextResponse.json({ error: "Choose the task this is for" }, { status: 400 });
     if (!Number.isFinite(amount) || amount <= 0) return NextResponse.json({ error: "Enter an amount greater than zero" }, { status: 400 });
     if (amount > MAX_AMOUNT) {
       return NextResponse.json(
@@ -194,12 +222,28 @@ export async function POST(req: Request) {
       .limit(1);
     if (!onDesk || onDesk.length === 0) return NextResponse.json({ error: "That person isn't on this desk" }, { status: 400 });
 
+    const { data: task } = await supabase
+      .from("tasks")
+      .select("id, title, desk_id, status, due_date, personal")
+      .eq("id", taskId)
+      .maybeSingle();
+    if (!task || task.desk_id !== deskId) return NextResponse.json({ error: "Task not found on this desk" }, { status: 404 });
+    if (task.personal) return NextResponse.json({ error: "Private to-dos can't carry a reward or penalty" }, { status: 400 });
+    const finished = ["done", "closed"].includes(task.status);
+    const overdue = !!task.due_date && new Date(task.due_date).getTime() < Date.now();
+    if (!finished && !overdue) {
+      return NextResponse.json(
+        { error: "A reward or penalty can be recorded once the work is finished or its deadline has passed" },
+        { status: 400 }
+      );
+    }
+
     const effective_month = monthStart(typeof body?.effective_month === "string" ? body.effective_month.slice(0, 7) : null);
 
     const { data, error } = await supabase
       .from("task_adjustments")
       .insert({
-        task_id: null,
+        task_id: taskId,
         desk_id: deskId,
         user_id: targetUser,
         kind,
@@ -219,9 +263,17 @@ export async function POST(req: Request) {
     }
 
     const rupees = `₹${Number(data.amount).toLocaleString("en-IN")}`;
-    const message = `${kind === "reward" ? "A reward" : "A penalty"} of ${rupees} was recorded against you - "${reason.slice(0, 180)}"`;
+    const message = `${kind === "reward" ? "A reward" : "A penalty"} of ${rupees} was recorded against ${task.title} - "${reason.slice(0, 180)}"`;
+    await logActivity(supabase, {
+      entity_type: "task",
+      entity_id: taskId,
+      action: kind === "reward" ? `recorded a reward of ${rupees}` : `recorded a penalty of ${rupees}`,
+      performed_by: user.id,
+      desk_id: deskId,
+      changes: { kind, amount: data.amount, reason, user_id: targetUser, effective_month },
+    });
     await notifyMany(supabase, [targetUser], {
-      task_id: null,
+      task_id: taskId,
       type: kind === "reward" ? "adjustment_reward" : "adjustment_penalty",
       title: kind === "reward" ? `Reward: ${rupees}` : `Penalty: ${rupees}`,
       message,

@@ -50,6 +50,8 @@ export default function PayrollPage() {
 
   // "Record a reward or penalty" form (supervisors and admins only).
   const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  const [tasks, setTasks] = useState<{ id: string; title: string; status: string; due_date: string | null; assigned_to: string | null; finished: boolean }[]>([]);
+  const [fTask, setFTask] = useState("");
   const [fPerson, setFPerson] = useState("");
   const [fKind, setFKind] = useState<"reward" | "penalty">("reward");
   const [fAmount, setFAmount] = useState("");
@@ -72,6 +74,7 @@ export default function PayrollPage() {
       setIsSupervisor(!!data.is_supervisor);
       setDesks(data.desks || []);
       setPeople(data.people || []);
+      setTasks(data.tasks || []);
       if (!desk && data.desk_id) setDesk(data.desk_id);
       setError("");
     } catch (e: any) {
@@ -86,7 +89,9 @@ export default function PayrollPage() {
   }, [load]);
 
   const amountNum = Number(fAmount);
-  const formReady = !!fPerson && Number.isFinite(amountNum) && amountNum > 0 && fReason.trim().length > 0;
+  const personTasks = tasks.filter((t) => t.assigned_to === fPerson);
+  const taskTitle = tasks.find((t) => t.id === fTask)?.title || "";
+  const formReady = !!fPerson && !!fTask && Number.isFinite(amountNum) && amountNum > 0 && fReason.trim().length > 0;
   const personName = people.find((p) => p.id === fPerson)?.name || "";
 
   const record = async () => {
@@ -96,12 +101,13 @@ export default function PayrollPage() {
       const res = await fetch("/api/payroll", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ desk_id: desk, user_id: fPerson, kind: fKind, amount: amountNum, reason: fReason, effective_month: month }),
+        body: JSON.stringify({ desk_id: desk, user_id: fPerson, task_id: fTask, kind: fKind, amount: amountNum, reason: fReason, effective_month: month }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error || "Could not record it");
       setFormMsg({ ok: true, text: `${fKind === "reward" ? "Reward" : "Penalty"} of ${rupees(amountNum)} recorded for ${personName}. They have been notified.` });
       setFPerson("");
+      setFTask("");
       setFAmount("");
       setFReason("");
       setConfirming(false);
@@ -207,7 +213,7 @@ export default function PayrollPage() {
             <div className="grid sm:grid-cols-[1fr_auto_160px] gap-3 mb-3">
               <select
                 value={fPerson}
-                onChange={(e) => { setFPerson(e.target.value); setConfirming(false); }}
+                onChange={(e) => { setFPerson(e.target.value); setFTask(""); setConfirming(false); }}
                 className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
                 aria-label="Person"
               >
@@ -243,6 +249,22 @@ export default function PayrollPage() {
                 />
               </div>
             </div>
+            <select
+              value={fTask}
+              onChange={(e) => { setFTask(e.target.value); setConfirming(false); }}
+              disabled={!fPerson}
+              className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm mb-3 disabled:opacity-50"
+              aria-label="Task"
+            >
+              <option value="">
+                {!fPerson ? "Choose a person first..." : personTasks.length ? "Choose the task..." : "No finished or overdue tasks for this person"}
+              </option>
+              {personTasks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title} - {t.finished ? "completed" : "overdue"}{t.due_date ? `, due ${formatDue(t.due_date)}` : ""}
+                </option>
+              ))}
+            </select>
             <input
               value={fReason}
               onChange={(e) => { setFReason(e.target.value); setConfirming(false); }}
@@ -263,7 +285,7 @@ export default function PayrollPage() {
               ) : (
                 <>
                   <span className="text-sm text-slate-200">
-                    {fKind === "reward" ? "Reward" : "Penalty"} <b>{rupees(amountNum)}</b> for <b>{personName}</b> in{" "}
+                    {fKind === "reward" ? "Reward" : "Penalty"} <b>{rupees(amountNum)}</b> for <b>{personName}</b> for "{taskTitle}" in{" "}
                     {new Date(`${month}-01T00:00:00`).toLocaleDateString([], { month: "long", year: "numeric" })}? They will be notified.
                   </span>
                   <button onClick={record} disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">
@@ -277,7 +299,7 @@ export default function PayrollPage() {
             </div>
             {formMsg && <p className={`text-sm mt-3 ${formMsg.ok ? "text-green-400" : "text-red-400"}`}>{formMsg.text}</p>}
             <p className="text-xs text-slate-500 mt-3">
-              Counts toward the month selected above. Nothing is paid or deducted by BusyBee, and entries can be cancelled but not edited.
+              Only finished or overdue tasks can be chosen. Counts toward the month selected above. Nothing is paid or deducted by BusyBee, and entries can be cancelled but not edited.
             </p>
           </div>
         )}
