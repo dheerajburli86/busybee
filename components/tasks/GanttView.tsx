@@ -7,6 +7,8 @@
 //   - tasks grouped by milestone, with a ◆ marker where the milestone lands
 //   - dependency links listed on the bar
 //   - people allowed to move a deadline can drag the end of a bar
+//   - zoom (Week / Month / Quarter / Fit all) with a sticky label column, so a
+//     task due in a few hours is still a readable bar next to one due in months
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isFinished, isOverdue, statusLabel } from "@/lib/status";
@@ -35,6 +37,18 @@ const COLORS: Record<string, string> = {
   closed: "bg-slate-400",
 };
 
+// Pixels per day for each zoom level; null = squeeze everything into the width.
+const ZOOMS: { key: string; label: string; ppd: number | null }[] = [
+  { key: "week", label: "Week", ppd: 56 },
+  { key: "month", label: "Month", ppd: 20 },
+  { key: "quarter", label: "Quarter", ppd: 6 },
+  { key: "fit", label: "Fit all", ppd: null },
+];
+const LABEL_COL = 190; // px, the sticky task-name column (incl. gap)
+const MIN_BAR_PX = 26;
+
+const fmtShort = (ms: number) => new Date(ms).toLocaleDateString([], { day: "numeric", month: "short" });
+
 export function GanttView({
   tasks,
   people,
@@ -53,6 +67,9 @@ export function GanttView({
   const [showSubs, setShowSubs] = useState(true);
   const [drag, setDrag] = useState<{ id: string; ms: number } | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const todayRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState("month");
 
   const dated = useMemo(() => tasks.filter((t) => t.due_date), [tasks]);
   const ids = dated.map((t) => t.id).join(",");
@@ -84,6 +101,20 @@ export function GanttView({
       });
   }, [ids]);
 
+  // Bring "today" into view (about a third from the left) when the chart
+  // opens, the zoom changes or the visible tasks change.
+  const jumpToToday = () => {
+    const box = scrollRef.current;
+    const line = todayRef.current;
+    if (!box || !line) return;
+    const delta = line.getBoundingClientRect().left - box.getBoundingClientRect().left - box.clientWidth / 3;
+    box.scrollLeft = Math.max(0, box.scrollLeft + delta);
+  };
+  useEffect(() => {
+    jumpToToday();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom, ids]);
+
   if (dated.length === 0) return <p className="text-slate-400">No tasks with due dates to plot.</p>;
 
   const startOf = (t: Task) => new Date(t.start_date || t.created_at).getTime();
@@ -93,16 +124,37 @@ export function GanttView({
   dated.forEach((t) => times.push(startOf(t), endOf(t)));
   subs.forEach((s) => s.due_date && times.push(new Date(s.due_date).getTime()));
   const min = Math.min(...times) - DAY;
-  const max = Math.max(...times) + DAY;
+  const max = Math.max(Math.max(...times) + DAY, Date.now() + 7 * DAY);
   const span = Math.max(max - min, DAY);
   const pct = (ms: number) => ((ms - min) / span) * 100;
 
-  // Week ticks.
+  // Width of the timeline in pixels: fixed per zoom level (the page scrolls
+  // sideways), or the available width for "Fit all".
+  const ppdFixed = ZOOMS.find((z) => z.key === zoom)?.ppd ?? null;
+  const measured = trackRef.current?.clientWidth || 900;
+  const trackPx = ppdFixed ? Math.max((span / DAY) * ppdFixed, measured) : measured;
+  const ppd = trackPx / (span / DAY);
+
+  // Calendar-aligned ticks: every day, every Monday, or every 1st of a month,
+  // depending on how much room a day has.
+  const unit = ppd >= 40 ? "day" : ppd >= 9 ? "week" : "month";
   const ticks: number[] = [];
-  const first = new Date(min);
-  first.setHours(0, 0, 0, 0);
-  const step = span > 120 * DAY ? 30 * DAY : span > 30 * DAY ? 7 * DAY : DAY * Math.max(1, Math.round(span / DAY / 10));
-  for (let t = first.getTime(); t <= max; t += step) ticks.push(t);
+  const cur = new Date(min);
+  cur.setHours(0, 0, 0, 0);
+  if (unit === "week") cur.setDate(cur.getDate() - ((cur.getDay() + 6) % 7));
+  if (unit === "month") cur.setDate(1);
+  while (cur.getTime() <= max) {
+    if (cur.getTime() >= min) ticks.push(cur.getTime());
+    if (unit === "day") cur.setDate(cur.getDate() + 1);
+    else if (unit === "week") cur.setDate(cur.getDate() + 7);
+    else cur.setMonth(cur.getMonth() + 1);
+  }
+  const tickLabel = (ms: number) => {
+    const d = new Date(ms);
+    if (unit === "day") return d.toLocaleDateString([], { weekday: "short", day: "numeric", ...(d.getDate() === 1 ? { month: "short" } : {}) });
+    if (unit === "week") return fmtShort(ms);
+    return d.toLocaleDateString([], { month: "short", year: "2-digit" });
+  };
 
   // Group by milestone (no milestone last).
   const groups = new Map<string, Task[]>();
@@ -139,23 +191,33 @@ export function GanttView({
     const s = startOf(t);
     const e = endOf(t);
     const left = pct(Math.min(s, e));
-    const width = Math.max(pct(Math.max(s, e)) - left, 1.2);
+    const rawPx = ((pct(Math.max(s, e)) - left) / 100) * trackPx;
+    const narrow = rawPx < 64; // too small to hold the label inside
+    const width = Math.max(pct(Math.max(s, e)) - left, 0.1);
+    const waits = (deps[t.id] || []).map((id) => tasks.find((x) => x.id === id)?.title).filter(Boolean);
+    const label = `${t.progress_percent || 0}%${waits.length ? " ⛓" : ""}`;
     const late = isOverdue(t);
     const color = late ? "bg-red-600" : COLORS[t.status] || "bg-slate-500";
     const adjustable = canAdjust(t) && !isFinished(t.status);
-    const waits = (deps[t.id] || []).map((id) => tasks.find((x) => x.id === id)?.title).filter(Boolean);
     return (
       <div className="relative h-7">
         <div
           className={`absolute h-7 rounded ${color} bg-opacity-40 cursor-pointer ring-1 ring-inset ${late ? "ring-red-400" : "ring-white/10"}`}
-          style={{ left: `${left}%`, width: `${width}%` }}
+          style={{ left: `${left}%`, width: `${width}%`, minWidth: MIN_BAR_PX }}
           onClick={() => onOpen(t.id)}
           title={`${t.title}\n${statusLabel(t.status)} · ${t.progress_percent}% · due ${formatDue(drag?.id === t.id ? new Date(drag.ms).toISOString() : t.due_date)}${waits.length ? `\nWaits on: ${waits.join(", ")}` : ""}`}
         >
           <div className={`h-full rounded ${color}`} style={{ width: `${Math.min(100, t.progress_percent || 0)}%` }} />
-          <span className="absolute inset-0 flex items-center px-2 text-[11px] text-white font-medium whitespace-nowrap overflow-hidden">
-            {t.progress_percent}%{waits.length ? " ⛓" : ""}
-          </span>
+          {narrow ? (
+            // Outside the bar, so a short bar never clips its own label.
+            <span className="absolute left-full top-0 h-full flex items-center pl-2 text-[11px] text-slate-300 whitespace-nowrap pointer-events-none">
+              {label} · {fmtShort(e)}
+            </span>
+          ) : (
+            <span className="absolute inset-0 flex items-center px-2 text-[11px] text-white font-medium whitespace-nowrap overflow-hidden">
+              {label}
+            </span>
+          )}
           {adjustable && (
             <span
               onPointerDown={(ev) => {
@@ -176,15 +238,31 @@ export function GanttView({
   return (
     <div className="bg-slate-800 border border-slate-700 rounded p-3 sm:p-4">
       <div className="flex flex-wrap gap-3 items-center justify-between mb-3 text-xs text-slate-400">
-        <label className="flex items-center gap-2">
-          <input type="checkbox" checked={showSubs} onChange={() => setShowSubs(!showSubs)} /> Show subtasks
-        </label>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2">
+            <input type="checkbox" checked={showSubs} onChange={() => setShowSubs(!showSubs)} /> Show subtasks
+          </label>
+          <div className="flex rounded overflow-hidden border border-slate-600" role="group" aria-label="Zoom">
+            {ZOOMS.map((z) => (
+              <button
+                key={z.key}
+                onClick={() => setZoom(z.key)}
+                className={`px-3 py-1 ${zoom === z.key ? "bg-blue-600 text-white" : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`}
+              >
+                {z.label}
+              </button>
+            ))}
+          </div>
+          <button onClick={jumpToToday} className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300">
+            Jump to today
+          </button>
+        </div>
         <span>Drag the end of a bar to move a deadline (if you're allowed to).</span>
       </div>
 
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto" ref={scrollRef}>
         <div
-          className="min-w-[720px]"
+          style={{ minWidth: Math.max(720, ppdFixed ? LABEL_COL + trackPx : 0) }}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerUp}
@@ -192,13 +270,19 @@ export function GanttView({
         >
           {/* Axis */}
           <div className="grid grid-cols-[180px_1fr] gap-2">
-            <div />
-            <div className="relative h-5 border-b border-slate-700" ref={trackRef}>
+            <div className="sticky left-0 z-10 bg-slate-800" />
+            <div className="relative h-6 border-b border-slate-700" ref={trackRef}>
               {ticks.map((t) => (
-                <span key={t} className="absolute text-[10px] text-slate-500 -translate-x-1/2" style={{ left: `${pct(t)}%` }}>
-                  {new Date(t).toLocaleDateString([], { day: "numeric", month: "short" })}
+                <span key={t} className="absolute top-0.5 text-[10px] text-slate-500 -translate-x-1/2 whitespace-nowrap" style={{ left: `${pct(t)}%` }}>
+                  {tickLabel(t)}
                 </span>
               ))}
+              <span
+                className="absolute -bottom-px z-10 -translate-x-1/2 px-1.5 rounded-t text-[10px] leading-4 bg-red-600 text-white"
+                style={{ left: `${pct(Date.now())}%` }}
+              >
+                Today
+              </span>
             </div>
           </div>
 
@@ -207,7 +291,10 @@ export function GanttView({
             <div className="absolute top-0 bottom-0 grid grid-cols-[180px_1fr] gap-2 w-full pointer-events-none">
               <div />
               <div className="relative">
-                <div className="absolute top-0 bottom-0 w-px bg-red-500" style={{ left: `${pct(Date.now())}%` }} />
+                {ticks.map((t) => (
+                  <div key={t} className="absolute top-0 bottom-0 w-px bg-slate-700/50" style={{ left: `${pct(t)}%` }} />
+                ))}
+                <div ref={todayRef} className="absolute top-0 bottom-0 w-px bg-red-500" style={{ left: `${pct(Date.now())}%` }} />
               </div>
             </div>
 
@@ -217,15 +304,15 @@ export function GanttView({
               return (
                 <div key={key || "none"} className="mt-3">
                   <div className="grid grid-cols-[180px_1fr] gap-2 items-center">
-                    <p className="text-xs font-semibold text-slate-300 truncate">{key ? `◆ ${milestoneLabel(key)}` : "No milestone"}</p>
+                    <p className="sticky left-0 z-10 bg-slate-800 text-xs font-semibold text-slate-300 truncate">{key ? `◆ ${milestoneLabel(key)}` : "No milestone"}</p>
                     <div className="relative h-4">
                       {key && (
                         <span
-                          className="absolute -translate-x-1/2 text-yellow-400 text-sm leading-4"
+                          className="absolute text-yellow-400 text-sm leading-4 whitespace-nowrap"
                           style={{ left: `${pct(milestoneAt)}%` }}
                           title={`${milestoneLabel(key)} - ${formatDue(new Date(milestoneAt).toISOString())}`}
                         >
-                          ◆
+                          ◆<span className="ml-1 text-[10px] text-yellow-300/80 align-middle whitespace-nowrap">{milestoneLabel(key)} · {fmtShort(milestoneAt)}</span>
                         </span>
                       )}
                     </div>
@@ -236,9 +323,9 @@ export function GanttView({
                     return (
                       <div key={t.id} className="mt-1">
                         <div className="grid grid-cols-[180px_1fr] gap-2 items-center">
-                          <button onClick={() => onOpen(t.id)} className="text-left text-xs text-slate-300 truncate hover:text-white" title={t.title}>
+                          <button onClick={() => onOpen(t.id)} className="sticky left-0 z-10 bg-slate-800 text-left text-xs text-slate-300 truncate hover:text-white pr-2" title={`${t.title} - due ${formatDue(t.due_date)}`}>
                             {t.title}
-                            <span className="block text-[10px] text-slate-500 truncate">{nameOf(people, t.assigned_to)}</span>
+                            <span className="block text-[10px] text-slate-500 truncate">{nameOf(people, t.assigned_to)} · due {fmtShort(endOf(t))}</span>
                           </button>
                           {renderBar(t)}
                         </div>
@@ -251,7 +338,7 @@ export function GanttView({
                           const late = !s.done && s.due_date && new Date(s.due_date).getTime() < Date.now();
                           return (
                             <div key={s.id} className="grid grid-cols-[180px_1fr] gap-2 items-center mt-0.5">
-                              <p className="text-[11px] text-slate-400 truncate pl-3" title={s.title}>↳ {s.title}</p>
+                              <p className="sticky left-0 z-10 bg-slate-800 text-[11px] text-slate-400 truncate pl-3" title={s.title}>↳ {s.title}</p>
                               <div className="relative h-3.5">
                                 <div
                                   className={`absolute h-3.5 rounded ${late ? "bg-red-600" : s.done ? "bg-green-600" : "bg-sky-500"} bg-opacity-30`}
