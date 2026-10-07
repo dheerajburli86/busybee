@@ -1163,9 +1163,11 @@ if __name__ == "__main__":
     # missed runs of the same job are merged into one.
     scheduler = BlockingScheduler(timezone=LOCAL_TZ, job_defaults={"misfire_grace_time": 3600, "coalesce": True})
 
-    # Every 10 minutes: deadline, overdue and checklist reminders; every 5,
-    # "remind me at" (which also records the heartbeat).
-    scheduler.add_job(safe(deadline_reminders), "interval", minutes=10, id="deadline_reminders")
+    # Every minute: deadline and overdue alerts (each goes out once per
+    # deadline, so checking often only makes them arrive sooner). Every 10
+    # minutes: checklist reminders; every 5, "remind me at" (which also
+    # records the heartbeat).
+    scheduler.add_job(safe(deadline_reminders), "interval", minutes=1, id="deadline_reminders")
     scheduler.add_job(safe(checklist_reminders), "interval", minutes=10, id="checklist_reminders")
     scheduler.add_job(safe(personal_reminders), "interval", minutes=5, id="personal_reminders")
 
@@ -1180,7 +1182,7 @@ if __name__ == "__main__":
     scheduler.add_job(safe(auto_archive), "cron", hour=0, minute=15, id="auto_archive")
 
     log(
-        f"scheduler {VERSION} up: reminders every 10m, remind-me every 5m, "
+        f"scheduler {VERSION} up: deadline alerts every 1m, checklist every 10m, remind-me every 5m, "
         f"daily countdown + review queue at {DAILY_REMINDER_HOUR}:00, "
         f"BOD {BOD_HOUR}:00, EOD {EOD_HOUR}:00 (UTC{TZ_OFFSET_HOURS:+g}), "
         f"update requests every {UPDATE_REQUEST_DAYS or 'never'} days, "
