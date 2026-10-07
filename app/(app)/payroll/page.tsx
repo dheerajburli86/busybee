@@ -1,7 +1,9 @@
 "use client";
 
 // Step 11 of the assignment flow: the month's rewards and penalties, totalled
-// per person, for whoever runs payroll to apply.
+// per person, for whoever runs payroll to apply. A supervisor or admin can also
+// record one here directly - pick a person, reward or penalty, an amount in
+// rupees and a reason - and cancel one that was entered by mistake.
 //
 // This page pays nobody. It is a statement of what was recorded, who recorded
 // it and why, so that a figure can be traced back to a task and a decision
@@ -46,6 +48,16 @@ export default function PayrollPage() {
   const [error, setError] = useState("");
   const router = useRouter();
 
+  // "Record a reward or penalty" form (supervisors and admins only).
+  const [people, setPeople] = useState<{ id: string; name: string }[]>([]);
+  const [fPerson, setFPerson] = useState("");
+  const [fKind, setFKind] = useState<"reward" | "penalty">("reward");
+  const [fAmount, setFAmount] = useState("");
+  const [fReason, setFReason] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [formMsg, setFormMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -59,6 +71,7 @@ export default function PayrollPage() {
       setTotals(data.totals || { reward: 0, penalty: 0, net: 0 });
       setIsSupervisor(!!data.is_supervisor);
       setDesks(data.desks || []);
+      setPeople(data.people || []);
       if (!desk && data.desk_id) setDesk(data.desk_id);
       setError("");
     } catch (e: any) {
@@ -71,6 +84,48 @@ export default function PayrollPage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  const amountNum = Number(fAmount);
+  const formReady = !!fPerson && Number.isFinite(amountNum) && amountNum > 0 && fReason.trim().length > 0;
+  const personName = people.find((p) => p.id === fPerson)?.name || "";
+
+  const record = async () => {
+    setSaving(true);
+    setFormMsg(null);
+    try {
+      const res = await fetch("/api/payroll", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ desk_id: desk, user_id: fPerson, kind: fKind, amount: amountNum, reason: fReason, effective_month: month }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || "Could not record it");
+      setFormMsg({ ok: true, text: `${fKind === "reward" ? "Reward" : "Penalty"} of ${rupees(amountNum)} recorded for ${personName}. They have been notified.` });
+      setFPerson("");
+      setFAmount("");
+      setFReason("");
+      setConfirming(false);
+      await load();
+    } catch (e: any) {
+      setFormMsg({ ok: false, text: e.message });
+      setConfirming(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancelEntry = async (id: string) => {
+    const why = window.prompt("Why is this being cancelled? (required - the person is told)");
+    if (!why || !why.trim()) return;
+    const res = await fetch("/api/payroll", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ adjustment_id: id, void_reason: why }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) setError(d.error || "Could not cancel it");
+    else await load();
+  };
 
   const csv = () => {
     // Built for whoever applies it: "Net amount" is signed (penalties
@@ -146,6 +201,87 @@ export default function PayrollPage() {
           )}
         </div>
 
+        {isSupervisor && (
+          <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-6">
+            <h2 className="font-semibold mb-3">Record a reward or penalty</h2>
+            <div className="grid sm:grid-cols-[1fr_auto_160px] gap-3 mb-3">
+              <select
+                value={fPerson}
+                onChange={(e) => { setFPerson(e.target.value); setConfirming(false); }}
+                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                aria-label="Person"
+              >
+                <option value="">Choose a person...</option>
+                {people.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <div className="flex rounded overflow-hidden border border-slate-600" role="group" aria-label="Reward or penalty">
+                {(["reward", "penalty"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => { setFKind(k); setConfirming(false); }}
+                    className={`px-4 py-2 text-sm ${fKind === k ? (k === "reward" ? "bg-green-600 text-white" : "bg-red-600 text-white") : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`}
+                  >
+                    {k === "reward" ? "Reward" : "Penalty"}
+                  </button>
+                ))}
+              </div>
+              <div className="relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">₹</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  inputMode="decimal"
+                  value={fAmount}
+                  onChange={(e) => { setFAmount(e.target.value); setConfirming(false); }}
+                  placeholder="Amount"
+                  className="w-full pl-7 pr-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+                  aria-label="Amount in rupees"
+                />
+              </div>
+            </div>
+            <input
+              value={fReason}
+              onChange={(e) => { setFReason(e.target.value); setConfirming(false); }}
+              placeholder="Reason (required - the person sees this)"
+              maxLength={300}
+              className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm mb-3"
+              aria-label="Reason"
+            />
+            <div className="flex flex-wrap items-center gap-3">
+              {!confirming ? (
+                <button
+                  onClick={() => setConfirming(true)}
+                  disabled={!formReady}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 rounded text-sm"
+                >
+                  Review
+                </button>
+              ) : (
+                <>
+                  <span className="text-sm text-slate-200">
+                    {fKind === "reward" ? "Reward" : "Penalty"} <b>{rupees(amountNum)}</b> for <b>{personName}</b> in{" "}
+                    {new Date(`${month}-01T00:00:00`).toLocaleDateString([], { month: "long", year: "numeric" })}? They will be notified.
+                  </span>
+                  <button onClick={record} disabled={saving} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">
+                    {saving ? "Recording..." : "Confirm"}
+                  </button>
+                  <button onClick={() => setConfirming(false)} disabled={saving} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+                    Back
+                  </button>
+                </>
+              )}
+            </div>
+            {formMsg && <p className={`text-sm mt-3 ${formMsg.ok ? "text-green-400" : "text-red-400"}`}>{formMsg.text}</p>}
+            <p className="text-xs text-slate-500 mt-3">
+              Counts toward the month selected above. Nothing is paid or deducted by BusyBee, and entries can be cancelled but not edited.
+            </p>
+          </div>
+        )}
+
         {error && (
           <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">{error}</div>
         )}
@@ -153,7 +289,7 @@ export default function PayrollPage() {
         {loading ? (
           <p className="text-slate-400">Loading...</p>
         ) : rows.length === 0 ? (
-          <p className="text-slate-400">Nothing recorded for this month.</p>
+          <p className="text-slate-400">Nothing recorded for this month yet.</p>
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
@@ -210,7 +346,14 @@ export default function PayrollPage() {
                       {e.kind === "reward" ? "Reward" : "Penalty"} {rupees(e.amount)} · {e.person}
                       {e.voided_at && <span className="text-slate-400"> (cancelled)</span>}
                     </span>
-                    <span className="text-slate-500 text-xs">{formatDue(e.created_at)}</span>
+                    <span className="text-slate-500 text-xs">
+                      {formatDue(e.created_at)}
+                      {isSupervisor && !e.voided_at && (
+                        <button onClick={() => cancelEntry(e.id)} className="ml-3 text-slate-400 hover:text-red-400 underline">
+                          Cancel entry
+                        </button>
+                      )}
+                    </span>
                   </div>
                   <p className="text-slate-300 mt-1">"{e.reason}"</p>
                   <p className="text-slate-500 text-xs mt-1">

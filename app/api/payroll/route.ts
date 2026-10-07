@@ -1,6 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { getMemberships, requireUser, roleIn, SUPER_ROLES } from "@/lib/permissions";
+import { deny, getMemberships, notifyMany, requireUser, roleIn, SUPER_ROLES } from "@/lib/permissions";
 import { schemaMissing } from "@/lib/workflow";
 
 // Step 11: what finance actually reads.
@@ -65,6 +65,20 @@ export async function GET(req: Request) {
       throw error;
     }
 
+    // Who a supervisor can pick: everyone on the desk except themselves (nobody
+    // records money against their own pay).
+    let people_list: { id: string; name: string }[] = [];
+    if (isSupervisor) {
+      const { data: mates } = await supabase
+        .from("desk_members")
+        .select("user_id, users(id, full_name, email)")
+        .eq("desk_id", deskId);
+      people_list = (mates || [])
+        .filter((m: any) => m.user_id !== user.id)
+        .map((m: any) => ({ id: m.user_id, name: m.users?.full_name || m.users?.email || "Someone" }))
+        .sort((a: any, b: any) => a.name.localeCompare(b.name));
+    }
+
     const entries = raw || [];
     const ids = Array.from(
       new Set(entries.flatMap((e: any) => [e.user_id, e.created_by]).filter(Boolean) as string[])
@@ -84,7 +98,7 @@ export async function GET(req: Request) {
       return p?.full_name || p?.email || "Someone";
     };
     const titleOf = (id: string | null) =>
-      (tasks || []).find((t: any) => t.id === id)?.title || "(task removed)";
+      id ? (tasks || []).find((t: any) => t.id === id)?.title || "(task removed)" : "Entered directly (no task)";
 
     // Per-person totals. Voided entries are carried through so the report
     // shows they existed, but they contribute nothing to the net figure.
@@ -109,6 +123,7 @@ export async function GET(req: Request) {
       is_supervisor: isSupervisor,
       desk_id: deskId,
       desks,
+      people: people_list,
       rows,
       totals: {
         reward: Math.round(rows.reduce((s, r) => s + r.reward, 0) * 100) / 100,
@@ -124,6 +139,156 @@ export async function GET(req: Request) {
     });
   } catch (error: any) {
     console.error("GET payroll failed:", error);
+    return NextResponse.json({ error: error?.message }, { status: 500 });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Record a reward or penalty straight from the Payroll page, for a person and a
+// month, without picking a task first. Same rules as the task route: only a
+// supervisor or admin, never against yourself, a reason is always required,
+// and the person is told at once. The database enforces the same limits.
+// ---------------------------------------------------------------------------
+
+const MAX_AMOUNT = 1_000_000;
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const kind: string = body?.kind;
+    const amount = Number(body?.amount);
+    const reason: string = typeof body?.reason === "string" ? body.reason.trim() : "";
+    const targetUser: string = typeof body?.user_id === "string" ? body.user_id : "";
+
+    if (!["reward", "penalty"].includes(kind)) return NextResponse.json({ error: "Choose reward or penalty" }, { status: 400 });
+    if (!targetUser) return NextResponse.json({ error: "Choose who this applies to" }, { status: 400 });
+    if (!Number.isFinite(amount) || amount <= 0) return NextResponse.json({ error: "Enter an amount greater than zero" }, { status: 400 });
+    if (amount > MAX_AMOUNT) {
+      return NextResponse.json(
+        { error: `That looks like a typo - the most you can enter at once is ₹${MAX_AMOUNT.toLocaleString("en-IN")}` },
+        { status: 400 }
+      );
+    }
+    if (!reason) return NextResponse.json({ error: "A reason is required - this affects someone's pay" }, { status: 400 });
+
+    const supabase = await createServerSideClient();
+    const user = await requireUser(supabase);
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const memberships = await getMemberships(supabase, user.id);
+    const deskId =
+      typeof body?.desk_id === "string" && memberships.some((m) => m.desk_id === body.desk_id)
+        ? body.desk_id
+        : memberships[0]?.desk_id;
+    if (!deskId) return NextResponse.json({ error: "You are not on a desk" }, { status: 400 });
+    if (!SUPER_ROLES.includes(roleIn(memberships, deskId))) {
+      return deny("Only a supervisor or an admin can record a reward or a penalty.");
+    }
+    if (targetUser === user.id) return deny("You can't record a reward or a penalty against yourself.");
+
+    const { data: onDesk } = await supabase
+      .from("desk_members")
+      .select("user_id")
+      .eq("desk_id", deskId)
+      .eq("user_id", targetUser)
+      .limit(1);
+    if (!onDesk || onDesk.length === 0) return NextResponse.json({ error: "That person isn't on this desk" }, { status: 400 });
+
+    const effective_month = monthStart(typeof body?.effective_month === "string" ? body.effective_month.slice(0, 7) : null);
+
+    const { data, error } = await supabase
+      .from("task_adjustments")
+      .insert({
+        task_id: null,
+        desk_id: deskId,
+        user_id: targetUser,
+        kind,
+        amount: Math.round(amount * 100) / 100,
+        reason,
+        effective_month,
+        created_by: user.id,
+      })
+      .select("id, user_id, kind, amount, reason, effective_month, created_by, created_at")
+      .single();
+
+    if (error) {
+      if (schemaMissing(error)) {
+        return NextResponse.json({ error: "Rewards and penalties aren't set up yet - run the database migration" }, { status: 400 });
+      }
+      throw error;
+    }
+
+    const rupees = `₹${Number(data.amount).toLocaleString("en-IN")}`;
+    const message = `${kind === "reward" ? "A reward" : "A penalty"} of ${rupees} was recorded against you - "${reason.slice(0, 180)}"`;
+    await notifyMany(supabase, [targetUser], {
+      task_id: null,
+      type: kind === "reward" ? "adjustment_reward" : "adjustment_penalty",
+      title: kind === "reward" ? `Reward: ${rupees}` : `Penalty: ${rupees}`,
+      message,
+      email: {
+        subject: kind === "reward" ? `Reward recorded: ${rupees}` : `Penalty recorded: ${rupees}`,
+        body: `${message}\n\nIf you think this is wrong, reply to your supervisor - it can be cancelled, and the record will show that it was.`,
+      },
+    });
+
+    return NextResponse.json(data);
+  } catch (error: any) {
+    console.error("POST payroll failed:", error);
+    return NextResponse.json({ error: error?.message }, { status: 500 });
+  }
+}
+
+// Cancel an entry (task-linked or not). Nothing is deleted: the row stays,
+// marked cancelled, with who cancelled it and why.
+export async function DELETE(req: Request) {
+  try {
+    const { adjustment_id, void_reason } = await req.json().catch(() => ({}));
+    if (!adjustment_id) return NextResponse.json({ error: "adjustment_id is required" }, { status: 400 });
+    const why = typeof void_reason === "string" ? void_reason.trim() : "";
+    if (!why) return NextResponse.json({ error: "Say why this is being cancelled" }, { status: 400 });
+
+    const supabase = await createServerSideClient();
+    const user = await requireUser(supabase);
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const { data: existing } = await supabase
+      .from("task_adjustments")
+      .select("id, desk_id, user_id, kind, amount, voided_at")
+      .eq("id", adjustment_id)
+      .maybeSingle();
+    if (!existing) return NextResponse.json({ error: "Entry not found" }, { status: 404 });
+
+    const memberships = await getMemberships(supabase, user.id);
+    if (!SUPER_ROLES.includes(roleIn(memberships, existing.desk_id))) {
+      return deny("Only a supervisor or an admin can cancel a reward or a penalty.");
+    }
+    if (existing.user_id === user.id) return deny("You can't cancel an entry recorded against yourself - another supervisor has to.");
+    if (existing.voided_at) return NextResponse.json({ error: "This entry was already cancelled" }, { status: 400 });
+
+    const { data, error } = await supabase
+      .from("task_adjustments")
+      .update({ voided_at: new Date().toISOString(), voided_by: user.id, void_reason: why })
+      .eq("id", adjustment_id)
+      .is("voided_at", null)
+      .select("id, voided_at, void_reason")
+      .single();
+    if (error) {
+      if (error.code === "PGRST116") return NextResponse.json({ error: "This entry was already cancelled" }, { status: 400 });
+      throw error;
+    }
+
+    const rupees = `₹${Number(existing.amount).toLocaleString("en-IN")}`;
+    await notifyMany(supabase, [existing.user_id], {
+      task_id: null,
+      type: "adjustment_voided",
+      title: `${existing.kind === "reward" ? "Reward" : "Penalty"} cancelled`,
+      message: `The ${existing.kind} of ${rupees} was cancelled - "${why.slice(0, 180)}"`,
+      email: { subject: `${existing.kind === "reward" ? "Reward" : "Penalty"} cancelled: ${rupees}` },
+    });
+
+    return NextResponse.json(data);
+  } catch (error: any) {
+    console.error("DELETE payroll failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });
   }
 }
