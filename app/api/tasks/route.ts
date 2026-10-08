@@ -20,6 +20,7 @@ import { isFinished, PRIORITY_VALUES, STATUS_VALUES } from "@/lib/status";
 import { isValidColor } from "@/components/tasks/types";
 import { formatForPeople, normalizeTimestamp } from "@/lib/format";
 import { inChunks, selectAll } from "@/lib/chunks";
+import { recomputeTaskProgress } from "@/lib/progress";
 import { completionMove, firstSection, notifyCompleted, sectionInProject, workersOn } from "@/lib/workflow";
 
 // Fields only an assignor / task manager / project manager / supervisor may change.
@@ -216,6 +217,17 @@ export async function POST(request: NextRequest) {
     } = body;
     // #1: an item added to "My To-Do" is private to its owner.
     const personal = body.personal === true;
+    // To-do lists: one task whose items are its subtasks, sent in one go.
+    const isList = body.is_list === true;
+    const rawItems: any[] = Array.isArray(body.items) ? body.items.slice(0, 100) : [];
+    const items: { title: string; due_date: string | null }[] = [];
+    for (const it of rawItems) {
+      const t = typeof it?.title === "string" ? it.title.trim() : "";
+      if (!t) continue;
+      const d = it?.due_date ? normalizeTimestamp(it.due_date) : null;
+      if (it?.due_date && !d) return NextResponse.json({ error: `"${t}" has a date that isn't valid` }, { status: 400 });
+      items.push({ title: t.slice(0, 300), due_date: d });
+    }
 
     if (typeof title !== "string" || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
     if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
@@ -229,6 +241,10 @@ export async function POST(request: NextRequest) {
     const remind = remind_at ? normalizeTimestamp(remind_at) : null;
     if (remind_at && !remind) {
       return NextResponse.json({ error: "The reminder time isn't a valid date" }, { status: 400 });
+    }
+    if (due) {
+      const late = items.find((it) => it.due_date && new Date(it.due_date) > new Date(due));
+      if (late) return NextResponse.json({ error: `"${late.title}" is due after the list's deadline` }, { status: 400 });
     }
     if (!STATUS_VALUES.includes(status)) return NextResponse.json({ error: "Unknown status" }, { status: 400 });
     if (!PRIORITY_VALUES.includes(priority)) return NextResponse.json({ error: "Unknown priority" }, { status: 400 });
@@ -269,6 +285,7 @@ export async function POST(request: NextRequest) {
         created_by: user.id,
         color: color || null,
         ...(personal ? { personal: true } : {}),
+        ...(isList ? { is_list: true } : {}),
       })
       .select("*")
       .single();
@@ -280,6 +297,29 @@ export async function POST(request: NextRequest) {
       await supabase.from("tasks").update({ remind_at: remind, remind_to: user.id }).eq("id", task.id);
     }
     task.remind_at = remind;
+
+    let subtaskCount = 0;
+    if (items.length) {
+      const { error: itemsError } = await supabase.from("subtasks").insert(
+        items.map((it, i) => ({
+          task_id: task.id,
+          title: it.title,
+          position: i,
+          due_date: it.due_date,
+          // The person doing the list gets each item's own reminder.
+          assigned_to: task.assigned_to || null,
+          progress_type: "percent",
+          created_by: user.id,
+        }))
+      );
+      if (itemsError) {
+        // No half-made list: take the task back and report it.
+        await supabase.from("tasks").delete().eq("id", task.id);
+        throw itemsError;
+      }
+      subtaskCount = items.length;
+      await recomputeTaskProgress(supabase, task.id);
+    }
 
     await logActivity(supabase, {
       entity_type: "task",
@@ -307,14 +347,16 @@ export async function POST(request: NextRequest) {
       await notifyMany(supabase, Array.from(recipients), {
         task_id: task.id,
         type: "assigned",
-        title: "New task assigned",
-        message: `You were assigned: ${task.title}${ask}`,
-        email: { subject: `New task assigned: ${task.title}` },
+        title: isList ? "New to-do list" : "New task assigned",
+        message: isList
+          ? `You were given a to-do list: ${task.title} (${subtaskCount} item${subtaskCount === 1 ? "" : "s"})${ask}`
+          : `You were assigned: ${task.title}${ask}`,
+        email: { subject: `${isList ? "New to-do list" : "New task assigned"}: ${task.title}` },
       });
     }
 
     const myProjects = await userProjectIds(supabase, user.id);
-    return NextResponse.json({ task: { ...task, subtask_count: 0, for_me: isForMe(task, user.id, myProjects) } });
+    return NextResponse.json({ task: { ...task, subtask_count: subtaskCount, for_me: isForMe(task, user.id, myProjects) } });
   } catch (error: any) {
     console.error("POST /api/tasks failed:", error);
     return NextResponse.json({ error: error?.message || "Failed to create task" }, { status: 500 });

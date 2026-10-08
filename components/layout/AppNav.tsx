@@ -14,6 +14,9 @@ import { clearSnapshots } from "@/lib/snapshot";
 // Simple mode: just the pages the core flow uses.
 const SIMPLE_LINKS = [
   { href: "/dashboard", label: "Tasks" },
+  { href: "/lists", label: "To-Do" },
+  { href: "/chat", label: "Chat" },
+  { href: "/ask", label: "Ask" },
   { href: "/projects", label: "Projects" },
   { href: "/reports", label: "Reports" },
   { href: "/payroll", label: "Payroll" },

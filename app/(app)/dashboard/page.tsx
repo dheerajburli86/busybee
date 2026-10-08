@@ -9,31 +9,8 @@ import { GanttView } from "@/components/tasks/GanttView";
 import { SIMPLE } from "@/lib/simple";
 import { readSnapshot, writeSnapshot } from "@/lib/snapshot";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
-import { Draft, TaskDrafts, blankDraft } from "@/components/tasks/TaskDrafts";
+import { quickDeadlines } from "@/lib/deadlines";
 
-// One-tap deadlines for the create form (simple mode). Each lands at 6 PM,
-// the end of a working day, so "tomorrow" means tomorrow evening.
-function quickDeadlines(): { label: string; value: string }[] {
-  const at6 = (d: Date) => {
-    const x = new Date(d);
-    x.setHours(18, 0, 0, 0);
-    return x;
-  };
-  const plus = (days: number) => {
-    const d = new Date();
-    d.setDate(d.getDate() + days);
-    return at6(d);
-  };
-  const out: { label: string; value: string }[] = [];
-  if (at6(new Date()).getTime() - Date.now() > 60 * 60 * 1000) out.push({ label: "Today", value: toLocalInput(at6(new Date()).toISOString()) });
-  out.push({ label: "Tomorrow", value: toLocalInput(plus(1).toISOString()) });
-  out.push({ label: "In 3 days", value: toLocalInput(plus(3).toISOString()) });
-  const monday = new Date();
-  monday.setDate(monday.getDate() + (((8 - monday.getDay()) % 7) || 7));
-  out.push({ label: "Next Monday", value: toLocalInput(at6(monday).toISOString()) });
-  out.push({ label: "In 2 weeks", value: toLocalInput(plus(14).toISOString()) });
-  return out;
-}
 import {
   COLOR_SWATCHES,
   Lookups,
@@ -123,8 +100,6 @@ export default function DashboardPage() {
     subtasks: "",
   });
   const [creating, setCreating] = useState(false);
-  // Simple mode: several tasks made in one go (see TaskDrafts).
-  const [drafts, setDrafts] = useState<Draft[]>(() => [blankDraft()]);
   const [showMore, setShowMore] = useState(false);
 
   const showError = useCallback((m: string) => {
@@ -295,98 +270,8 @@ export default function DashboardPage() {
     [tasks, archivedTasks, replaceTask, showError]
   );
 
-  // Simple mode: every task in the form, for every person picked, in one go.
-  const createBatch = async () => {
-    if (form.assignees.length === 0) {
-      showError("Pick who this is for first (step 1).");
-      return;
-    }
-    const filled = drafts.filter((d) => d.title.trim());
-    if (filled.length === 0) {
-      showError("Give the task a title.");
-      return;
-    }
-    const noDate = filled.findIndex((d) => !fromLocalInput(d.due));
-    if (noDate >= 0) {
-      showError(`Set a deadline for "${filled[noDate].title.trim()}".`);
-      return;
-    }
-    setCreating(true);
-    const made: Task[] = [];
-    const failed: string[] = [];
-    const subFailed: string[] = [];
-    const leftover: Draft[] = [];
-    try {
-      // One job per task per person, four at a time: quick without
-      // flooding the server. Subtasks go in one by one to keep their order.
-      type Job = { d: Draft; assignee: string };
-      const jobs: Job[] = filled.flatMap((d) => form.assignees.map((assignee) => ({ d, assignee })));
-      const failedDrafts = new Set<number>();
-      const failedPeople = new Set<string>();
-      const run = async (job: Job) => {
-        const { d, assignee } = job;
-        const base = {
-          title: d.title.trim(),
-          description: d.description.trim() || null,
-          priority: d.priority,
-          due_date: fromLocalInput(d.due),
-          project_id: form.project || null,
-        };
-        try {
-          const data = await sendJSON("/api/tasks", "POST", { ...base, assigned_to: assignee });
-          const t: Task = data.task;
-          let added = 0;
-          for (const title of d.subtasks.split("\n").map((x) => x.trim()).filter(Boolean).slice(0, 50)) {
-            try {
-              await sendJSON(`/api/tasks/${t.id}/subtasks`, "POST", { title });
-              added += 1;
-            } catch {
-              subFailed.push(`"${title}"`);
-            }
-          }
-          (t as any).subtask_count = added;
-          made.push(t);
-        } catch (err: any) {
-          failed.push(`${base.title} for ${nameOf(lookups.people, assignee)}: ${err.message}`);
-          failedDrafts.add(d.key);
-          failedPeople.add(assignee);
-        }
-      };
-      let cursor = 0;
-      await Promise.all(
-        Array.from({ length: Math.min(4, jobs.length) }, async () => {
-          while (cursor < jobs.length) await run(jobs[cursor++]);
-        })
-      );
-      filled.forEach((d) => failedDrafts.has(d.key) && leftover.push(d));
-      if (made.length) setTasks((prev) => [...made, ...prev]);
-      if (failed.length) {
-        // Keep only the tasks that didn't go through, so a retry makes no duplicates.
-        setDrafts(leftover.length ? leftover : [blankDraft()]);
-        setForm({ ...form, assignees: Array.from(failedPeople) });
-        showError(`Not created - ${failed.join("; ")}`);
-      } else {
-        setDrafts([blankDraft(drafts[drafts.length - 1])]);
-        setForm({ ...form, assignees: [] });
-        const people = form.assignees.length;
-        showInfo(
-          made.length === 1
-            ? "Task created. They've been asked to accept the deadline."
-            : people > 1
-            ? `${made.length} tasks created (${filled.length} each for ${people} people). Each has been asked to accept the deadlines.`
-            : `${made.length} tasks created. They've been asked to accept the deadlines.`
-        );
-        if (subFailed.length)
-          showError(`Tasks created, but these subtasks didn't save: ${Array.from(new Set(subFailed)).join(", ")}. Open the task to add them.`);
-      }
-    } finally {
-      setCreating(false);
-    }
-  };
-
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (SIMPLE) return createBatch();
     if (!form.title.trim()) return;
     const due = fromLocalInput(form.due);
     const others = form.assignees.filter((id) => id !== lookups.me);
@@ -490,7 +375,8 @@ export default function DashboardPage() {
     }
   };
 
-  const source = showArchived ? archivedTasks : tasks;
+  // To-do lists live on their own page (Lists), not in the task list.
+  const source = (showArchived ? archivedTasks : tasks).filter((t) => !(t as any).is_list);
   const q = search.toLowerCase().trim();
 
   const filtered = useMemo(() => {
@@ -654,13 +540,7 @@ export default function DashboardPage() {
           disabled={creating}
           loading={loading}
         />
-        {SIMPLE ? (
-          <>
-            <p className="text-sm font-semibold text-white pt-1">2. What needs doing, and by when?</p>
-            <TaskDrafts drafts={drafts} onChange={setDrafts} quick={quickDeadlines()} disabled={creating} />
-          </>
-        ) : (
-          <>
+        {SIMPLE && <p className="text-sm font-semibold text-white pt-1">2. What needs doing?</p>}
         <input
           type="text"
           placeholder="Task title"
@@ -703,13 +583,9 @@ export default function DashboardPage() {
             </div>
           </>
         )}
-          </>
-        )}
         <div className="flex flex-wrap gap-2 items-end">
-          {!SIMPLE && (
-            <>
           <label className="flex flex-col text-xs text-slate-400 gap-1">
-            {form.assignees.some((id) => id !== lookups.me) ? "Deadline" : "Due (optional)"}
+            {form.assignees.some((id) => id !== lookups.me) ? (SIMPLE ? "Deadline (or pick a date and time)" : "Deadline") : "Due (optional)"}
             <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} className={inputCls} />
           </label>
           <label className="flex flex-col text-xs text-slate-400 gap-1">
@@ -718,8 +594,6 @@ export default function DashboardPage() {
               {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
             </select>
           </label>
-            </>
-          )}
           {SIMPLE && lookups.projects.length > 0 && (
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Project
@@ -734,23 +608,12 @@ export default function DashboardPage() {
               {showMore ? "Fewer options" : "More options"}
             </button>
           )}
-          <button
-            type="submit"
-            disabled={creating || (SIMPLE ? !drafts.some((d) => d.title.trim()) : !form.title.trim())}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto font-semibold"
-          >
+          <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
             {creating
               ? "Creating..."
-              : SIMPLE
-              ? (() => {
-                  const n = drafts.filter((d) => d.title.trim()).length || 1;
-                  const p = form.assignees.length;
-                  const total = n * Math.max(p, 1);
-                  return total === 1 ? "Assign task" : p > 1 ? `Assign ${total} tasks (${n} × ${p} people)` : `Assign ${total} tasks`;
-                })()
               : form.assignees.length > 1
-              ? `Add ${form.assignees.length} tasks`
-              : "Add Task"}
+              ? SIMPLE ? `Assign to ${form.assignees.length} people` : `Add ${form.assignees.length} tasks`
+              : SIMPLE ? "Assign task" : "Add Task"}
           </button>
         </div>
         {showMore && !SIMPLE && (
