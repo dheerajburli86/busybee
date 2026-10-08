@@ -9,9 +9,9 @@
 // assignee accepts, the supervisor reviews, only an admin or supervisor
 // touches money.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
-import { Person, Task, formatDue, nameOf } from "./types";
+import { Person, Task, formatDue, fromLocalInput, nameOf, toLocalInput } from "./types";
 
 type Acceptance = {
   user_id: string;
@@ -63,6 +63,9 @@ export function TaskWorkflow({
   onReplace,
   onError,
   onInfo,
+  onChanged,
+  onAcceptState,
+  reloadKey,
 }: {
   task: Task;
   people: Person[];
@@ -72,6 +75,12 @@ export function TaskWorkflow({
   onReplace: (task: Partial<Task> & { id: string }) => void;
   onError: (msg: string) => void;
   onInfo: (msg: string) => void;
+  /** Something the parent shows (extensions, history) changed - reload it. */
+  onChanged?: () => void;
+  /** Tells the parent whether this person still has to answer the deadline question. */
+  onAcceptState?: (needsDecision: boolean) => void;
+  /** Changes when something elsewhere (an extension decision) may have changed the agreement. */
+  reloadKey?: string;
 }) {
   const [accept, setAccept] = useState<AcceptState | null>(null);
   const [adjustments, setAdjustments] = useState<Adjustment[]>([]);
@@ -79,8 +88,11 @@ export function TaskWorkflow({
   const [busy, setBusy] = useState("");
 
   const [declineNote, setDeclineNote] = useState("");
+  const [declineDate, setDeclineDate] = useState("");
   const [declining, setDeclining] = useState(false);
   const [reviewNote, setReviewNote] = useState("");
+  const [sendBackDue, setSendBackDue] = useState("");
+  const [moneyConfirm, setMoneyConfirm] = useState(false);
   const blankMoney = () => ({
     kind: "reward" as "reward" | "penalty",
     amount: "",
@@ -96,7 +108,10 @@ export function TaskWorkflow({
         fetch(`/api/tasks/${task.id}/accept`).then((r) => (r.ok ? r.json() : null)),
         fetch(`/api/tasks/${task.id}/adjustment`).then((r) => (r.ok ? r.json() : null)),
       ]);
-      if (a) setAccept(a);
+      if (a) {
+        setAccept(a);
+        onAcceptState?.(!!a.needs_my_decision);
+      }
       if (m) {
         setAdjustments(m.entries || []);
         setCanAddMoney(!!m.can_add);
@@ -108,14 +123,19 @@ export function TaskWorkflow({
 
   useEffect(() => {
     load();
-  }, [load, task.status, task.due_date, (task as any).review_status]);
+  }, [load, task.status, task.due_date, (task as any).review_status, reloadKey]);
 
+  // A ref, not state: the second click of a fast double click must see the
+  // first one in flight (money must never be recorded twice).
+  const lock = useRef(false);
   const once = async (key: string, fn: () => Promise<void>) => {
-    if (busy) return;
+    if (lock.current) return;
+    lock.current = true;
     setBusy(key);
     try {
       await fn();
     } finally {
+      lock.current = false;
       setBusy("");
     }
   };
@@ -124,18 +144,26 @@ export function TaskWorkflow({
   const decide = (decision: "accepted" | "declined") =>
     once(decision, async () => {
       try {
+        const wanted = decision === "declined" ? fromLocalInput(declineDate) : null;
+        if (decision === "declined" && !wanted) {
+          onError("Pick the date you need.");
+          return;
+        }
         await sendJSON(`/api/tasks/${task.id}/accept`, "POST", {
           decision,
           note: decision === "declined" ? declineNote.trim() : undefined,
+          requested_date: wanted || undefined,
         });
         setDeclining(false);
         setDeclineNote("");
+        setDeclineDate("");
         onInfo(
           decision === "accepted"
-            ? "Deadline accepted."
-            : "The assignor has been told. Raise an extension below with the date you need."
+            ? "Deadline accepted. You'll get a reminder every day until it's due."
+            : "Request sent. You'll be told as soon as it's approved or rejected."
         );
         await load();
+        onChanged?.();
       } catch (e: any) {
         onError(e.message);
       }
@@ -145,12 +173,17 @@ export function TaskWorkflow({
   const review = (decision: "approved" | "sent_back") =>
     once(decision, async () => {
       try {
+        const newDue = decision === "sent_back" ? fromLocalInput(sendBackDue) : null;
         const r = await sendJSON(`/api/tasks/${task.id}/review`, "POST", {
           decision,
           note: reviewNote.trim() || undefined,
+          due_date: newDue || undefined,
         });
         setReviewNote("");
+        setSendBackDue("");
+        if (newDue) onReplace({ id: task.id, due_date: newDue });
         onReplace({ id: task.id, ...r });
+        onChanged?.();
         onInfo(decision === "approved" ? "Signed off." : "Sent back to the assignee.");
         await load();
       } catch (e: any) {
@@ -170,6 +203,7 @@ export function TaskWorkflow({
         });
         setAdjustments((prev) => [r, ...prev]);
         setMoney(blankMoney());
+        setMoneyConfirm(false);
         onInfo(`${money.kind === "reward" ? "Reward" : "Penalty"} recorded. They have been notified.`);
       } catch (e: any) {
         onError(e.message);
@@ -238,20 +272,30 @@ export function TaskWorkflow({
                 </div>
               ) : (
                 <div className="space-y-2">
+                  <label className="flex flex-col gap-1 text-xs text-slate-300">
+                    Date you need
+                    <input
+                      type="datetime-local"
+                      value={declineDate}
+                      min={toLocalInput(task.due_date)}
+                      onChange={(e) => setDeclineDate(e.target.value)}
+                      className={input}
+                    />
+                  </label>
                   <textarea
                     value={declineNote}
                     onChange={(e) => setDeclineNote(e.target.value)}
-                    placeholder="Why doesn't this date work?"
+                    placeholder="Why do you need more time?"
                     rows={2}
                     className={`${input} w-full`}
                   />
                   <div className="flex flex-wrap gap-2">
                     <button
                       onClick={() => decide("declined")}
-                      disabled={!!busy || !declineNote.trim()}
+                      disabled={!!busy || !declineNote.trim() || !declineDate}
                       className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 rounded text-sm"
                     >
-                      Tell the assignor
+                      Ask for this date
                     </button>
                     <button
                       onClick={() => setDeclining(false)}
@@ -261,7 +305,7 @@ export function TaskWorkflow({
                     </button>
                   </div>
                   <p className="text-xs text-slate-400">
-                    This flags the date as unworkable. Use "Request extension" below to propose the date you need.
+                    {nameOf(people, task.created_by, "The assignor")} approves or rejects it. Until then the current deadline stands.
                   </p>
                 </div>
               )}
@@ -329,6 +373,18 @@ export function TaskWorkflow({
                 rows={2}
                 className={`${input} w-full`}
               />
+              {!!task.due_date && new Date(task.due_date).getTime() < Date.now() + 24 * 3600 * 1000 && (
+                <label className="flex flex-col gap-1 text-xs text-slate-400">
+                  If you send it back: new deadline (optional - the current one is {formatDue(task.due_date)})
+                  <input
+                    type="datetime-local"
+                    value={sendBackDue}
+                    min={toLocalInput(new Date().toISOString())}
+                    onChange={(e) => setSendBackDue(e.target.value)}
+                    className={input}
+                  />
+                </label>
+              )}
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => review("approved")}
@@ -394,7 +450,7 @@ export function TaskWorkflow({
               <div className="flex flex-wrap gap-2">
                 <select
                   value={money.kind}
-                  onChange={(e) => setMoney({ ...money, kind: e.target.value as "reward" | "penalty" })}
+                  onChange={(e) => { setMoney({ ...money, kind: e.target.value as "reward" | "penalty" }); setMoneyConfirm(false); }}
                   className={input}
                   aria-label="Reward or penalty"
                 >
@@ -403,7 +459,7 @@ export function TaskWorkflow({
                 </select>
                 <select
                   value={money.user_id}
-                  onChange={(e) => setMoney({ ...money, user_id: e.target.value })}
+                  onChange={(e) => { setMoney({ ...money, user_id: e.target.value }); setMoneyConfirm(false); }}
                   className={`${input} flex-1 min-w-40`}
                   aria-label="Who it applies to"
                 >
@@ -419,7 +475,7 @@ export function TaskWorkflow({
                   min="1"
                   step="1"
                   value={money.amount}
-                  onChange={(e) => setMoney({ ...money, amount: e.target.value })}
+                  onChange={(e) => { setMoney({ ...money, amount: e.target.value }); setMoneyConfirm(false); }}
                   placeholder="Amount ₹"
                   className={`${input} w-32`}
                   aria-label="Amount in rupees"
@@ -427,18 +483,32 @@ export function TaskWorkflow({
               </div>
               <textarea
                 value={money.reason}
-                onChange={(e) => setMoney({ ...money, reason: e.target.value })}
+                onChange={(e) => { setMoney({ ...money, reason: e.target.value }); setMoneyConfirm(false); }}
                 placeholder="Reason - this is shown to them and kept on the record"
                 rows={2}
                 className={`${input} w-full`}
               />
-              <button
-                onClick={addMoney}
-                disabled={!!busy || !money.user_id || !money.amount || !money.reason.trim()}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm"
-              >
-                Record it
-              </button>
+              {!moneyConfirm ? (
+                <button
+                  onClick={() => setMoneyConfirm(true)}
+                  disabled={!!busy || !money.user_id || !(Number(money.amount) > 0) || !money.reason.trim()}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm"
+                >
+                  Review
+                </button>
+              ) : (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm text-slate-200">
+                    {money.kind === "reward" ? "Reward" : "Penalty"} <b>{rupees(money.amount)}</b> for <b>{nameOf(people, money.user_id)}</b>? They&apos;ll be told straight away.
+                  </span>
+                  <button onClick={addMoney} disabled={!!busy} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">
+                    {busy === "money" ? "Recording..." : "Confirm"}
+                  </button>
+                  <button onClick={() => setMoneyConfirm(false)} disabled={!!busy} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+                    Back
+                  </button>
+                </div>
+              )}
               <p className="text-xs text-slate-500">
                 Nothing is paid or deducted here. This goes onto the month's payroll report for finance to apply, and
                 the person is told straight away. Entries can be cancelled but never edited or deleted.

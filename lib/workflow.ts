@@ -7,7 +7,7 @@
 //   auto_advance  - when a task is completed, it moves to the next section
 //                   (and keeps its Completed status there)
 
-import { logActivity, notifyMany, taskAudience, teamMemberIds } from "@/lib/permissions";
+import { SUPER_ROLES, logActivity, normalizeRole, notifyMany, taskAudience, teamMemberIds } from "@/lib/permissions";
 import { isFinished } from "@/lib/status";
 
 export type Section = { id: string; project_id: string; name: string; position: number };
@@ -128,4 +128,34 @@ export async function workersOn(supabase: any, task: any): Promise<string[]> {
  */
 export function schemaMissing(error: any): boolean {
   return ["42P01", "42703", "PGRST205", "PGRST204"].includes(String(error?.code || ""));
+}
+
+/**
+ * Everyone who can decide on a request: the task's creator, task manager and
+ * extra assignors, and the manager of the project the task belongs to. If
+ * that leaves nobody but the requester, the desk's supervisors.
+ */
+export async function decidersFor(supabase: any, task: any, requester: string): Promise<string[]> {
+  const ids = new Set<string>();
+  [task.created_by, task.task_manager_id].forEach((x: string | null) => x && ids.add(x));
+  const { data: extra } = await supabase.from("task_assignors").select("user_id").eq("task_id", task.id);
+  (extra || []).forEach((x: any) => x.user_id && ids.add(x.user_id));
+
+  if (task.project_id) {
+    const [{ data: project }, { data: managers }] = await Promise.all([
+      supabase.from("projects").select("manager_id").eq("id", task.project_id).maybeSingle(),
+      supabase.from("project_members").select("user_id").eq("project_id", task.project_id).eq("role", "manager"),
+    ]);
+    if (project?.manager_id) ids.add(project.manager_id);
+    (managers || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
+  }
+
+  ids.delete(requester);
+  if (ids.size === 0) {
+    const { data: desk } = await supabase.from("desk_members").select("user_id, role").eq("desk_id", task.desk_id);
+    (desk || [])
+      .filter((m: any) => m.user_id !== requester && SUPER_ROLES.includes(normalizeRole(m.role)))
+      .forEach((m: any) => ids.add(m.user_id));
+  }
+  return Array.from(ids);
 }

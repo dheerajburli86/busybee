@@ -505,6 +505,11 @@ export async function PUT(request: NextRequest) {
       // migration has added the column (select("*") returns it), so status
       // changes keep working on a database that hasn't been migrated yet.
       if ("review_status" in before && !before.personal && patch.status !== before.status) {
+        // Approved work stays approved: the person who did it can't quietly
+        // reopen it (a reward or penalty may already hang off it).
+        if (before.status === "closed" && (!access.canManage || (await workersOn(supabase, before)).includes(user.id))) {
+          return deny("This was approved and closed. Ask your supervisor to reopen it.");
+        }
         if (patch.status === "done") {
           // Finished work joins the review queue - every time, including work
           // that was approved once, reopened and finished again.
@@ -588,6 +593,27 @@ export async function PUT(request: NextRequest) {
 
     const audience = (await taskAudience(supabase, task)).filter((x) => x !== user.id);
 
+    // The assignor moved the deadline: the person doing the work has to
+    // accept the new date, so they get a proper alert (with email) saying so,
+    // not just a routine "task updated".
+    const deadlineMoved =
+      !!changes.due_date &&
+      !!task.due_date &&
+      !!task.assigned_to &&
+      !newlyAssigned.has(task.assigned_to) &&
+      task.assigned_to !== user.id &&
+      !task.personal &&
+      !isFinished(task.status);
+    if (deadlineMoved) {
+      await notifyMany(supabase, [task.assigned_to], {
+        task_id: id,
+        type: "deadline_changed",
+        title: "Deadline changed",
+        message: `The deadline for ${task.title} is now ${formatForPeople(task.due_date)}. Open the task to accept the new date or ask for more time.`,
+        email: { subject: `Deadline changed: ${task.title}` },
+      });
+    }
+
     // SOW #20: completion goes to everyone connected to the task.
     if (changes.status && isFinished(task.status) && !isFinished(before.status)) {
       await notifyCompleted(supabase, task, user.id);
@@ -599,7 +625,7 @@ export async function PUT(request: NextRequest) {
       if (meaningful.length) {
         await notifyMany(
           supabase,
-          audience.filter((x) => !newlyAssigned.has(x)),
+          audience.filter((x) => !newlyAssigned.has(x) && !(deadlineMoved && x === task.assigned_to)),
           {
             task_id: id,
             type: "updated",

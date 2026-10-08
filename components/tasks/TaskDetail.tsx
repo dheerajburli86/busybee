@@ -9,11 +9,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { createClient } from "@/lib/supabase";
 import { STATUSES, isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
+import { SIMPLE } from "@/lib/simple";
 import {
   COLOR_SWATCHES,
   Lookups,
   MILESTONES,
   PRIORITIES,
+  Person,
   Task,
   formatDue,
   fromLocalInput,
@@ -154,6 +156,9 @@ export function TaskDetail({
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [newSub, setNewSub] = useState({ title: "", due: "", assignee: "" });
   const [ext, setExt] = useState({ reason: "", date: "" });
+  const [showExtForm, setShowExtForm] = useState(false);
+  // From TaskWorkflow: does this person still have to accept the deadline?
+  const [needsDecision, setNeedsDecision] = useState(false);
   const [amend, setAmend] = useState<Record<string, { date: string; note: string }>>({});
   const [upload, setUpload] = useState({ visibility: "all", shared: [] as string[], busy: false });
   const [shareEdit, setShareEdit] = useState<string | null>(null);
@@ -223,6 +228,9 @@ export function TaskDetail({
 
   const canManage = !!access?.canManage;
   const canWork = !!access?.canWork;
+  // The person doing the work (not a supervisor looking at someone else's
+  // task): only they get "Mark as done" and "Ask for more time".
+  const doer = canWork && (task.assigned_to === me || !canManage);
   const hasSubtasks = subtasks.length > 0;
   const overdue = isOverdue(task);
 
@@ -230,7 +238,7 @@ export function TaskDetail({
     // #20: finishing the checklist may have completed the task (and moved it on).
     if (updated) {
       onReplace({ ...updated, subtask_count: subtasks.length });
-      onInfo("Every checklist item is done, so the task was marked Completed.");
+      onInfo(SIMPLE ? "All subtasks are ticked, so it's marked done and sent for review." : "Every checklist item is done, so the task was marked Completed.");
       return;
     }
     if (pct !== null && pct !== undefined) onReplace({ id: task.id, progress_percent: pct, subtask_count: subtasks.length });
@@ -388,7 +396,8 @@ export function TaskDetail({
       const r = await sendJSON(`/api/tasks/${task.id}/extension`, "POST", { reason: ext.reason.trim(), requested_date: iso });
       setExtensions((prev) => [r, ...prev]);
       setExt({ reason: "", date: "" });
-      onInfo("Extension request sent to the assignor.");
+      setShowExtForm(false);
+      onInfo("Request sent. You'll be told as soon as it's approved or rejected.");
       refreshHistory();
     } catch (e: any) {
       onError(e.message);
@@ -478,6 +487,65 @@ export function TaskDetail({
   };
 
   const actionBtn = "px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm";
+
+  // Asking for and deciding on more time (checklist #43 / #44). In simple mode
+  // it sits at the top with the other decisions; otherwise further down.
+  const extensionSection = (
+    <>
+      {(SIMPLE ? (doer && !needsDecision && !isFinished(task.status)) || extensions.length > 0 : canWork || extensions.length > 0) && (
+                <div className={section}>
+                  <h4 className={h4}>{SIMPLE ? "More time" : "Deadline extension"}</h4>
+                  {extensions.map((x) => (
+                    <div key={x.id} className="bg-slate-900 rounded p-3 mb-2 text-sm">
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-300">"{x.reason}"</span>
+                        <span className={`text-xs shrink-0 ${x.status === "approved" ? "text-green-400" : x.status === "rejected" ? "text-red-400" : "text-yellow-400"}`}>
+                          {x.status === "pending" ? "waiting for a decision" : x.status === "approved" ? "approved" : "not approved"}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {nameOf(people, x.requested_by, "Someone")} asked for {formatDue(x.requested_date)}
+                        {x.approved_date && ` · granted ${formatDue(x.approved_date)}`}
+                        {x.review_note && ` · note: ${x.review_note}`}
+                      </p>
+                      {x.can_review && (
+                        <div className="mt-2 space-y-2">
+                          <div className="flex flex-wrap gap-2">
+                            <button onClick={() => once(`ext-${x.id}`, async () => { await decide(x, "approved"); })} disabled={busy(`ext-${x.id}`)} className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-50 rounded text-xs">Approve as asked</button>
+                            <button onClick={() => once(`ext-${x.id}`, async () => { await decide(x, "rejected"); })} disabled={busy(`ext-${x.id}`)} className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 disabled:opacity-50 rounded text-xs">Reject</button>
+                          </div>
+                          <div className="flex flex-wrap gap-2 items-center">
+                            <input type="datetime-local" value={amend[x.id]?.date || ""}
+                              onChange={(e) => setAmend({ ...amend, [x.id]: { ...(amend[x.id] || { note: "" }), date: e.target.value } })}
+                              className={`${input} text-xs py-1`} aria-label="Different deadline" />
+                            <button onClick={() => once(`ext-${x.id}`, async () => { await decide(x, "approved", amend[x.id]?.date); })} disabled={!amend[x.id]?.date || busy(`ext-${x.id}`)}
+                              className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 rounded text-xs">Approve with this date</button>
+                          </div>
+                          <input value={amend[x.id]?.note || ""}
+                            onChange={(e) => setAmend({ ...amend, [x.id]: { ...(amend[x.id] || { date: "" }), note: e.target.value } })}
+                            placeholder="Note to the requester (optional)" className={`${input} text-xs py-1 w-full`} />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {doer && !needsDecision && !extensions.some((x) => x.status === "pending") && SIMPLE && !showExtForm && !isFinished(task.status) && (
+                    <button onClick={() => setShowExtForm(true)} className={actionBtn}>⏳ Ask for more time</button>
+                  )}
+                  {canWork && !extensions.some((x) => x.status === "pending") && (!SIMPLE || (doer && showExtForm && !isFinished(task.status))) && (
+                    <div className="space-y-2">
+                      {overdue && <p className="text-xs text-red-400">This task is overdue - give a reason for the delay.</p>}
+                      <input value={ext.reason} onChange={(e) => setExt({ ...ext, reason: e.target.value })}
+                        placeholder={SIMPLE ? "Why do you need more time?" : "Reason for the delay..."} className={`${input} w-full`} />
+                      <div className="flex flex-wrap gap-2">
+                        <input type="datetime-local" value={ext.date} onChange={(e) => setExt({ ...ext, date: e.target.value })} className={input} aria-label="Requested deadline" />
+                        <button onClick={() => once("extension", requestExtension)} disabled={busy("extension")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">{SIMPLE ? "Send request" : "Request extension"}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+    </>
+  );
   const assignorIds = [task.created_by, ...assignors.map((a) => a.user_id)].filter(Boolean) as string[];
 
   return (
@@ -489,7 +557,7 @@ export function TaskDetail({
         aria-label={task.title}
       >
         {/* Header */}
-        <div className="sticky top-0 bg-slate-800 border-b border-slate-700 p-4 z-10">
+        <div className="sm:sticky top-0 bg-slate-800 border-b border-slate-700 p-4 z-10">
           <div className="flex justify-between items-start gap-3">
             <div className="min-w-0">
               <h2 className={`text-xl font-bold break-words ${overdue ? "text-red-400" : ""}`}>
@@ -508,8 +576,8 @@ export function TaskDetail({
           </div>
 
           <div className="flex flex-wrap gap-2 mt-3">
-            <button onClick={() => once("duplicate", () => duplicate())} disabled={busy("duplicate")} className={actionBtn}>📋 Duplicate</button>
-            {lookups.projects.length > 1 && (
+            {!SIMPLE && <button onClick={() => once("duplicate", () => duplicate())} disabled={busy("duplicate")} className={actionBtn}>📋 Duplicate</button>}
+            {!SIMPLE && lookups.projects.length > 1 && (
               <select value="" onChange={(e) => { const to = e.target.value; if (to) once("duplicate", () => duplicate(to)); }} className={input}>
                 <option value="">Copy to project...</option>
                 {lookups.projects.filter((p) => p.id !== task.project_id).map((p) => (
@@ -519,7 +587,7 @@ export function TaskDetail({
             )}
             {canManage && <button onClick={() => once("remind", () => remind("update_request"))} disabled={busy("remind")} className={actionBtn}>🔔 Request update</button>}
             {canManage && <button onClick={() => once("remind", () => remind("reminder"))} disabled={busy("remind")} className={actionBtn}>⏰ Remind</button>}
-            <button onClick={() => once("template", saveTemplate)} disabled={busy("template")} className={actionBtn}>📄 Save as template</button>
+            {!SIMPLE && <button onClick={() => once("template", saveTemplate)} disabled={busy("template")} className={actionBtn}>📄 Save as template</button>}
             {/* #1: your own private to-do items can be deleted outright. */}
             {task.personal && (task.created_by === me || task.assigned_to === me) && (
               <button
@@ -543,7 +611,8 @@ export function TaskDetail({
               </button>
             )}
             {/* A completed task can be re-opened (from the archive too). */}
-            {isFinished(task.status) && canWork && (!task.archived_at || canManage) && (
+            {/* Approved work is reopened by a supervisor, not by the person who did it. */}
+            {isFinished(task.status) && canWork && (!task.archived_at || canManage) && (task.status !== "closed" || (canManage && task.assigned_to !== me && !(access as any)?.isWorker)) && (
               <button
                 onClick={async () => {
                   const ok = await onPatch(task.id, { status: "in_progress", ...(task.archived_at ? { archived_at: null } : {}) });
@@ -663,21 +732,83 @@ export function TaskDetail({
                 <p className="text-xs text-slate-400 mb-3">You can view this task but aren't working on it, so the controls are read-only.</p>
               )}
 
+              {SIMPLE && (
+                <>
+                  <NextStep
+                    task={task}
+                    me={me}
+                    canManage={canManage}
+                    doer={doer}
+                    people={people}
+                    needsDecision={needsDecision}
+                    toDecide={extensions.find((x) => x.can_review && x.status === "pending") || null}
+                    waitingOnMine={extensions.some((x) => x.status === "pending" && x.requested_by === me)}
+                    allTicked={subtasks.length > 0 && subtasks.every((x) => x.done)}
+                  />
+                  {/* The decisions (accept the deadline, review, reward or
+                      penalty) come first: they're what the person opened the
+                      task to do. */}
+                  <TaskWorkflow
+                    task={task}
+                    people={people}
+                    me={lookups.me}
+                    canManage={canManage}
+                    isSuper={!!access?.isSuper}
+                    onReplace={onReplace}
+                    onError={onError}
+                    onInfo={onInfo}
+                    onChanged={load}
+                    onAcceptState={setNeedsDecision}
+                    reloadKey={extensions.map((x) => `${x.id}:${x.status}`).join(",")}
+                  />
+                  {extensionSection}
+                  <div className="mb-4" />
+                </>
+              )}
+
               {/* Core fields */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                <label className="flex flex-col gap-1">
-                  <span className="text-slate-400 text-xs">Status</span>
-                  <select value={task.status} disabled={!canWork} onChange={(e) => patch({ status: e.target.value })} className={input}>
-                    {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                  </select>
-                </label>
+                {SIMPLE ? (
+                  <div className="flex flex-col gap-1 sm:col-span-2">
+                    <span className="text-slate-400 text-xs">Status</span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`px-2 py-1 rounded text-xs ${statusClass(task.status)}`}>{statusLabel(task.status)}</span>
+                      {doer && !isFinished(task.status) && (
+                        <>
+                          {task.status === "pending" && (
+                            <button onClick={() => patch({ status: "in_progress" })} className={actionBtn}>▶ Start working</button>
+                          )}
+                          {task.status === "need_help" && (
+                            <button onClick={() => patch({ status: "in_progress" })} className={actionBtn}>▶ Back to working</button>
+                          )}
+                          {task.status !== "need_help" && (
+                            <button onClick={() => patch({ status: "need_help" })} className={actionBtn}>🙋 I&apos;m stuck - need help</button>
+                          )}
+                          <button
+                            onClick={() => patch({ status: "done" })}
+                            className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded text-sm font-semibold"
+                          >
+                            ✓ Mark as done
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <label className="flex flex-col gap-1">
+                    <span className="text-slate-400 text-xs">Status</span>
+                    <select value={task.status} disabled={!canWork} onChange={(e) => patch({ status: e.target.value })} className={input}>
+                      {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                    </select>
+                  </label>
+                )}
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Priority</span>
                   <select value={task.priority} disabled={!(access?.isSuper || access?.isAssignor)} onChange={(e) => patch({ priority: e.target.value })} className={input}>
                     {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </label>
-                <label className="flex flex-col gap-1 sm:col-span-2">
+                {!SIMPLE && <label className="flex flex-col gap-1 sm:col-span-2">
                   <span className="text-slate-400 text-xs">Color (#19: a visual accent, purely optional)</span>
                   <div className="flex gap-1 items-center">
                     {COLOR_SWATCHES.map((c) => (
@@ -695,8 +826,8 @@ export function TaskDetail({
                       </button>
                     ))}
                   </div>
-                </label>
-                <label className="flex flex-col gap-1">
+                </label>}
+                {!SIMPLE && <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Start</span>
                   <DateTimeField
                     value={task.start_date}
@@ -705,9 +836,9 @@ export function TaskDetail({
                     className={input}
                     ariaLabel="Start"
                   />
-                </label>
+                </label>}
                 <label className="flex flex-col gap-1">
-                  <span className="text-slate-400 text-xs">Due {canManage ? "" : "(ask for an extension to change)"}</span>
+                  <span className="text-slate-400 text-xs">Due {canManage ? "" : SIMPLE ? "(press Ask for more time to change it)" : "(ask for an extension to change)"}</span>
                   <DateTimeField
                     value={task.due_date}
                     disabled={!canManage}
@@ -717,13 +848,13 @@ export function TaskDetail({
                     ariaLabel="Due"
                   />
                 </label>
-                <label className="flex flex-col gap-1">
+                {<label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Project</span>
                   <select value={task.project_id || ""} disabled={!canManage} onChange={(e) => e.target.value && patch({ project_id: e.target.value })} className={input}>
                     {lookups.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
-                </label>
-                {sectionsFor(lookups.projects, task.project_id).length > 0 && (
+                </label>}
+                {!SIMPLE && sectionsFor(lookups.projects, task.project_id).length > 0 && (
                   <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Section</span>
                     <select value={task.stage_id || ""} disabled={!canManage} onChange={(e) => e.target.value && patch({ stage_id: e.target.value })} className={input} aria-label="Section">
@@ -732,7 +863,7 @@ export function TaskDetail({
                     </select>
                   </label>
                 )}
-                <label className="flex flex-col gap-1">
+                {!SIMPLE && <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Remind me at {task.remind_at && !canWork ? "" : "(optional)"}</span>
                   <div className="flex gap-2">
                     <DateTimeField
@@ -746,8 +877,8 @@ export function TaskDetail({
                       <button onClick={() => patch({ remind_at: null })} className="text-xs text-slate-400 hover:text-white px-2" aria-label="Clear reminder">✕</button>
                     )}
                   </div>
-                </label>
-                <label className="flex flex-col gap-1">
+                </label>}
+                {!SIMPLE && <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Milestone</span>
                   <select value={task.milestone || ""} disabled={!canManage} onChange={(e) => patch({ milestone: e.target.value || null })} className={input}>
                     <option value="">None</option>
@@ -756,7 +887,7 @@ export function TaskDetail({
                       <option value={task.milestone}>{task.milestone}</option>
                     )}
                   </select>
-                </label>
+                </label>}
               </div>
 
               {/* Assignment (checklist #4): person and task manager */}
@@ -770,20 +901,20 @@ export function TaskDetail({
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
                   </label>
-                  <label className="flex flex-col gap-1">
+                  {!SIMPLE && <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Task manager</span>
                     <select value={task.task_manager_id || ""} disabled={!canManage} onChange={(e) => patch({ task_manager_id: e.target.value || null })} className={input}>
                       <option value="">None</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
-                  </label>
-                  <label className="flex flex-col gap-1">
+                  </label>}
+                  {!SIMPLE && <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">OKR key result</span>
                     <select value={task.key_result_id || ""} disabled={!canManage} onChange={(e) => patch({ key_result_id: e.target.value || null })} className={input}>
                       <option value="">Not linked</option>
                       {lookups.keyResults.map((k) => <option key={k.id} value={k.id}>{k.title}</option>)}
                     </select>
-                  </label>
+                  </label>}
                 </div>
               </div>
 
@@ -797,7 +928,7 @@ export function TaskDetail({
                   <p className="text-xs text-slate-400">Calculated from the {subtasks.length} subtasks below.</p>
                 ) : (
                   <div className="flex flex-wrap gap-2 items-center text-sm">
-                    <select
+                    {!SIMPLE && <select
                       value={task.progress_type || "percent"}
                       disabled={!canManage}
                       onChange={(e) => patch({ progress_type: e.target.value })}
@@ -806,8 +937,8 @@ export function TaskDetail({
                       <option value="percent">Percentage</option>
                       <option value="number">Number of units</option>
                       <option value="amount">Amount</option>
-                    </select>
-                    {task.progress_type === "number" || task.progress_type === "amount" ? (
+                    </select>}
+                    {!SIMPLE && (task.progress_type === "number" || task.progress_type === "amount") ? (
                       <>
                         <input
                           key={`cur-${task.progress_current}`}
@@ -844,7 +975,7 @@ export function TaskDetail({
               {/* Subtasks = checklist with deadlines and quantities */}
               <div className={section}>
                 <h4 className={h4}>
-                  Subtasks / checklist ({subtasks.filter((s) => s.done).length} done, {subtasks.filter((s) => !s.done).length} left)
+                  {SIMPLE ? "Subtasks" : "Subtasks / checklist"} ({subtasks.filter((s) => s.done).length} done, {subtasks.filter((s) => !s.done).length} left)
                 </h4>
                 <div className="space-y-2">
                   {subtasks.map((st) => {
@@ -870,7 +1001,7 @@ export function TaskDetail({
                             <button onClick={() => removeSubtask(st)} className="text-slate-500 hover:text-red-400 text-xs px-1" aria-label="Remove subtask">✕</button>
                           )}
                         </div>
-                        {can && (
+                        {can && !SIMPLE && (
                           <div className="flex flex-wrap gap-2 mt-2 items-center">
                             <select value={st.assigned_to || ""} disabled={!canPlan} onChange={(e) => saveSubtask(st, { assigned_to: e.target.value || null })} className={`${input} text-xs py-1`} aria-label="Subtask assignee">
                               <option value="">Unassigned</option>
@@ -913,12 +1044,12 @@ export function TaskDetail({
                   <div className="flex flex-wrap gap-2 mt-3">
                     <input value={newSub.title} onChange={(e) => setNewSub({ ...newSub, title: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && once("subtask", addSubtask)}
-                      placeholder="Add a subtask or checklist item..." className={`${input} flex-1 min-w-48`} />
-                    <input type="datetime-local" value={newSub.due} onChange={(e) => setNewSub({ ...newSub, due: e.target.value })} className={input} aria-label="Deadline" />
-                    <select value={newSub.assignee} onChange={(e) => setNewSub({ ...newSub, assignee: e.target.value })} className={input} aria-label="Assign to">
+                      placeholder={SIMPLE ? "Add a subtask..." : "Add a subtask or checklist item..."} className={`${input} flex-1 min-w-48`} />
+                    {!SIMPLE && <input type="datetime-local" value={newSub.due} onChange={(e) => setNewSub({ ...newSub, due: e.target.value })} className={input} aria-label="Deadline" />}
+                    {!SIMPLE && <select value={newSub.assignee} onChange={(e) => setNewSub({ ...newSub, assignee: e.target.value })} className={input} aria-label="Assign to">
                       <option value="">Unassigned</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-                    </select>
+                    </select>}
                     <button onClick={() => once("subtask", addSubtask)} disabled={busy("subtask")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">Add</button>
                   </div>
                 )}
@@ -926,70 +1057,25 @@ export function TaskDetail({
 
               {/* Deadline agreement, review and reward/penalty: the steps of
                   the assignment flow either side of the work itself. */}
-              <TaskWorkflow
-                task={task}
-                people={people}
-                me={lookups.me}
-                canManage={canManage}
-                isSuper={!!access?.isSuper}
-                onReplace={onReplace}
-                onError={onError}
-                onInfo={onInfo}
-              />
-
-              {/* Deadline extension (checklist #43 / #44) */}
-              {(canWork || extensions.length > 0) && (
-                <div className={section}>
-                  <h4 className={h4}>Deadline extension</h4>
-                  {extensions.map((x) => (
-                    <div key={x.id} className="bg-slate-900 rounded p-3 mb-2 text-sm">
-                      <div className="flex justify-between gap-2">
-                        <span className="text-slate-300">"{x.reason}"</span>
-                        <span className={`text-xs shrink-0 ${x.status === "approved" ? "text-green-400" : x.status === "rejected" ? "text-red-400" : "text-yellow-400"}`}>
-                          {x.status}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        {nameOf(people, x.requested_by, "Someone")} asked for {formatDue(x.requested_date)}
-                        {x.approved_date && ` · granted ${formatDue(x.approved_date)}`}
-                        {x.review_note && ` · note: ${x.review_note}`}
-                      </p>
-                      {x.can_review && (
-                        <div className="mt-2 space-y-2">
-                          <div className="flex flex-wrap gap-2">
-                            <button onClick={() => decide(x, "approved")} className="px-3 py-1.5 bg-green-700 hover:bg-green-600 rounded text-xs">Approve as asked</button>
-                            <button onClick={() => decide(x, "rejected")} className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 rounded text-xs">Reject</button>
-                          </div>
-                          <div className="flex flex-wrap gap-2 items-center">
-                            <input type="datetime-local" value={amend[x.id]?.date || ""}
-                              onChange={(e) => setAmend({ ...amend, [x.id]: { ...(amend[x.id] || { note: "" }), date: e.target.value } })}
-                              className={`${input} text-xs py-1`} aria-label="Different deadline" />
-                            <button onClick={() => decide(x, "approved", amend[x.id]?.date)} disabled={!amend[x.id]?.date}
-                              className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 rounded text-xs">Approve with this date</button>
-                          </div>
-                          <input value={amend[x.id]?.note || ""}
-                            onChange={(e) => setAmend({ ...amend, [x.id]: { ...(amend[x.id] || { date: "" }), note: e.target.value } })}
-                            placeholder="Note to the requester (optional)" className={`${input} text-xs py-1 w-full`} />
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  {canWork && !extensions.some((x) => x.status === "pending") && (
-                    <div className="space-y-2">
-                      {overdue && <p className="text-xs text-red-400">This task is overdue - give a reason for the delay.</p>}
-                      <input value={ext.reason} onChange={(e) => setExt({ ...ext, reason: e.target.value })}
-                        placeholder="Reason for the delay..." className={`${input} w-full`} />
-                      <div className="flex flex-wrap gap-2">
-                        <input type="datetime-local" value={ext.date} onChange={(e) => setExt({ ...ext, date: e.target.value })} className={input} aria-label="Requested deadline" />
-                        <button onClick={() => once("extension", requestExtension)} disabled={busy("extension")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">Request extension</button>
-                      </div>
-                    </div>
-                  )}
-                </div>
+              {!SIMPLE && (
+                <TaskWorkflow
+                  task={task}
+                  people={people}
+                  me={lookups.me}
+                  canManage={canManage}
+                  isSuper={!!access?.isSuper}
+                  onReplace={onReplace}
+                  onError={onError}
+                  onInfo={onInfo}
+                  onChanged={load}
+                  reloadKey={extensions.map((x) => `${x.id}:${x.status}`).join(",")}
+                />
               )}
 
+              {!SIMPLE && extensionSection}
+
               {/* Dependencies */}
-              <div className={section}>
+              {!SIMPLE && <div className={section}>
                 <h4 className={h4}>Depends on</h4>
                 {deps.length === 0 && <p className="text-sm text-slate-500 mb-2">Nothing</p>}
                 {deps.map((id) => {
@@ -1030,10 +1116,10 @@ export function TaskDetail({
                     ))}
                   </select>
                 )}
-              </div>
+              </div>}
 
               {/* Assignors (SOW #44) */}
-              <div className={section}>
+              {!SIMPLE && <div className={section}>
                 <h4 className={h4}>Assignors ({assignorIds.length})</h4>
                 <div className="flex flex-wrap gap-2">
                   <span className="px-2 py-1 bg-slate-700 rounded text-xs">{nameOf(people, task.created_by, "Creator")} <span className="text-slate-400">(created)</span></span>
@@ -1068,7 +1154,7 @@ export function TaskDetail({
                     {people.filter((m) => !assignorIds.includes(m.id)).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </select>
                 )}
-              </div>
+              </div>}
             </>
           )}
 
@@ -1078,11 +1164,11 @@ export function TaskDetail({
               {canWork && (
                 <div className="bg-slate-900 rounded p-3 mb-4 text-sm space-y-2">
                   <div className="flex flex-wrap gap-2 items-center">
-                    <select value={upload.visibility} onChange={(e) => setUpload({ ...upload, visibility: e.target.value })} className={input} aria-label="Who can open it">
+                    {!SIMPLE && <select value={upload.visibility} onChange={(e) => setUpload({ ...upload, visibility: e.target.value })} className={input} aria-label="Who can open it">
                       <option value="all">Everyone on the task</option>
                       <option value="restricted">Restricted (assignor, assignee, supervisors)</option>
                       <option value="custom">Restricted + people I choose</option>
-                    </select>
+                    </select>}
                     <label className="inline-block">
                       <input type="file" className="hidden" disabled={upload.busy}
                         onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadFile(f); e.target.value = ""; }} />
@@ -1153,10 +1239,10 @@ export function TaskDetail({
                   <button onClick={() => once("comment", postComment)} disabled={busy("comment") || !newComment.trim() || (!!privateTo && privateTo.length === 0)} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm">
                     {privateTo ? "Send privately" : "Post"}
                   </button>
-                  <label className="flex items-center gap-2 text-sm text-slate-300">
+                  {!SIMPLE && <label className="flex items-center gap-2 text-sm text-slate-300">
                     <input type="checkbox" checked={!!privateTo} onChange={(e) => setPrivateTo(e.target.checked ? [] : null)} />
                     🔒 Private - only people I pick can see it
-                  </label>
+                  </label>}
                 </div>
                 {privateTo && (
                   <div className="mt-2 bg-slate-900 rounded p-2">
@@ -1269,4 +1355,82 @@ export function PeoplePicker({
       })}
     </div>
   );
+}
+
+/**
+ * Simple mode: one line at the top of the task that says, in plain words,
+ * whose turn it is and what to press. Nobody should have to work out the
+ * workflow from the buttons.
+ */
+function NextStep({
+  task,
+  me,
+  canManage,
+  doer,
+  people,
+  needsDecision,
+  toDecide,
+  waitingOnMine,
+  allTicked,
+}: {
+  task: Task;
+  me: string | null;
+  canManage: boolean;
+  doer: boolean;
+  people: Person[];
+  needsDecision: boolean;
+  toDecide: Extension | null;
+  waitingOnMine: boolean;
+  allTicked: boolean;
+}) {
+  const review = (task as any).review_status as string | undefined;
+  const reviewNote = (task as any).review_note as string | undefined;
+  const mine = !!me && task.assigned_to === me;
+  const who = nameOf(people, task.assigned_to, "the assignee");
+  const due = task.due_date ? formatDue(task.due_date) : "";
+  const late = isOverdue(task);
+
+  const blue = "bg-blue-950 border-blue-800 text-blue-100";
+  const amber = "bg-amber-950 border-amber-800 text-amber-200";
+  let tone = "bg-slate-900 border-slate-700 text-slate-200";
+  let text: string;
+
+  if (task.status === "closed") {
+    tone = "bg-green-950 border-green-800 text-green-200";
+    text = "✓ Approved and closed. Nothing left to do.";
+  } else if (task.status === "done") {
+    if (task.personal) {
+      text = "✓ Done.";
+    } else if (review === "pending" && canManage && !mine) {
+      tone = blue;
+      text = `👉 Your turn: ${who} finished this. Check it (a call, a demo, a quick look), then press Approve or Send back below.`;
+    } else {
+      text = "⏳ Done. Waiting for your supervisor to review it.";
+    }
+  } else if (toDecide && canManage && !mine) {
+    tone = amber;
+    text = `👉 Your turn: ${who} asked for more time, until ${formatDue(toDecide.requested_date)}. Approve or reject it below.`;
+  } else if (doer && needsDecision) {
+    tone = blue;
+    text = `👉 First: can you finish this by ${due}? Press Accept deadline below, or I need more time.`;
+  } else if (doer && waitingOnMine) {
+    text = `⏳ You asked for more time. Until it's decided, the deadline is still ${due}.`;
+  } else if (doer && review === "sent_back" && reviewNote) {
+    tone = amber;
+    text = `↩ Sent back: "${reviewNote}". Fix it, then press ✓ Mark as done.`;
+  } else if (doer && allTicked) {
+    tone = blue;
+    text = "👉 All subtasks are ticked. Press ✓ Mark as done to send it for review.";
+  } else if (doer) {
+    tone = late ? "bg-red-950 border-red-800 text-red-200" : blue;
+    text = late
+      ? `👉 This was due ${due}. Finish it and press ✓ Mark as done, or ask for more time.`
+      : `👉 Your turn: work on it, tick off subtasks as you go, then press ✓ Mark as done.${due ? ` Due ${due}.` : ""}`;
+  } else if (task.status === "need_help") {
+    tone = amber;
+    text = `🙋 ${who} is stuck and needs help. Leave a comment or give them a call.`;
+  } else {
+    text = `⏳ With ${who}${due ? `, due ${due}` : ""}.${late ? " It's overdue." : ""}`;
+  }
+  return <div className={`border rounded px-3 py-2 text-sm mb-1 ${tone}`}>{text}</div>;
 }

@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.blocking import BlockingScheduler
 from supabase import create_client
 
-VERSION = "2026-10-06"
+VERSION = "2026-10-08"
 
 
 def _env_number(name: str, default, cast=int):
@@ -217,12 +217,23 @@ class Desks:
         return {x for x in ids if x and x in on_desk}
 
 
+_units_warned = [False]
+
+
 class Units:
     """Who belongs to which team, department and custom group."""
 
     def __init__(self):
-        teams = fetch_all(lambda: supabase.table("teams").select("id, department_id, manager_id").order("id"))
-        members = fetch_all(lambda: supabase.table("team_members").select("team_id, user_id").order("team_id"))
+        # Teams are optional: a database without them must not stop every
+        # reminder, so a missing table just means "no teams".
+        try:
+            teams = fetch_all(lambda: supabase.table("teams").select("id, department_id, manager_id").order("id"))
+            members = fetch_all(lambda: supabase.table("team_members").select("team_id, user_id").order("team_id"))
+        except Exception as exc:
+            if not _units_warned[0]:
+                warn(f"teams not readable, treating as none: {exc!r}")
+                _units_warned[0] = True
+            teams, members = [], []
         try:
             groups = fetch_all(lambda: supabase.table("group_members").select("group_id, user_id").order("group_id"))
         except Exception:
@@ -514,6 +525,7 @@ TG_ICONS = {
     "checklist_due": "⏰",
     "bod_summary": "☀️",
     "eod_summary": "🌙",
+    "reminder": "⏰",
     "update_request": "📝",
 }
 
@@ -1041,72 +1053,176 @@ def recurring_update_requests() -> None:
     log(f"checked for quiet tasks: {asked} update request(s)")
 
 
-def _summaries():
-    """(user_id, open, due_today, overdue, desk_overdue) for every user."""
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _tally():
+    """Per person, the running score of their work: how many tasks they have,
+    how many were done yesterday, how many today, how many are left.
+
+    "Assigned" is every task they're doing that hasn't been cleared away yet:
+    everything still open, plus finished work that hasn't been archived (and
+    anything finished since yesterday, even if someone archived it already),
+    so the number stays steady while "done" grows and "to go" shrinks.
+
+    Returns (per_user, per_desk) where each value is a dict of counts:
+    total, earlier, yesterday, today, to_go, overdue, due_today.
+    """
     now = now_utc()
-    today = now.astimezone(LOCAL_TZ).date()
-    tasks = open_tasks()
-    units = Units()
-    desks = Desks()
+    local_now = now.astimezone(LOCAL_TZ)
+    today = local_now.date()
+    yesterday = today - timedelta(days=1)
+    since = datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    mine = {uid: [] for uid in desks.people}
-    desk_overdue = {}
-    for task in tasks:
+    # Two plain queries rather than one OR filter (the pinned client library
+    # has no .or_()): everything not archived, plus anything archived that
+    # was finished since yesterday.
+    live = fetch_all(
+        lambda: supabase.table("tasks")
+        .select(TASK_COLUMNS + ", completed_at")
+        .is_("archived_at", "null")
+        .order("id")
+    )
+    recent = fetch_all(
+        lambda: supabase.table("tasks")
+        .select(TASK_COLUMNS + ", completed_at")
+        .not_.is_("archived_at", "null")
+        .gte("completed_at", since_text)
+        .order("id")
+    )
+    rows = list({t["id"]: t for t in live + recent}.values())
+    units, desks = Units(), Desks()
+
+    def blank():
+        return {"total": 0, "earlier": 0, "yesterday": 0, "today": 0, "to_go": 0, "overdue": 0, "due_today": 0}
+
+    per_user, per_desk = {}, {}
+    for task in rows:
         try:
+            # Private to-dos are nobody's business but their owner's, and
+            # nobody assigned them - they're not part of the score.
+            if task.get("personal"):
+                continue
+            people = desks.only_on_desk(task.get("desk_id"), doers(task, units))
+            if not people:
+                continue
+            finished = task.get("status") in FINISHED
+            if not finished and task.get("archived_at"):
+                continue
+            if finished:
+                done_at = parse(task.get("completed_at"))
+                day = done_at.astimezone(LOCAL_TZ).date() if done_at else None
+                bucket = "today" if day == today else "yesterday" if day == yesterday else "earlier"
+            else:
+                bucket = "to_go"
             due = parse(task.get("due_date"))
-            late = bool(due and due < now)
-            if late and not task.get("personal"):
-                desk_overdue[task["desk_id"]] = desk_overdue.get(task["desk_id"], 0) + 1
-            owners = {owner_of(task)} if task.get("personal") else doers(task, units)
-            for uid in desks.only_on_desk(task.get("desk_id"), owners):
-                if uid in mine:
-                    mine[uid].append((due, late))
+            late = (not finished) and bool(due and due < now)
+            due_now = (not finished) and bool(due and not late and due.astimezone(LOCAL_TZ).date() == today)
+            for counts in [per_user.setdefault(u, blank()) for u in people] + [per_desk.setdefault(task.get("desk_id"), blank())]:
+                counts["total"] += 1
+                counts[bucket] += 1
+                if late:
+                    counts["overdue"] += 1
+                if due_now:
+                    counts["due_today"] += 1
         except Exception as exc:
-            warn(f"_summaries: skipping task {task.get('id')}: {exc!r}")
+            warn(f"_tally: skipping task {task.get('id')}: {exc!r}")
             continue
-
-    for uid, info in desks.people.items():
-        try:
-            items = mine.get(uid, [])
-            due_today = sum(1 for due, late in items if due and not late and due.astimezone(LOCAL_TZ).date() == today)
-            overdue = sum(1 for _, late in items if late)
-            team_late = sum(desk_overdue.get(d, 0) for d in info["leads"]) if info["leads"] else None
-            yield uid, len(items), due_today, overdue, team_late
-        except Exception as exc:
-            warn(f"_summaries: skipping user {uid}: {exc!r}")
-            continue
+    return per_user, per_desk, desks
 
 
-def _sentence(*parts) -> str:
-    """Join clauses into one message with single full stops."""
-    return ". ".join(p.strip().rstrip(".") for p in parts if p and p.strip()) + "."
+def _team_line(info, per_desk, with_today: bool) -> str:
+    """For supervisors and admins: the same score for every desk they lead."""
+    team = {"total": 0, "today": 0, "yesterday": 0, "to_go": 0, "overdue": 0}
+    for d in info["leads"]:
+        c = per_desk.get(d)
+        if c:
+            for k in team:
+                team[k] += c[k]
+    if not team["total"]:
+        return ""
+    done = f"{team['today']} done today" if with_today else f"{team['yesterday']} done yesterday"
+    line = f"Your team: {team['total']} assigned, {done}, {team['to_go']} to go"
+    return line + (f" ({team['overdue']} overdue)" if team["overdue"] else "")
 
 
 def start_of_day() -> None:
-    """#35: what each person has on today - sent to every user."""
+    """#35: each person's day ahead - what's left, what's due today, what's late."""
+    per_user, per_desk, desks = _tally()
     count = 0
-    for uid, open_count, due_today, overdue, team_late in _summaries():
-        if open_count == 0:
-            mine = "Nothing is assigned to you right now"
-        else:
-            mine = f"{open_count} open, {due_today} due today" + (f", {overdue} overdue" if overdue else "")
-        desk = f"Across the desk: {team_late} overdue" if team_late else ""
-        notify(uid, None, "bod_summary", "Your day", _sentence(mine, desk), subject="BusyBee: your day")
-        count += 1
+    for uid, info in desks.people.items():
+        try:
+            c = per_user.get(uid)
+            lines = []
+            if c and c["to_go"]:
+                left = f"{_plural(c['to_go'], 'task')} to go"
+                extra = []
+                if c["due_today"]:
+                    extra.append(f"{c['due_today']} due today")
+                if c["overdue"]:
+                    extra.append(f"{c['overdue']} overdue")
+                lines.append(left + (f" ({', '.join(extra)})" if extra else ""))
+            elif c and c["total"]:
+                lines.append("Nothing left to do. Everything assigned to you is done")
+            if c and c["yesterday"]:
+                lines.append(f"Yesterday you finished {c['yesterday']}")
+            team = _team_line(info, per_desk, with_today=False) if info["leads"] else ""
+            if team:
+                lines.append(team)
+            if not lines:
+                continue
+            notify(uid, None, "bod_summary", "Good morning", ".\n".join(lines) + ".", subject="BusyBee: your day")
+            count += 1
+        except Exception as exc:
+            warn(f"start_of_day: skipping {uid}: {exc!r}")
     log(f"sent start-of-day summaries to {count}")
 
 
 def end_of_day() -> None:
-    """#35: what is still outstanding at the end of the day - sent to every user."""
+    """The day's score, per person, at the end of the working day:
+
+        8 tasks assigned to you
+        3 done yesterday
+        2 done today
+        3 to go (1 overdue)
+
+    The "assigned" figure holds steady while "done" grows and "to go"
+    shrinks, so it reads like a countdown. Supervisors also get their team's
+    score. Nobody with nothing assigned gets a message.
+    """
+    per_user, per_desk, desks = _tally()
     count = 0
-    for uid, open_count, due_today, overdue, team_late in _summaries():
-        if due_today == 0 and overdue == 0:
-            mine = f"{open_count} open, nothing overdue. Good stopping point" if open_count else "Nothing open. Good stopping point"
-        else:
-            mine = f"{due_today} still due today, {overdue} overdue"
-        desk = f"Across the desk: {team_late} overdue" if team_late else ""
-        notify(uid, None, "eod_summary", "End of day", _sentence(mine, desk), subject="BusyBee: end of day")
-        count += 1
+    for uid, info in desks.people.items():
+        try:
+            c = per_user.get(uid)
+            lines = []
+            if c and c["total"]:
+                lines.append(f"{_plural(c['total'], 'task')} assigned to you")
+                if c["earlier"]:
+                    lines.append(f"{c['earlier']} done before yesterday")
+                if c["yesterday"]:
+                    lines.append(f"{c['yesterday']} done yesterday")
+                lines.append(f"{c['today']} done today")
+                if c["to_go"]:
+                    lines.append(f"{c['to_go']} to go" + (f" ({c['overdue']} overdue)" if c["overdue"] else ""))
+                else:
+                    lines.append("All done 🎉")
+            team = _team_line(info, per_desk, with_today=True) if info["leads"] else ""
+            if team:
+                if lines:
+                    lines.append("")
+                lines.append(team)
+            if not lines:
+                continue
+            title = "End of day"
+            if c and c["total"]:
+                title = f"End of day: {c['today']} done today, {c['to_go']} to go"
+            notify(uid, None, "eod_summary", title, "\n".join(lines), subject=f"BusyBee: {title.lower()}")
+            count += 1
+        except Exception as exc:
+            warn(f"end_of_day: skipping {uid}: {exc!r}")
     log(f"sent end-of-day summaries to {count}")
 
 

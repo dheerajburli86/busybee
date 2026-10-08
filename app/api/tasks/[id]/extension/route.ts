@@ -1,16 +1,10 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import {
-  deny,
-  logActivity,
-  normalizeRole,
-  notifyMany,
-  requireUser,
-  SUPER_ROLES,
-  taskAccess,
-  taskAudience,
-} from "@/lib/permissions";
+import { deny, logActivity, notifyMany, requireUser, taskAccess, taskAudience } from "@/lib/permissions";
+import { decidersFor } from "@/lib/workflow";
+import { isFinished } from "@/lib/status";
 import { formatForPeople, normalizeTimestamp } from "@/lib/format";
+import { createAdminClient } from "@/lib/supabase-admin";
 
 // Checklist #43 / #44, SOW #45: overdue module.
 // The person doing the work states a reason and asks for a new deadline; the
@@ -18,36 +12,6 @@ import { formatForPeople, normalizeTimestamp } from "@/lib/format";
 // rejects it. Nobody may approve their own request.
 
 type Params = { params: Promise<{ id: string }> };
-
-/**
- * Everyone who can decide on a request: the task's creator, task manager and
- * extra assignors, and the manager of the project the task belongs to. If
- * that leaves nobody but the requester, the desk's supervisors.
- */
-async function decidersFor(supabase: any, task: any, requester: string): Promise<string[]> {
-  const ids = new Set<string>();
-  [task.created_by, task.task_manager_id].forEach((x: string | null) => x && ids.add(x));
-  const { data: extra } = await supabase.from("task_assignors").select("user_id").eq("task_id", task.id);
-  (extra || []).forEach((x: any) => x.user_id && ids.add(x.user_id));
-
-  if (task.project_id) {
-    const [{ data: project }, { data: managers }] = await Promise.all([
-      supabase.from("projects").select("manager_id").eq("id", task.project_id).maybeSingle(),
-      supabase.from("project_members").select("user_id").eq("project_id", task.project_id).eq("role", "manager"),
-    ]);
-    if (project?.manager_id) ids.add(project.manager_id);
-    (managers || []).forEach((m: any) => m.user_id && ids.add(m.user_id));
-  }
-
-  ids.delete(requester);
-  if (ids.size === 0) {
-    const { data: desk } = await supabase.from("desk_members").select("user_id, role").eq("desk_id", task.desk_id);
-    (desk || [])
-      .filter((m: any) => m.user_id !== requester && SUPER_ROLES.includes(normalizeRole(m.role)))
-      .forEach((m: any) => ids.add(m.user_id));
-  }
-  return Array.from(ids);
-}
 
 export async function GET(_req: Request, { params }: Params) {
   try {
@@ -103,6 +67,9 @@ export async function POST(req: Request, { params }: Params) {
 
     if (access.task.due_date && new Date(requested_date) <= new Date(access.task.due_date)) {
       return NextResponse.json({ error: "The new date must be after the current deadline" }, { status: 400 });
+    }
+    if (new Date(requested_date).getTime() <= Date.now()) {
+      return NextResponse.json({ error: "The new date has to be in the future" }, { status: 400 });
     }
 
     const { data: open } = await supabase
@@ -208,6 +175,17 @@ export async function PUT(req: Request, { params }: Params) {
       if (new Date(finalDate).getTime() <= Date.now()) {
         return NextResponse.json({ error: "The new deadline has to be in the future" }, { status: 400 });
       }
+      // The task may have changed while the request waited: never move a
+      // deadline backwards, and don't move one on finished work.
+      if (isFinished(access.task.status)) {
+        return NextResponse.json({ error: "This task is already finished, so its deadline can't move" }, { status: 400 });
+      }
+      if (access.task.due_date && new Date(finalDate).getTime() <= new Date(access.task.due_date).getTime()) {
+        return NextResponse.json(
+          { error: `The deadline is already ${formatForPeople(access.task.due_date)} - pick a later date or reject the request` },
+          { status: 400 }
+        );
+      }
     }
 
     // The .eq("status", "pending") guard makes this update atomic: if two
@@ -245,6 +223,46 @@ export async function PUT(req: Request, { params }: Params) {
     }
 
     const amended = finalDate && new Date(finalDate).getTime() !== new Date(existing.requested_date).getTime();
+
+    // Keep the deadline agreement in step with the decision, so nobody is
+    // asked a question that's already answered:
+    //   approved as asked   -> the person asked for this exact date, so it
+    //                          counts as accepted (no "confirm the new date").
+    //   approved, other date -> they're asked to accept the new date.
+    //   rejected            -> their "it won't work" is cleared, so they're
+    //                          asked again to accept the original deadline.
+    // Written with the service key: acceptances can otherwise only be written
+    // by the person themselves.
+    const admin = createAdminClient();
+    if (admin) {
+      try {
+        if (status === "approved" && finalDate && !amended) {
+          const { error: accErr } = await admin.from("task_acceptances").upsert(
+            {
+              task_id: id,
+              user_id: existing.requested_by,
+              desk_id: access.task.desk_id,
+              decision: "accepted",
+              note: "Asked for this date",
+              due_date_at_decision: finalDate,
+              created_at: new Date().toISOString(),
+            },
+            { onConflict: "task_id,user_id" }
+          );
+          if (accErr) console.error("extension: could not record acceptance of the approved date", accErr);
+        } else if (status === "rejected") {
+          const { error: delErr } = await admin
+            .from("task_acceptances")
+            .delete()
+            .eq("task_id", id)
+            .eq("user_id", existing.requested_by)
+            .eq("decision", "declined");
+          if (delErr) console.error("extension: could not clear the declined acceptance", delErr);
+        }
+      } catch (err) {
+        console.error("extension: could not update the deadline agreement", err);
+      }
+    }
     await logActivity(supabase, {
       entity_type: "task",
       entity_id: id,
@@ -262,7 +280,7 @@ export async function PUT(req: Request, { params }: Params) {
     const message =
       status === "approved"
         ? `New deadline for ${access.task.title}: ${formatForPeople(finalDate)}${amended ? ` (you asked for ${formatForPeople(existing.requested_date)})` : ""}`
-        : review_note || `Your extension request for ${access.task.title} was not approved`;
+        : `${review_note ? `"${review_note}" - ` : ""}Your request for more time on ${access.task.title} was not approved. The deadline stays ${formatForPeople(access.task.due_date)}. Open the task to accept it.`;
     await notifyMany(supabase, [existing.requested_by], {
       task_id: id,
       type: "extension_reviewed",

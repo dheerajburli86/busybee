@@ -19,6 +19,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       canWork: access.canWork,
       isSuper: access.isSuper,
       isAssignor: access.isAssignor,
+      isWorker: access.isWorker,
       role: access.role,
     });
   } catch (error: any) {

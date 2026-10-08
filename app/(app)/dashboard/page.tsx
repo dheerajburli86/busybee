@@ -6,7 +6,32 @@ import { sendJSON } from "@/lib/api";
 import { OPEN_TASK_EVENT } from "@/components/NotificationBell";
 import { TaskDetail } from "@/components/tasks/TaskDetail";
 import { GanttView } from "@/components/tasks/GanttView";
+import { SIMPLE } from "@/lib/simple";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
+
+// One-tap deadlines for the create form (simple mode). Each lands at 6 PM,
+// the end of a working day, so "tomorrow" means tomorrow evening.
+function quickDeadlines(): { label: string; value: string }[] {
+  const at6 = (d: Date) => {
+    const x = new Date(d);
+    x.setHours(18, 0, 0, 0);
+    return x;
+  };
+  const plus = (days: number) => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return at6(d);
+  };
+  const out: { label: string; value: string }[] = [];
+  if (at6(new Date()).getTime() - Date.now() > 60 * 60 * 1000) out.push({ label: "Today", value: toLocalInput(at6(new Date()).toISOString()) });
+  out.push({ label: "Tomorrow", value: toLocalInput(plus(1).toISOString()) });
+  out.push({ label: "In 3 days", value: toLocalInput(plus(3).toISOString()) });
+  const monday = new Date();
+  monday.setDate(monday.getDate() + (((8 - monday.getDay()) % 7) || 7));
+  out.push({ label: "Next Monday", value: toLocalInput(at6(monday).toISOString()) });
+  out.push({ label: "In 2 weeks", value: toLocalInput(plus(14).toISOString()) });
+  return out;
+}
 import {
   COLOR_SWATCHES,
   Lookups,
@@ -18,6 +43,7 @@ import {
   milestoneLabel,
   nameOf,
   sectionsFor,
+  toLocalInput,
 } from "@/components/tasks/types";
 
 const SORT_OPTIONS = [
@@ -91,6 +117,8 @@ export default function DashboardPage() {
     // Step 2 of the assignment flow: one or more people, picked first.
     assignees: [] as string[],
     color: "",
+    // Simple mode: subtasks typed at creation, one per line.
+    subtasks: "",
   });
   const [creating, setCreating] = useState(false);
   const [showMore, setShowMore] = useState(false);
@@ -107,7 +135,12 @@ export default function DashboardPage() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("project")) setProjectF(params.get("project") as string);
+    if (params.get("project")) {
+      const pid = params.get("project") as string;
+      setProjectF(pid);
+      // New tasks made while looking at a project go into it unless changed.
+      if (SIMPLE) setForm((f) => ({ ...f, project: pid }));
+    }
     if (params.get("task")) setOpenId(params.get("task"));
     if (params.get("assignee")) {
       setAssigneeF(params.get("assignee") as string);
@@ -237,6 +270,11 @@ export default function DashboardPage() {
     if (!form.title.trim()) return;
     const due = fromLocalInput(form.due);
     const others = form.assignees.filter((id) => id !== lookups.me);
+    // Simple mode: every task belongs to someone, or nobody gets reminded.
+    if (SIMPLE && form.assignees.length === 0) {
+      showError("Pick who this is for first (step 1).");
+      return;
+    }
     // Steps 3-4: anyone else given this work has to accept a deadline, so
     // there must be one to accept.
     if (others.length > 0 && !due) {
@@ -250,7 +288,7 @@ export default function DashboardPage() {
       priority: form.priority,
       due_date: due || null,
       start_date: fromLocalInput(form.start),
-      project_id: form.project || projectF || null,
+      project_id: SIMPLE ? form.project || null : form.project || projectF || null,
       stage_id: form.section || null,
       color: form.color || null,
     };
@@ -259,6 +297,7 @@ export default function DashboardPage() {
     const targets: (string | null)[] = form.assignees.length ? form.assignees : [null];
     const made: Task[] = [];
     const failed: string[] = [];
+    const subFailed: string[] = [];
     const failedIds: string[] = [];
     try {
       for (const assignee of targets) {
@@ -270,6 +309,26 @@ export default function DashboardPage() {
           if (assignee) failedIds.push(assignee);
         }
       }
+      // Subtasks typed in the form go onto every copy, in the order written.
+      const subLines = form.subtasks
+        .split("\n")
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .slice(0, 50);
+      if (subLines.length) {
+        for (const t of made) {
+          let added = 0;
+          for (const title of subLines) {
+            try {
+              await sendJSON(`/api/tasks/${t.id}/subtasks`, "POST", { title });
+              added += 1;
+            } catch (err: any) {
+              subFailed.push(`"${title}"`);
+            }
+          }
+          (t as any).subtask_count = added;
+        }
+      }
       if (made.length && failed.length) {
         // Keep what's needed to retry just the ones that didn't go through,
         // so nobody ends up with two copies.
@@ -277,7 +336,7 @@ export default function DashboardPage() {
         setForm({ ...form, assignees: failedIds });
       } else if (made.length) {
         setTasks((prev) => [...made, ...prev]);
-        setForm({ ...form, title: "", description: "", start: "", due: "", assignees: [], color: "" });
+        setForm({ ...form, title: "", description: "", start: "", due: "", assignees: [], color: "", subtasks: "" });
         // A new task may have created a project's first section; refresh the lookups quietly.
         const first = made[0];
         if (!sectionsFor(lookups.projects, first.project_id).some((x) => x.id === first.stage_id)) refreshProjects();
@@ -290,6 +349,8 @@ export default function DashboardPage() {
         );
       }
       if (failed.length) showError(`Not created - ${failed.join("; ")}`);
+      else if (subFailed.length)
+        showError(`Task created, but these subtasks didn't save: ${Array.from(new Set(subFailed)).join(", ")}. Open the task to add them.`);
     } finally {
       setCreating(false);
     }
@@ -464,6 +525,7 @@ export default function DashboardPage() {
 
       {/* Create */}
       <form onSubmit={createTask} className="bg-slate-800 p-3 sm:p-4 rounded border border-slate-700 mb-6 space-y-3">
+        {SIMPLE && <p className="text-sm font-semibold text-white">1. Who is this for?</p>}
         <AssigneePicker
           people={lookups.people}
           me={lookups.me}
@@ -472,9 +534,10 @@ export default function DashboardPage() {
           disabled={creating}
           loading={loading}
         />
+        {SIMPLE && <p className="text-sm font-semibold text-white pt-1">2. What needs doing?</p>}
         <input
           type="text"
-          placeholder="Task title..."
+          placeholder={SIMPLE ? "e.g. Update the sector list for LOCOM" : "Task title..."}
           value={form.title}
           onChange={(e) => setForm({ ...form, title: e.target.value })}
           disabled={creating}
@@ -488,9 +551,35 @@ export default function DashboardPage() {
           rows={2}
           className={`${inputCls} w-full resize-y`}
         />
+        {SIMPLE && (
+          <>
+            <textarea
+              placeholder="Subtasks (optional) - one per line, they get a tick box each"
+              value={form.subtasks}
+              onChange={(e) => setForm({ ...form, subtasks: e.target.value })}
+              disabled={creating}
+              rows={2}
+              className={`${inputCls} w-full resize-y`}
+              aria-label="Subtasks, one per line"
+            />
+            <p className="text-sm font-semibold text-white pt-1">3. By when?</p>
+            <div className="flex flex-wrap gap-2" role="group" aria-label="Quick deadline">
+              {quickDeadlines().map((q) => (
+                <button
+                  key={q.label}
+                  type="button"
+                  onClick={() => setForm({ ...form, due: q.value })}
+                  className={`px-3 py-1.5 rounded-full text-sm border ${form.due === q.value ? "bg-blue-600 border-blue-500 text-white" : "bg-slate-900 border-slate-600 text-slate-300 hover:border-slate-400"}`}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <div className="flex flex-wrap gap-2 items-end">
           <label className="flex flex-col text-xs text-slate-400 gap-1">
-            {form.assignees.some((id) => id !== lookups.me) ? "Deadline" : "Due (optional)"}
+            {form.assignees.some((id) => id !== lookups.me) ? (SIMPLE ? "Deadline (or pick a date and time)" : "Deadline") : "Due (optional)"}
             <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} className={inputCls} />
           </label>
           <label className="flex flex-col text-xs text-slate-400 gap-1">
@@ -499,18 +588,29 @@ export default function DashboardPage() {
               {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
             </select>
           </label>
-          <button type="button" onClick={() => setShowMore(!showMore)} className="text-sm text-blue-400 px-2 py-2">
-            {showMore ? "Fewer options" : "More options"}
-          </button>
+          {SIMPLE && lookups.projects.length > 0 && (
+            <label className="flex flex-col text-xs text-slate-400 gap-1">
+              Project
+              <select value={form.project} onChange={(e) => setForm({ ...form, project: e.target.value, section: "" })} className={inputCls}>
+                <option value="">General</option>
+                {lookups.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+          )}
+          {!SIMPLE && (
+            <button type="button" onClick={() => setShowMore(!showMore)} className="text-sm text-blue-400 px-2 py-2">
+              {showMore ? "Fewer options" : "More options"}
+            </button>
+          )}
           <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
             {creating
               ? "Creating..."
               : form.assignees.length > 1
-              ? `Add ${form.assignees.length} tasks`
-              : "Add Task"}
+              ? SIMPLE ? `Assign to ${form.assignees.length} people` : `Add ${form.assignees.length} tasks`
+              : SIMPLE ? "Assign task" : "Add Task"}
           </button>
         </div>
-        {showMore && (
+        {showMore && !SIMPLE && (
           <div className="flex flex-wrap gap-2 items-end">
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Start
@@ -576,7 +676,7 @@ export default function DashboardPage() {
         <div className="flex gap-1">
           <button onClick={() => setView("list")} className={pill(view === "list")}>List</button>
           <button onClick={() => setView("board")} className={pill(view === "board")}>Board</button>
-          <button onClick={() => setView("gantt")} className={pill(view === "gantt")}>Gantt</button>
+          {!SIMPLE && <button onClick={() => setView("gantt")} className={pill(view === "gantt")}>Gantt</button>}
         </div>
       </div>
       <div className="flex flex-wrap gap-2 mb-4 items-center">
@@ -590,7 +690,7 @@ export default function DashboardPage() {
             {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>Sort: {o.label}</option>)}
           </select>
         )}
-        {view === "board" && (
+        {view === "board" && !SIMPLE && (
           <select value={boardBy} onChange={(e) => setBoardBy(e.target.value)} className={inputCls} aria-label="Arrange board by">
             {BOARD_GROUPS.map((o) => <option key={o.value} value={o.value}>Arrange by: {o.label}</option>)}
           </select>
@@ -612,10 +712,12 @@ export default function DashboardPage() {
             <option value="none">Unassigned</option>
             {lookups.people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
           </select>
-          <select value={projectF} onChange={(e) => setProjectF(e.target.value)} className={inputCls} aria-label="Project">
-            <option value="">All projects</option>
-            {lookups.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          {(
+            <select value={projectF} onChange={(e) => setProjectF(e.target.value)} className={inputCls} aria-label="Project">
+              <option value="">All projects</option>
+              {lookups.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
           {activeFilters > 0 && (
             <button onClick={() => { setStatusF(""); setPriorityF(""); setAssigneeF(""); setProjectF(""); setMine(false); }} className="text-sm text-slate-400 hover:text-white px-2">
               Clear
@@ -654,8 +756,11 @@ export default function DashboardPage() {
                   <span>{PRIORITIES.find((p) => p.value === t.priority)?.label}</span>
                   {t.due_date && <span>Due {formatDue(t.due_date)}</span>}
                   {t.completed_at && <span>Finished {formatDue(t.completed_at)}</span>}
-                  {sectionName(t) && <span>§ {sectionName(t)}</span>}
-                  {t.milestone && <span>◆ {milestoneLabel(t.milestone)}</span>}
+                  {!SIMPLE && sectionName(t) && <span>§ {sectionName(t)}</span>}
+                  {!SIMPLE && t.milestone && <span>◆ {milestoneLabel(t.milestone)}</span>}
+                  {SIMPLE && t.project_id && lookups.projects.find((p) => p.id === t.project_id) && (
+                    <span>📁 {lookups.projects.find((p) => p.id === t.project_id)?.name}</span>
+                  )}
                   {(t.subtask_count || 0) > 0 && <span>{t.subtask_count} subtasks</span>}
                   {t.personal && <span>🔒 personal</span>}
                   <span className="ml-auto">👤 {nameOf(lookups.people, t.assigned_to)}</span>
@@ -670,7 +775,7 @@ export default function DashboardPage() {
             );
           })}
         </div>
-      ) : view === "gantt" ? (
+      ) : view === "gantt" && !SIMPLE ? (
         <GanttView
           tasks={filtered}
           people={lookups.people}

@@ -11,7 +11,7 @@
 // else sees only their own entries, which is enforced by the database rather
 // than by this page.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { rupees } from "@/components/tasks/TaskWorkflow";
 import { formatDue } from "@/components/tasks/types";
@@ -94,7 +94,11 @@ export default function PayrollPage() {
   const formReady = !!fPerson && !!fTask && Number.isFinite(amountNum) && amountNum > 0 && fReason.trim().length > 0;
   const personName = people.find((p) => p.id === fPerson)?.name || "";
 
+  const recordLock = useRef(false);
   const record = async () => {
+    // A ref, not state: a fast double click must never record money twice.
+    if (recordLock.current) return;
+    recordLock.current = true;
     setSaving(true);
     setFormMsg(null);
     try {
@@ -116,6 +120,7 @@ export default function PayrollPage() {
       setFormMsg({ ok: false, text: e.message });
       setConfirming(false);
     } finally {
+      recordLock.current = false;
       setSaving(false);
     }
   };
@@ -209,66 +214,82 @@ export default function PayrollPage() {
 
         {isSupervisor && (
           <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-6">
-            <h2 className="font-semibold mb-3">Record a reward or penalty</h2>
-            <div className="grid sm:grid-cols-[1fr_auto_160px] gap-3 mb-3">
-              <select
-                value={fPerson}
-                onChange={(e) => { setFPerson(e.target.value); setFTask(""); setConfirming(false); }}
-                className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
-                aria-label="Person"
-              >
-                <option value="">Choose a person...</option>
-                {people.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-              <div className="flex rounded overflow-hidden border border-slate-600" role="group" aria-label="Reward or penalty">
-                {(["reward", "penalty"] as const).map((k) => (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => { setFKind(k); setConfirming(false); }}
-                    className={`px-4 py-2 text-sm ${fKind === k ? (k === "reward" ? "bg-green-600 text-white" : "bg-red-600 text-white") : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`}
-                  >
-                    {k === "reward" ? "Reward" : "Penalty"}
-                  </button>
-                ))}
-              </div>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">₹</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="any"
-                  inputMode="decimal"
-                  value={fAmount}
-                  onChange={(e) => { setFAmount(e.target.value); setConfirming(false); }}
-                  placeholder="Amount"
-                  className="w-full pl-7 pr-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
-                  aria-label="Amount in rupees"
-                />
-              </div>
+            <h2 className="font-semibold mb-3">
+              Record a reward or penalty{" "}
+              <span className="text-slate-400 font-normal text-sm">
+                for {new Date(`${month}-01T00:00:00`).toLocaleDateString([], { month: "long", year: "numeric" })}
+              </span>
+            </h2>
+            <div className="grid sm:grid-cols-2 gap-3 mb-3">
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                1. Who?
+                <select
+                  value={fPerson}
+                  onChange={(e) => { setFPerson(e.target.value); setFTask(""); setConfirming(false); }}
+                  className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm text-slate-100"
+                >
+                  <option value="">Choose a person...</option>
+                  {people.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-slate-400">
+                2. For which task?
+                <select
+                  value={fTask}
+                  onChange={(e) => { setFTask(e.target.value); setConfirming(false); }}
+                  disabled={!fPerson}
+                  className="px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm text-slate-100 disabled:opacity-50"
+                >
+                  <option value="">
+                    {!fPerson ? "Choose a person first..." : personTasks.length ? "Choose the task..." : "No finished or overdue tasks for this person"}
+                  </option>
+                  {personTasks.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.title} - {t.finished ? "completed" : "overdue"}{t.due_date ? `, due ${formatDue(t.due_date)}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-            <select
-              value={fTask}
-              onChange={(e) => { setFTask(e.target.value); setConfirming(false); }}
-              disabled={!fPerson}
-              className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm mb-3 disabled:opacity-50"
-              aria-label="Task"
-            >
-              <option value="">
-                {!fPerson ? "Choose a person first..." : personTasks.length ? "Choose the task..." : "No finished or overdue tasks for this person"}
-              </option>
-              {personTasks.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.title} - {t.finished ? "completed" : "overdue"}{t.due_date ? `, due ${formatDue(t.due_date)}` : ""}
-                </option>
-              ))}
-            </select>
+            <div className="flex flex-wrap items-end gap-3 mb-3">
+              <div className="flex flex-col gap-1 text-xs text-slate-400">
+                3. Reward or penalty?
+                <div className="flex rounded overflow-hidden border border-slate-600" role="group" aria-label="Reward or penalty">
+                  {(["reward", "penalty"] as const).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => { setFKind(k); setConfirming(false); }}
+                      className={`px-4 py-2 text-sm ${fKind === k ? (k === "reward" ? "bg-green-600 text-white" : "bg-red-600 text-white") : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`}
+                    >
+                      {k === "reward" ? "Reward" : "Penalty"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="flex flex-col gap-1 text-xs text-slate-400 w-40">
+                4. How much?
+                <span className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">₹</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="any"
+                    inputMode="decimal"
+                    value={fAmount}
+                    onChange={(e) => { setFAmount(e.target.value); setConfirming(false); }}
+                    placeholder="500"
+                    className="w-full pl-7 pr-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm text-slate-100"
+                  />
+                </span>
+              </label>
+            </div>
             <input
               value={fReason}
               onChange={(e) => { setFReason(e.target.value); setConfirming(false); }}
-              placeholder="Reason (required - the person sees this)"
+              placeholder="5. Why? (required - the person sees this)"
               maxLength={300}
               className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm mb-3"
               aria-label="Reason"
@@ -371,7 +392,7 @@ export default function PayrollPage() {
                     <span className="text-slate-500 text-xs">
                       {formatDue(e.created_at)}
                       {isSupervisor && !e.voided_at && (
-                        <button onClick={() => cancelEntry(e.id)} className="ml-3 text-slate-400 hover:text-red-400 underline">
+                        <button onClick={() => cancelEntry(e.id)} className="ml-3 px-2 py-1 rounded bg-slate-700 text-slate-300 hover:text-red-300">
                           Cancel entry
                         </button>
                       )}

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { isFinished, isOverdue } from "@/lib/status";
 import { sendJSON } from "@/lib/api";
 import { COLOR_SWATCHES } from "@/components/tasks/types";
+import { SIMPLE } from "@/lib/simple";
 
 type Section = { id: string; name: string; position: number };
 type Person = { id: string; name: string; email: string };
@@ -197,15 +198,15 @@ export default function ProjectsPage() {
 
       {canCreate && (
         <form onSubmit={create} className="bg-slate-800 border border-slate-700 rounded p-3 sm:p-4 mb-4 flex flex-wrap gap-2">
-          <input value={creating.name} onChange={(e) => setCreating({ ...creating, name: e.target.value })} placeholder="New project name..." className={`${inputCls} flex-1 min-w-48`} />
+          <input value={creating.name} onChange={(e) => setCreating({ ...creating, name: e.target.value })} placeholder={SIMPLE ? "New project, e.g. Macro Dashboard" : "New project name..."} className={`${inputCls} flex-1 min-w-48`} />
           <input value={creating.description} onChange={(e) => setCreating({ ...creating, description: e.target.value })} placeholder="Description (optional)" className={`${inputCls} flex-1 min-w-48`} />
-          {isSuper && (
+          {isSuper && !SIMPLE && (
             <select value={creating.manager} onChange={(e) => setCreating({ ...creating, manager: e.target.value })} className={inputCls} aria-label="Project manager (#22)" title="Project Manager: runs this project directly">
               <option value="">No project manager</option>
               {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           )}
-          <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
+          {!SIMPLE && <div className="flex gap-1 items-center" role="radiogroup" aria-label="Project color">
             {COLOR_SWATCHES.map((c) => (
               <button
                 key={c.value || "none"}
@@ -221,7 +222,7 @@ export default function ProjectsPage() {
                 {!c.value && "✕"}
               </button>
             ))}
-          </div>
+          </div>}
           <button type="submit" disabled={!creating.name.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2 rounded text-sm">Create project</button>
         </form>
       )}
@@ -237,10 +238,15 @@ export default function ProjectsPage() {
             return (
               <div key={project.id} className="p-4 sm:p-6 bg-slate-800 rounded border border-slate-700">
                 <div className="flex flex-wrap justify-between items-start gap-3 mb-2">
-                  <button onClick={() => (openProject === project.id ? setOpenProject(null) : openPanel(project))} className="text-xl font-bold hover:text-blue-400 flex items-center gap-2 text-left">
+                  <button onClick={() => (SIMPLE ? (window.location.href = `/dashboard?project=${project.id}`) : openProject === project.id ? setOpenProject(null) : openPanel(project))} className="text-xl font-bold hover:text-blue-400 flex items-center gap-2 text-left">
                     {project.color && <span className="inline-block w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: project.color }} title="Custom color" />}
                     {project.name}
                   </button>
+                  {SIMPLE ? (
+                    <a href={`/dashboard?project=${project.id}`} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-sm text-white">
+                      See tasks →
+                    </a>
+                  ) : (
                   <div className="flex flex-wrap gap-3 text-xs">
                     <a href={`/search?project_id=${project.id}`} className="text-slate-400 hover:text-white">Search in project</a>
                     <a href={`/activity?project_id=${project.id}`} className="text-slate-400 hover:text-white">History</a>
@@ -251,11 +257,12 @@ export default function ProjectsPage() {
                       {openProject === project.id ? "Hide details" : "Details & comments"}
                     </button>
                   </div>
+                  )}
                 </div>
                 <p className="text-slate-400 text-sm">{project.description || "No description"}</p>
                 <p className="text-xs text-slate-500 mt-1">
-                  Project Manager: {personName(project.manager_id) || "not assigned"}
-                  {" "}· created {new Date(project.created_at).toLocaleDateString()}
+                  {!SIMPLE && <>Project Manager: {personName(project.manager_id) || "not assigned"} · </>}
+                  created {new Date(project.created_at).toLocaleDateString()}
                 </p>
 
                 {s && s.total > 0 ? (
@@ -275,7 +282,7 @@ export default function ProjectsPage() {
                   <p className="text-slate-500 text-xs mt-4">No tasks yet</p>
                 )}
 
-                {sectionsOpen === project.id && (
+                {!SIMPLE && sectionsOpen === project.id && (
                   <SectionsPanel
                     project={project}
                     counts={sectionCounts}
@@ -284,7 +291,7 @@ export default function ProjectsPage() {
                   />
                 )}
 
-                {openProject === project.id && (
+                {!SIMPLE && openProject === project.id && (
                   <div className="mt-4 pt-4 border-t border-slate-700 space-y-4">
                     {project.can_manage && (
                       <div className="space-y-2">

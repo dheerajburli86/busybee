@@ -100,6 +100,8 @@ const ICONS: Record<string, string> = {
   review_sent_back: "↩️",
   review_pending: "🔍",
   deadline_declined: "⏳",
+  deadline_changed: "📅",
+  deadline_accepted: "👍",
   extension_request: "⏳",
   extension_reviewed: "📅",
   mention: "💬",

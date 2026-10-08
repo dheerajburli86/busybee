@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from "react";
 import { sendJSON } from "@/lib/api";
+import { SIMPLE } from "@/lib/simple";
 
 type Person = { id: string; name: string; email: string; role?: string; telegram?: boolean };
 
@@ -14,6 +15,9 @@ const DESK_ROLES = [
   { value: "supervisor", label: "Supervisor (Project Manager)", help: "Manages every project and task" },
   { value: "admin", label: "Admin", help: "Everything a supervisor can do, plus appointing admins" },
 ];
+
+// Simple mode offers three roles; anyone already a Manager keeps that role.
+const ROLE_CHOICES = SIMPLE ? DESK_ROLES.filter((r) => r.value !== "manager") : DESK_ROLES;
 
 export default function PeoplePage() {
   const [people, setPeople] = useState<Person[]>([]);
@@ -141,7 +145,7 @@ export default function PeoplePage() {
       <h2 className="text-lg font-semibold mb-2">People &amp; roles</h2>
       <div className={card}>
         <ul className="text-xs text-slate-400 mb-3 space-y-0.5">
-          {DESK_ROLES.map((r) => <li key={r.value}><span className="text-slate-300">{r.label}</span> - {r.help}</li>)}
+          {ROLE_CHOICES.map((r) => <li key={r.value}><span className="text-slate-300">{r.label}</span> - {r.help}</li>)}
         </ul>
         {noPrivilegedYet && (
           <p className="text-xs text-amber-400 mb-3">Nobody is a supervisor yet. Make someone a supervisor to lock role changes down.</p>
@@ -163,7 +167,7 @@ export default function PeoplePage() {
               </div>
               {canEditRoles ? (
                 <select value={p.role || "member"} onChange={(e) => changeRole(p, e.target.value)} className={`${inputCls} text-xs py-1`} aria-label={`Role for ${p.name}`}>
-                  {DESK_ROLES.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+                  {(p.role === "manager" ? DESK_ROLES : ROLE_CHOICES).map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
                 </select>
               ) : (
                 <span className="text-xs text-slate-400">{DESK_ROLES.find((r) => r.value === (p.role || "member"))?.label}</span>

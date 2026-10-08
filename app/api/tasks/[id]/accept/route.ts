@@ -8,9 +8,10 @@ import {
   taskAccess,
   teamMemberIds,
 } from "@/lib/permissions";
-import { formatForPeople } from "@/lib/format";
+import { formatForPeople, normalizeTimestamp } from "@/lib/format";
 import { isFinished } from "@/lib/status";
-import { schemaMissing } from "@/lib/workflow";
+import { decidersFor, schemaMissing } from "@/lib/workflow";
+import { createAdminClient } from "@/lib/supabase-admin";
 
 // Step 4 of the assignment flow: the person doing the work accepts the
 // deadline they were given, or declines it.
@@ -69,13 +70,28 @@ export async function GET(_req: Request, { params }: Params) {
     const staleFor = (r: any) =>
       !!current && !!r.due_date_at_decision && new Date(r.due_date_at_decision).getTime() !== current;
 
+    // Safety net: "it won't work" with no request for more time waiting
+    // (it was rejected, or never filed) leaves the person nothing to do, so
+    // ask them again.
+    let declinedAndStuck = false;
+    if (mine && mine.decision === "declined") {
+      const { data: open } = await supabase
+        .from("extension_requests")
+        .select("id")
+        .eq("task_id", id)
+        .eq("requested_by", user.id)
+        .eq("status", "pending")
+        .limit(1);
+      declinedAndStuck = !open || open.length === 0;
+    }
+
     const iAmExpected = expected.includes(user.id);
     const needsMyDecision =
       iAmExpected &&
       !!access.task.due_date &&
       !isFinished(access.task.status) &&
       !access.task.archived_at &&
-      (!mine || staleFor(mine));
+      (!mine || staleFor(mine) || declinedAndStuck);
 
     return NextResponse.json({
       expected,
@@ -101,6 +117,18 @@ export async function POST(req: Request, { params }: Params) {
     const body = await req.json();
     const decision: string = body?.decision === "declined" ? "declined" : "accepted";
     const note: string = typeof body?.note === "string" ? body.note.trim() : "";
+    // "I need more time" can carry the date the person needs. Then one click
+    // both records that the deadline doesn't work AND asks for the new date,
+    // instead of two separate steps the person has to know about.
+    const requestedDate = decision === "declined" && body?.requested_date ? normalizeTimestamp(body.requested_date) : null;
+    if (decision === "declined" && body?.requested_date && !requestedDate) {
+      return NextResponse.json({ error: "That date isn't valid" }, { status: 400 });
+    }
+    // "It won't work" always comes with the date that would - otherwise the
+    // assignor has nothing to decide and the person is just asked again.
+    if (decision === "declined" && !requestedDate) {
+      return NextResponse.json({ error: "Pick the date you need" }, { status: 400 });
+    }
 
     if (decision === "declined" && !note) {
       return NextResponse.json(
@@ -126,6 +154,45 @@ export async function POST(req: Request, { params }: Params) {
     if (isFinished(access.task.status)) {
       return NextResponse.json({ error: "This task is already finished" }, { status: 400 });
     }
+    if (requestedDate && (new Date(requestedDate) <= new Date(access.task.due_date) || new Date(requestedDate).getTime() <= Date.now())) {
+      return NextResponse.json({ error: "Pick a date in the future, after the current deadline" }, { status: 400 });
+    }
+    if (requestedDate) {
+      const { data: open } = await supabase
+        .from("extension_requests")
+        .select("id")
+        .eq("task_id", id)
+        .eq("status", "pending")
+        .limit(1);
+      if (open && open.length) {
+        return NextResponse.json({ error: "There is already a request for more time waiting for a decision" }, { status: 400 });
+      }
+    }
+
+    // Asking for more time: file the request FIRST. If that fails nothing is
+    // written, so the person can simply try again - never a half-done state
+    // where the deadline is marked "won't work" but nobody was asked.
+    let ext: { id: string; requested_date: string } | null = null;
+    if (requestedDate) {
+      const { data: row, error: extError } = await supabase
+        .from("extension_requests")
+        .insert({
+          task_id: id,
+          requested_by: user.id,
+          reason: note,
+          requested_date: new Date(requestedDate).toISOString(),
+          status: "pending",
+        })
+        .select("id, requested_date")
+        .single();
+      if (extError) {
+        if (extError.code === "23505") {
+          return NextResponse.json({ error: "There is already a request for more time waiting for a decision" }, { status: 400 });
+        }
+        throw extError;
+      }
+      ext = row;
+    }
 
     const { data, error } = await supabase
       .from("task_acceptances")
@@ -145,6 +212,12 @@ export async function POST(req: Request, { params }: Params) {
       .single();
 
     if (error) {
+      if (ext) {
+        // Take the request back with the service key (people can't delete
+        // requests themselves), falling back to their own session.
+        const { error: undoErr } = await (createAdminClient() || supabase).from("extension_requests").delete().eq("id", ext.id);
+        if (undoErr) console.error("accept: could not take back the extension request", undoErr);
+      }
       if (schemaMissing(error)) {
         return NextResponse.json(
           { error: "Deadline acceptance isn't set up yet - run the database migration" },
@@ -165,6 +238,28 @@ export async function POST(req: Request, { params }: Params) {
 
     const { data: extra } = await supabase.from("task_assignors").select("user_id").eq("task_id", id);
     const tell = assignorsOf(access.task, extra || []).filter((x) => x !== user.id);
+
+    if (ext) {
+      await logActivity(supabase, {
+        entity_type: "task",
+        entity_id: id,
+        action: "requested a deadline extension",
+        performed_by: user.id,
+        desk_id: access.task.desk_id,
+        changes: { reason: note, requested_date: ext.requested_date },
+      });
+      // One alert, not two, to everyone who can decide on it.
+      const deciders = await decidersFor(supabase, access.task, user.id);
+      await notifyMany(supabase, deciders, {
+        task_id: id,
+        type: "extension_request",
+        title: "More time requested",
+        message: `${access.task.title}: asked to move the deadline from ${formatForPeople(access.task.due_date)} to ${formatForPeople(ext.requested_date)} - "${note.slice(0, 140)}". Open the task to approve or reject.`,
+        email: { subject: `More time requested: ${access.task.title}` },
+      });
+      return NextResponse.json({ ...data, extension_requested: true });
+    }
+
 
     const message =
       decision === "accepted"

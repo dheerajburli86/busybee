@@ -131,7 +131,9 @@ export async function POST(req: Request, { params }: Params) {
     // Default to the month the task was finished in, not today's - work
     // signed off on 2 October for September belongs to September's payroll.
     const basis = access.task.completed_at || access.task.due_date || new Date().toISOString();
-    const fallback = new Date(basis);
+    // In the office's timezone (IST): work finished at 00:30 IST on 1 Nov is
+    // November's, even though it's still October in UTC.
+    const fallback = new Date(new Date(basis).getTime() + 330 * 60000);
     const effective_month = /^\d{4}-\d{2}/.test(month)
       ? `${month.slice(0, 7)}-01`
       : `${fallback.getUTCFullYear()}-${String(fallback.getUTCMonth() + 1).padStart(2, "0")}-01`;

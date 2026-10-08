@@ -129,10 +129,12 @@ export default function ReportsPage() {
           </button>
         ))}
         <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Report date (the day, week or month containing it)" />
+{(
         <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Project">
           <option value="">All projects</option>
           {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
+        )}
       </div>
 
       {error && <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">{error}</div>}
@@ -228,8 +230,8 @@ export default function ReportsPage() {
             </div>
           </div>
 
-          <Table title="Project performance" empty="No project work in this period." headers={["Project", "Open + done tasks", "Done (total)", "Done this period", "Overdue now", "Avg progress"]}
-            rows={report.byProject.map((p) => [p.name, p.total, p.done, p.completed_in_period, p.overdue, `${p.progress}%`])} />
+          {<Table title="Project performance" empty="No project work in this period." headers={["Project", "Open + done tasks", "Done (total)", "Done this period", "Overdue now", "Avg progress"]}
+            rows={report.byProject.map((p) => [p.name, p.total, p.done, p.completed_in_period, p.overdue, `${p.progress}%`])} />}
 
           <Table title="By member" empty="No activity in this period." headers={["Member", "Open now", "Done this period", "On-time rate", "Overdue now", "Actions this period", "Hours this period"]}
             rows={report.byMember.map((m) => [m.name, m.assigned_open, m.completed, m.on_time_rate === null ? "–" : `${m.on_time_rate}%`, m.overdue, m.actions, m.hours])} />

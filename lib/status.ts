@@ -6,13 +6,25 @@
 // completion notifications all need to agree. Import from here rather than
 // comparing against "done" inline.
 
-export const STATUSES = [
-  { value: "pending", label: "Pending" },
-  { value: "in_progress", label: "In Process" },
-  { value: "need_help", label: "Need Assistance" },
-  { value: "done", label: "Completed" },
-  { value: "closed", label: "Closed" },
-];
+import { SIMPLE } from "./simple";
+
+// Simple mode says what each state means in plain words; the values (what is
+// stored) are the same either way.
+export const STATUSES = SIMPLE
+  ? [
+      { value: "pending", label: "Not started" },
+      { value: "in_progress", label: "Working on it" },
+      { value: "need_help", label: "Stuck - needs help" },
+      { value: "done", label: "Done - waiting for review" },
+      { value: "closed", label: "Approved" },
+    ]
+  : [
+      { value: "pending", label: "Pending" },
+      { value: "in_progress", label: "In Process" },
+      { value: "need_help", label: "Need Assistance" },
+      { value: "done", label: "Completed" },
+      { value: "closed", label: "Closed" },
+    ];
 
 export const STATUS_VALUES = STATUSES.map((s) => s.value);
 export const PRIORITY_VALUES = ["super_high", "high", "medium", "low"];

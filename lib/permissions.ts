@@ -184,11 +184,17 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
 
   // SOW #29: a task given to a team is work for everyone in that team, the
   // same as if they had been named on it individually.
+  //
+  // Being in the task's project lets you SEE it. It only lets you WORK on it
+  // when it's open to the project (nobody named): a task given to one person
+  // is that person's copy - a colleague mustn't be able to mark it done or
+  // ask for more time on it, since review and pay hang off it.
+  const inProject = !!task.project_id && myProjects.includes(task.project_id);
   const isWorker =
     task.assigned_to === userId ||
     (subs || []).some((s: any) => s.assigned_to === userId) ||
     (!!task.team_id && myTeams.includes(task.team_id)) ||
-    (!!task.project_id && myProjects.includes(task.project_id));
+    (inProject && !task.assigned_to);
 
   const canManage = isSuper || isAssignor || isProjectManager;
   const canWork = canManage || !!isWorker;
@@ -202,7 +208,7 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
     isWorker: !!isWorker,
     canManage,
     canWork,
-    canView: canWork,
+    canView: canWork || inProject,
   };
 }
 

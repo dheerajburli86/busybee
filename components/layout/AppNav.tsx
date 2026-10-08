@@ -8,8 +8,19 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase";
 import { NotificationBell } from "@/components/NotificationBell";
+import { SIMPLE } from "@/lib/simple";
 
-const LINKS = [
+// Simple mode: just the pages the core flow uses.
+const SIMPLE_LINKS = [
+  { href: "/dashboard", label: "Tasks" },
+  { href: "/projects", label: "Projects" },
+  { href: "/reports", label: "Reports" },
+  { href: "/payroll", label: "Payroll" },
+  { href: "/people", label: "People" },
+  { href: "/settings", label: "Settings" },
+];
+
+const ALL_LINKS = [
   { href: "/dashboard", label: "Tasks" },
   { href: "/todo", label: "My To-Do" },
   { href: "/projects", label: "Projects" },
@@ -21,7 +32,10 @@ const LINKS = [
   { href: "/people", label: "People" },
   { href: "/timesheet", label: "Timesheet" },
   { href: "/payroll", label: "Payroll" },
+  { href: "/settings", label: "Settings" },
 ];
+
+const LINKS = SIMPLE ? SIMPLE_LINKS : ALL_LINKS;
 
 export function AppNav() {
   const pathname = usePathname();

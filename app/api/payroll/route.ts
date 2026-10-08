@@ -16,9 +16,11 @@ import { schemaMissing } from "@/lib/workflow";
 // own entries. This route adds names and totals on top of whatever comes back.
 
 function monthStart(raw: string | null): string {
-  const now = new Date();
   if (raw && /^\d{4}-\d{2}$/.test(raw)) return `${raw}-01`;
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
+  // The office's month (IST), not UTC's: from 00:00 to 05:29 IST on the 1st,
+  // UTC is still in the previous month.
+  const ist = new Date(Date.now() + 330 * 60000);
+  return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, "0")}-01`;
 }
 
 export async function GET(req: Request) {

@@ -9,6 +9,7 @@ import {
   taskAudience,
 } from "@/lib/permissions";
 import { schemaMissing, workersOn } from "@/lib/workflow";
+import { formatForPeople, normalizeTimestamp } from "@/lib/format";
 
 // Step 9 of the assignment flow: a supervisor signs the finished work off, or
 // sends it back with a note.
@@ -31,6 +32,12 @@ export async function POST(req: Request, { params }: Params) {
     const body = await req.json();
     const decision: string = body?.decision;
     const note: string = typeof body?.note === "string" ? body.note.trim() : "";
+    // Sending work back after its deadline has passed reopens it already
+    // overdue; the reviewer can give a fresh deadline in the same step.
+    const newDue = decision === "sent_back" && body?.due_date ? normalizeTimestamp(body.due_date) : null;
+    if (decision === "sent_back" && body?.due_date && (!newDue || new Date(newDue).getTime() <= Date.now())) {
+      return NextResponse.json({ error: "The new deadline has to be a date in the future" }, { status: 400 });
+    }
 
     if (!["approved", "sent_back"].includes(decision)) {
       return NextResponse.json({ error: "decision must be approved or sent_back" }, { status: 400 });
@@ -88,6 +95,7 @@ export async function POST(req: Request, { params }: Params) {
             reviewed_at: now,
             status: "in_progress",
             completed_at: null,
+            ...(newDue ? { due_date: newDue } : {}),
             updated_at: now,
           };
 
@@ -126,7 +134,7 @@ export async function POST(req: Request, { params }: Params) {
     const message =
       decision === "approved"
         ? `${access.task.title} was reviewed and signed off${note ? ` - "${note.slice(0, 140)}"` : ""}`
-        : `${access.task.title} was sent back: "${note.slice(0, 200)}"`;
+        : `${access.task.title} was sent back: "${note.slice(0, 200)}"${newDue ? `. New deadline: ${formatForPeople(newDue)}` : ""}`;
 
     const tell = Array.from(new Set([...workers, ...(await taskAudience(supabase, access.task))])).filter(
       (x) => x !== user.id
