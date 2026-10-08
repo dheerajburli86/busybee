@@ -207,8 +207,8 @@ export async function GET(request: NextRequest) {
           entries
             .slice(0, 20)
             .map(
-              (a) =>
-                `• ${a.kind === "reward" ? "Reward" : "Penalty"} ${rupees(a.amount)} - ${nameOf(a.user_id)} - "${a.reason}"${
+              (a, i) =>
+                `${i + 1}. ${a.kind === "reward" ? "Reward" : "Penalty"} ${rupees(a.amount)} - ${nameOf(a.user_id)} - "${a.reason}"${
                   visible.find((t: any) => t.id === a.task_id) ? ` (${visible.find((t: any) => t.id === a.task_id).title})` : ""
                 } - ${formatForPeople(a.created_at)}`
             )
@@ -225,9 +225,9 @@ export async function GET(request: NextRequest) {
         ? `${reqs.length} request${reqs.length === 1 ? "" : "s"} for more time${parsed.everyone ? "" : ` from ${who}`}${when}, ${pending.length} waiting for a decision:\n` +
           reqs
             .slice(0, 20)
-            .map((x: any) => {
+            .map((x: any, i: number) => {
               const t = visible.find((v: any) => v.id === x.task_id);
-              return `• ${nameOf(x.requested_by)} - ${t?.title || "a task"} - wants ${formatForPeople(x.requested_date)} - ${
+              return `${i + 1}. ${nameOf(x.requested_by)} - ${t?.title || "a task"} - wants ${formatForPeople(x.requested_date)} - ${
                 x.status === "pending" ? "waiting" : x.status
               }${x.reason ? ` - "${x.reason}"` : ""}`;
             })
@@ -313,7 +313,7 @@ async function askClaude(key: string, question: string, data: unknown): Promise<
         system:
           "You answer questions about a work team's tasks in BusyBee, a task app used by a finance firm in India. " +
           "Use ONLY the JSON data provided; never invent tasks, people, dates or amounts. If the data doesn't contain the answer, say so plainly. " +
-          "Answer exactly what was asked, briefly and in plain English (a sentence or two, then a short bullet list only if it helps). " +
+          "Answer exactly what was asked, briefly and in plain English: one short sentence, then any list as numbered lines (1. ..., 2. ...), never bullets. " +
           "Amounts are in rupees (₹). 'asker' is the person asking: 'me'/'my'/'I' means them. " +
           'Reply with JSON only: {"answer": "<your answer>", "task_ids": ["<ids of the tasks your answer is about, if any>"]}',
         messages: [{ role: "user", content: `Data:\n${JSON.stringify(data)}\n\nQuestion: ${question}` }],

@@ -91,13 +91,15 @@ export default function AskPage() {
               <p className="text-base text-white mb-3 whitespace-pre-line leading-relaxed">🐝 {a.answer}</p>
               {a.tasks.length > 0 && (
                 <ul className="divide-y divide-slate-700">
-                  {a.tasks.map((t) => (
+                  {a.tasks.map((t, n) => (
                     <li key={t.id}>
                       <a
                         href={t.is_list ? "/lists" : `/dashboard?task=${t.id}`}
                         className="flex flex-wrap items-center justify-between gap-2 py-2 hover:bg-slate-700/40 rounded px-2 -mx-2"
                       >
-                        <span className="min-w-0">
+                        <span className="min-w-0 flex gap-3">
+                          <span className="text-slate-500 tabular-nums w-6 text-right shrink-0 pt-0.5">{n + 1}.</span>
+                          <span className="min-w-0">
                           <span className={`font-medium ${t.overdue ? "text-red-400" : "text-slate-100"}`}>
                             {t.is_list ? "☑ " : ""}
                             {t.title}
@@ -107,6 +109,7 @@ export default function AskPage() {
                             {t.completed ? ` · finished ${t.completed}` : t.due ? ` · due ${t.due}` : ""}
                             {t.overdue ? " · overdue" : ""}
                           </span>
+                        </span>
                         </span>
                         <span className={`text-xs px-2 py-1 rounded shrink-0 ${statusClass(t.status)}`}>{t.status_label}</span>
                       </a>
