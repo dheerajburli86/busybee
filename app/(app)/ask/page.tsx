@@ -52,7 +52,7 @@ export default function AskPage() {
   return (
     <div className="max-w-3xl mx-auto p-3 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-bold mb-1">Ask BusyBee</h1>
-      <p className="text-slate-400 text-sm mb-4">Ask about anyone&apos;s tasks in plain English.</p>
+      <p className="text-slate-400 text-sm mb-4">Ask about tasks, deadlines, rewards and penalties in plain English.</p>
 
       <form
         onSubmit={(e) => {
@@ -88,7 +88,7 @@ export default function AskPage() {
               <span className="text-slate-500">You asked:</span> {a.question}
             </p>
             <div className="bg-slate-800 border border-slate-700 rounded p-4">
-              <p className="text-lg font-semibold text-white mb-3">🐝 {a.answer}</p>
+              <p className="text-base text-white mb-3 whitespace-pre-line leading-relaxed">🐝 {a.answer}</p>
               {a.tasks.length > 0 && (
                 <ul className="divide-y divide-slate-700">
                   {a.tasks.map((t) => (
