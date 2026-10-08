@@ -6,6 +6,10 @@ import { NextResponse, type NextRequest } from "next/server";
 const PUBLIC_PATHS = ["/login", "/signup"];
 
 export async function middleware(request: NextRequest) {
+  // API routes check the signed-in user themselves. Checking here as well
+  // cost every API call an extra trip to Supabase before it even started.
+  if (request.nextUrl.pathname.startsWith("/api/")) return NextResponse.next();
+
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(

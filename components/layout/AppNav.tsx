@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase";
 import { NotificationBell } from "@/components/NotificationBell";
 import { SIMPLE } from "@/lib/simple";
+import { clearSnapshots } from "@/lib/snapshot";
 
 // Simple mode: just the pages the core flow uses.
 const SIMPLE_LINKS = [
@@ -57,6 +58,7 @@ export function AppNav() {
   const logout = async () => {
     // Sign out this browser only (the default signs out every device), then
     // load the login page fresh so no signed-in screen lingers.
+    clearSnapshots();
     try {
       await createClient().auth.signOut({ scope: "local" });
     } catch {

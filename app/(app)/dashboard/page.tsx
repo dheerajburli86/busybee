@@ -7,6 +7,7 @@ import { OPEN_TASK_EVENT } from "@/components/NotificationBell";
 import { TaskDetail } from "@/components/tasks/TaskDetail";
 import { GanttView } from "@/components/tasks/GanttView";
 import { SIMPLE } from "@/lib/simple";
+import { readSnapshot, writeSnapshot } from "@/lib/snapshot";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
 
 // One-tap deadlines for the create form (simple mode). Each lands at 6 PM,
@@ -147,6 +148,15 @@ export default function DashboardPage() {
       setShowFilters(true);
     }
 
+    // Paint the last-seen tasks at once; the real data replaces them below.
+    const snap = readSnapshot<{ tasks: Task[]; lookups: Lookups; role: string }>("dashboard");
+    if (snap) {
+      setTasks(snap.tasks || []);
+      setLookups(snap.lookups || emptyLookups);
+      setMyRole(snap.role || "member");
+      setLoading(false);
+    }
+
     (async () => {
       try {
         const get = async (u: string) => {
@@ -159,8 +169,9 @@ export default function DashboardPage() {
         const tasksReq = fetch("/api/tasks", { cache: "no-store" });
         const membersReq = get("/api/team/members");
         const projectsReq = get("/api/projects");
-        const okrReq = get("/api/okr");
-        const templatesReq = get("/api/templates");
+        // Simple mode never shows OKRs or templates: don't load them.
+        const okrReq = SIMPLE ? Promise.resolve(null) : get("/api/okr");
+        const templatesReq = SIMPLE ? Promise.resolve(null) : get("/api/templates");
 
         membersReq
           .then((m) => {
@@ -205,6 +216,16 @@ export default function DashboardPage() {
         }));
         setMyRole(m?.myRole || "member");
         setTemplates(tpl?.templates || []);
+        writeSnapshot("dashboard", {
+          tasks: td.tasks || [],
+          lookups: {
+            people: m?.members || [],
+            me: m?.me || null,
+            projects: p?.projects || [],
+            keyResults: okr?.keyResults || [],
+          },
+          role: m?.myRole || "member",
+        });
       } catch (e: any) {
         showError(e.message);
       } finally {
@@ -212,6 +233,12 @@ export default function DashboardPage() {
       }
     })();
   }, [showError]);
+
+  // Keep the instant-paint copy in step with edits made on this page.
+  useEffect(() => {
+    if (loading || !lookups.me) return;
+    writeSnapshot("dashboard", { tasks, lookups, role: myRole });
+  }, [tasks, lookups, myRole, loading]);
 
   // Archive view (checklist #12): archived tasks come from their own query.
   useEffect(() => {
@@ -537,7 +564,7 @@ export default function DashboardPage() {
         {SIMPLE && <p className="text-sm font-semibold text-white pt-1">2. What needs doing?</p>}
         <input
           type="text"
-          placeholder={SIMPLE ? "e.g. Update the sector list for LOCOM" : "Task title..."}
+          placeholder="Task title"
           value={form.title}
           onChange={(e) => setForm({ ...form, title: e.target.value })}
           disabled={creating}
