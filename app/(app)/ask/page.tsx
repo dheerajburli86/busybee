@@ -4,7 +4,6 @@
 // tasks behind it. Answers only cover tasks you're allowed to see.
 
 import { useEffect, useRef, useState } from "react";
-import { SUGGESTIONS } from "@/lib/ask";
 import { statusClass } from "@/lib/status";
 
 type Hit = {
@@ -25,18 +24,9 @@ export default function AskPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [answers, setAnswers] = useState<Answer[]>([]);
-  const [example, setExample] = useState("Dheeraj");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Use a real teammate's name in the suggestions.
   useEffect(() => {
-    fetch("/api/team/members", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        const other = (d?.members || []).find((m: any) => m.id !== d.me && m.name);
-        if (other) setExample(String(other.name).split(" ")[0]);
-      })
-      .catch(() => {});
     inputRef.current?.focus();
   }, []);
 
@@ -69,13 +59,13 @@ export default function AskPage() {
           e.preventDefault();
           ask(q);
         }}
-        className="flex gap-2 mb-3"
+        className="flex gap-2 mb-6"
       >
         <input
           ref={inputRef}
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={`e.g. What is ${example} left with?`}
+          placeholder="Ask about anyone's tasks"
           className="flex-1 min-w-0 px-4 py-3 bg-slate-900 border border-slate-600 rounded text-base"
           aria-label="Your question"
         />
@@ -84,18 +74,6 @@ export default function AskPage() {
         </button>
       </form>
 
-      <div className="flex flex-wrap gap-2 mb-6">
-        {SUGGESTIONS(example).map((s) => (
-          <button
-            key={s}
-            onClick={() => ask(s)}
-            disabled={busy}
-            className="px-3 py-1.5 rounded-full text-sm border border-slate-600 bg-slate-900 text-slate-300 hover:border-blue-500 hover:text-white disabled:opacity-50"
-          >
-            {s}
-          </button>
-        ))}
-      </div>
 
       {error && (
         <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm" role="alert">
@@ -142,7 +120,7 @@ export default function AskPage() {
         ))}
         {answers.length === 0 && (
           <p className="text-slate-500 text-sm">
-            Try a suggestion above. You can name anyone on your desk, say &quot;me&quot;, and add &quot;today&quot;, &quot;this week&quot; or &quot;this month&quot;.
+            Name anyone on your desk, or say &quot;me&quot;. You can add &quot;today&quot;, &quot;this week&quot; or &quot;this month&quot;.
           </p>
         )}
       </div>

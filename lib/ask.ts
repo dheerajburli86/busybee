@@ -73,12 +73,3 @@ export function periodStart(period: Period, now = new Date()): { from: number; t
   if (period === "week") return { from: midnight - 6 * day, to: midnight + day };
   return { from: midnight - 29 * day, to: midnight + day };
 }
-
-export const SUGGESTIONS = (name: string) => [
-  `What tasks has ${name} been assigned?`,
-  `What has ${name} completed this week?`,
-  `What is ${name} left with?`,
-  `Which of ${name}'s tasks are overdue?`,
-  "Who has overdue tasks?",
-  "What is waiting for review?",
-];

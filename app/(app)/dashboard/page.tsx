@@ -10,6 +10,7 @@ import { SIMPLE } from "@/lib/simple";
 import { readSnapshot, writeSnapshot } from "@/lib/snapshot";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
 import { quickDeadlines } from "@/lib/deadlines";
+import { ItemRow, ItemRows, blankItems, itemsPayload, latestItemDate } from "@/components/tasks/ItemRows";
 
 import {
   COLOR_SWATCHES,
@@ -100,6 +101,8 @@ export default function DashboardPage() {
     subtasks: "",
   });
   const [creating, setCreating] = useState(false);
+  // Simple mode: the things to do inside this one task, each with a tick box.
+  const [items, setItems] = useState<ItemRow[]>(() => blankItems(1));
   const [showMore, setShowMore] = useState(false);
 
   const showError = useCallback((m: string) => {
@@ -273,7 +276,7 @@ export default function DashboardPage() {
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
-    const due = fromLocalInput(form.due);
+    const due = fromLocalInput(form.due) || (SIMPLE ? latestItemDate(items) : null);
     const others = form.assignees.filter((id) => id !== lookups.me);
     // Simple mode: every task belongs to someone, or nobody gets reminded.
     if (SIMPLE && form.assignees.length === 0) {
@@ -307,7 +310,11 @@ export default function DashboardPage() {
     try {
       for (const assignee of targets) {
         try {
-          const data = await sendJSON("/api/tasks", "POST", { ...base, assigned_to: assignee });
+          const data = await sendJSON("/api/tasks", "POST", {
+            ...base,
+            assigned_to: assignee,
+            ...(SIMPLE ? { items: itemsPayload(items) } : {}),
+          });
           made.push(data.task);
         } catch (err: any) {
           failed.push(`${assignee ? nameOf(lookups.people, assignee) : "task"}: ${err.message}`);
@@ -315,7 +322,7 @@ export default function DashboardPage() {
         }
       }
       // Subtasks typed in the form go onto every copy, in the order written.
-      const subLines = form.subtasks
+      const subLines = (SIMPLE ? "" : form.subtasks)
         .split("\n")
         .map((x) => x.trim())
         .filter(Boolean)
@@ -342,6 +349,7 @@ export default function DashboardPage() {
       } else if (made.length) {
         setTasks((prev) => [...made, ...prev]);
         setForm({ ...form, title: "", description: "", start: "", due: "", assignees: [], color: "", subtasks: "" });
+        setItems(blankItems(1));
         // A new task may have created a project's first section; refresh the lookups quietly.
         const first = made[0];
         if (!sectionsFor(lookups.projects, first.project_id).some((x) => x.id === first.stage_id)) refreshProjects();
@@ -559,15 +567,10 @@ export default function DashboardPage() {
         />
         {SIMPLE && (
           <>
-            <textarea
-              placeholder="Subtasks (optional) - one per line, they get a tick box each"
-              value={form.subtasks}
-              onChange={(e) => setForm({ ...form, subtasks: e.target.value })}
-              disabled={creating}
-              rows={2}
-              className={`${inputCls} w-full resize-y`}
-              aria-label="Subtasks, one per line"
-            />
+            <p className="text-xs text-slate-400 pt-1">
+              Things to do in this task (optional) - one task, as many items as you like. They get a tick box each.
+            </p>
+            <ItemRows rows={items} onChange={setItems} disabled={creating} placeholder="Item to do" />
             <p className="text-sm font-semibold text-white pt-1">3. By when?</p>
             <div className="flex flex-wrap gap-2" role="group" aria-label="Quick deadline">
               {quickDeadlines().map((q) => (
@@ -585,7 +588,11 @@ export default function DashboardPage() {
         )}
         <div className="flex flex-wrap gap-2 items-end">
           <label className="flex flex-col text-xs text-slate-400 gap-1">
-            {form.assignees.some((id) => id !== lookups.me) ? (SIMPLE ? "Deadline (or pick a date and time)" : "Deadline") : "Due (optional)"}
+            {form.assignees.some((id) => id !== lookups.me)
+              ? SIMPLE
+                ? `Deadline (or pick a date and time)${!form.due && latestItemDate(items) ? ` - blank = ${formatDue(latestItemDate(items))}, the last item's date` : ""}`
+                : "Deadline"
+              : "Due (optional)"}
             <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} className={inputCls} />
           </label>
           <label className="flex flex-col text-xs text-slate-400 gap-1">
