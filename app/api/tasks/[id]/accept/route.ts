@@ -181,6 +181,8 @@ export async function POST(req: Request, { params }: Params) {
           requested_by: user.id,
           reason: note,
           requested_date: new Date(requestedDate).toISOString(),
+          // Older databases also have a required new_deadline column; keep it in step.
+          new_deadline: new Date(requestedDate).toISOString(),
           status: "pending",
         })
         .select("id, requested_date")
