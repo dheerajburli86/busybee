@@ -711,6 +711,17 @@ def whose(task, reader) -> str:
     return f'the task "{task.get("title")}"'
 
 
+def cc_overseers(task, desks, already, ntype, title, text, subject):
+    """Send the desk's overseers (Shankar) their own copy of a scheduled alert,
+    worded for someone who isn't doing the work. `already` = who got the
+    original, so nobody gets it twice."""
+    for o in desks.overseers.get(task.get("desk_id"), set()) - set(already):
+        try:
+            notify(o, task["id"], ntype, title, text, subject=subject, overseer=True)
+        except Exception as exc:
+            warn(f"cc_overseers {task.get('id')}: {exc!r}")
+
+
 def task_card(task_id):
     """Everything the 'About this task' box needs, or None."""
     try:
@@ -820,9 +831,11 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
         h.append(f'<div style="background:#eef5ee;padding:8px 14px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:{green}">ABOUT THIS TASK</div>')
         h.append('<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px">')
         for k, v in rows:
+            # Label above value: reads well on a phone.
             h.append(
-                f'<tr><td style="padding:7px 14px;color:#5b6b5e;vertical-align:top;white-space:nowrap;width:130px">{e(k)}</td>'
-                f'<td style="padding:7px 14px;vertical-align:top;line-height:1.45">{e(v)}</td></tr>'
+                f'<tr><td style="padding:8px 14px;border-top:1px solid #eef1ee">'
+                f'<div style="font-size:12px;color:#5b6b5e;margin-bottom:2px">{e(k)}</div>'
+                f'<div style="font-size:15px;line-height:1.45">{e(v)}</div></td></tr>'
             )
         h.append("</table>")
         if items:
@@ -979,6 +992,11 @@ def deadline_reminders() -> None:
                 msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} is due {when_text(due)}."
                 notify(r, task["id"], marker, title, msg,
                        subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
+            who = person_name(task.get("assigned_to")) or "Nobody"
+            cc_overseers(task, desks, recipients, marker, title,
+                         f'{who}\'s task "{task["title"]}", given by {person_name(task.get("created_by")) or "someone"}, '
+                         f"is due {when_text(due)}. Right now it is: {STATUS_WORDS.get(task.get('status'), 'open').lower()}.",
+                         f"{title}: {task['title']} ({who})")
             sent += 1
         except Exception as exc:
             warn(f"deadline_reminders: skipping task {task.get('id')}: {exc!r}")
@@ -1056,6 +1074,15 @@ def daily_countdown() -> None:
                     msg = f"{lead} is due {when_text(due)}. This is the daily reminder until it's done."
                 notify(r, task["id"], marker, title, msg,
                        subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
+            who = person_name(task.get("assigned_to")) or "Nobody"
+            giver = person_name(task.get("created_by")) or "someone"
+            cc_overseers(
+                task, desks, recipients, marker, title,
+                (f'{who}\'s task "{task["title"]}", given by {giver}, was due {when_text(due, True)} and is still not finished.'
+                 if body is None else
+                 f'{who}\'s task "{task["title"]}", given by {giver}, is due {when_text(due)}. This is the daily reminder until it is done.'),
+                f"{title}: {task['title']} ({who})",
+            )
             sent += 1
         except Exception as exc:
             warn(f"daily_countdown: skipping task {task.get('id')}: {exc!r}")
@@ -1177,10 +1204,14 @@ def checklist_reminders() -> None:
                 who = {item["assigned_to"]}
             else:
                 who = doers(task, units)
-            for r in desks.only_on_desk(task.get("desk_id"), who):
+            got = desks.only_on_desk(task.get("desk_id"), who)
+            for r in got:
                 notify(r, task["id"], "checklist_due", "Checklist item due",
                        f"The item \"{item['title']}\" on {whose(task, r)} is due {when_text(due)}.",
                        subject=f"Checklist item due: {item['title']}")
+            cc_overseers(task, desks, got, "checklist_due", "Checklist item due",
+                         f"The item \"{item['title']}\" on {whose(task, None)} is due {when_text(due)}.",
+                         f"Item due: {item['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
             try:
                 supabase.table("subtasks").update({"reminder_sent_for": item["due_date"]}).eq("id", item["id"]).execute()
             except Exception as exc:
@@ -1321,6 +1352,10 @@ def recurring_update_requests() -> None:
                        "Open the task to update its progress, tick off items, or leave a comment.",
                        subject=f"Update requested: {task['title']}")
             if targets:
+                cc_overseers(task, desks, targets, "update_request", "No movement",
+                             f"Nothing has changed on {whose(task, None)} for {UPDATE_REQUEST_DAYS} days. "
+                             f"{person_name(task.get('assigned_to')) or 'The assignee'} has been asked how it is going.",
+                             f"No movement for {UPDATE_REQUEST_DAYS} days: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
                 asked += 1
         except Exception as exc:
             warn(f"recurring_update_requests: skipping task {task.get('id')}: {exc!r}")

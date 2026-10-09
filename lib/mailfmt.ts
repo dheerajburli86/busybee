@@ -193,7 +193,8 @@ export function renderEmail(opts: {
     );
     rows.forEach(([k, v]) =>
       h.push(
-        `<tr><td style="padding:7px 14px;color:#5b6b5e;vertical-align:top;white-space:nowrap;width:130px">${esc(k)}</td><td style="padding:7px 14px;vertical-align:top;line-height:1.45">${esc(v)}</td></tr>`
+        // Label above value: reads well on a phone, where two columns squeeze the text.
+        `<tr><td style="padding:8px 14px;border-top:1px solid #eef1ee"><div style="font-size:12px;color:#5b6b5e;margin-bottom:2px">${esc(k)}</div><div style="font-size:15px;line-height:1.45">${esc(v)}</div></td></tr>`
       )
     );
     h.push(`</table>`);
