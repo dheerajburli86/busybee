@@ -45,6 +45,7 @@ export default function ListsPage() {
   // Create form.
   const [who, setWho] = useState<string[]>([]);
   const [name, setName] = useState("");
+  const [about, setAbout] = useState("");
   const [rows, setRows] = useState<Row[]>(() => [blankRow(), blankRow(), blankRow()]);
   const [due, setDue] = useState("");
   const [saving, setSaving] = useState(false);
@@ -117,6 +118,7 @@ export default function ListsPage() {
     if (lock.current) return;
     if (!who.length) return setError("Pick who this list is for (step 1).");
     if (!name.trim()) return setError("Give the list a name.");
+    if (about.trim().length < 5) return setError("Say what the list is for in a sentence or two - it goes into the email.");
     if (!filled.length) return setError("Add at least one item.");
     const deadline = fromLocalInput(due) || latestItemDate || null;
     if (!deadline) return setError("Pick when the whole list is due (step 3).");
@@ -129,6 +131,7 @@ export default function ListsPage() {
         try {
           await sendJSON("/api/tasks", "POST", {
             title: name.trim(),
+            description: about.trim(),
             is_list: true,
             assigned_to: person,
             due_date: deadline,
@@ -145,6 +148,7 @@ export default function ListsPage() {
         flash(who.length > 1 ? `List sent to ${who.length} people.` : `List sent to ${nameOf(people, who[0])}.`);
         setWho([]);
         setName("");
+        setAbout("");
         setRows([blankRow(), blankRow(), blankRow()]);
         setDue("");
         setTab("given");
@@ -215,6 +219,15 @@ export default function ListsPage() {
             className={`${inputCls} w-full`}
             disabled={saving}
             aria-label="List name"
+          />
+          <textarea
+            value={about}
+            onChange={(e) => setAbout(e.target.value)}
+            placeholder="What is this list for? (required) - goes into the email so anyone reading it understands"
+            rows={2}
+            className={`${inputCls} w-full resize-y`}
+            disabled={saving}
+            aria-label="What the list is for"
           />
           <div className="space-y-2">
             {rows.map((r, i) => (
@@ -291,7 +304,7 @@ export default function ListsPage() {
             </label>
             <button
               onClick={create}
-              disabled={saving || !who.length || !name.trim() || !filled.length}
+              disabled={saving || !who.length || !name.trim() || about.trim().length < 5 || !filled.length}
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto font-semibold"
             >
               {saving ? "Sending..." : `Send list (${filled.length} item${filled.length === 1 ? "" : "s"})`}

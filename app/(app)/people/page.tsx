@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { SIMPLE } from "@/lib/simple";
 
-type Person = { id: string; name: string; email: string; role?: string; telegram?: boolean };
+type Person = { id: string; name: string; email: string; role?: string; telegram?: boolean; oversees?: boolean };
 
 const DESK_ROLES = [
   { value: "member", label: "Member", help: "Works on what they're given; can't move deadlines" },
@@ -55,6 +55,23 @@ export default function PeoplePage() {
   useEffect(() => {
     load();
   }, []);
+
+  // "Gets every update": told about everything on every task (the boss).
+  const toggleOversees = async (person: Person) => {
+    const next = !person.oversees;
+    setPeople((ps) => ps.map((x) => (x.id === person.id ? { ...x, oversees: next } : x)));
+    try {
+      const r = await fetch("/api/team/members", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: person.id, oversees: next }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.error || "Could not change that");
+    } catch (e: any) {
+      setPeople((ps) => ps.map((x) => (x.id === person.id ? { ...x, oversees: !next } : x)));
+      alert(e.message);
+    }
+  };
 
   const changeRole = async (person: Person, newRole: string) => {
     try {
@@ -154,7 +171,11 @@ export default function PeoplePage() {
           {people.map((p) => (
             <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 rounded px-3 py-2">
               <div className="min-w-0">
-                <p className="text-sm truncate">{p.name}{p.id === me && " (you)"}</p>
+                <p className="text-sm truncate">
+                  {p.name}
+                  {p.id === me && " (you)"}
+                  {p.oversees && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-900/60 text-amber-200">Head · gets every update</span>}
+                </p>
                 <p className="text-xs text-slate-500 truncate">
                   {p.email}
                   {p.telegram !== undefined && (
@@ -165,6 +186,16 @@ export default function PeoplePage() {
                   )}
                 </p>
               </div>
+              <div className="flex items-center gap-2">
+              {isSuper && (
+                <button
+                  onClick={() => toggleOversees(p)}
+                  className={`text-xs px-2 py-1 rounded border ${p.oversees ? "border-amber-600 text-amber-200" : "border-slate-600 text-slate-400 hover:text-white"}`}
+                  title="Gets an email about everything that happens on every task, plus the team summary"
+                >
+                  {p.oversees ? "✓ Every update" : "Every update"}
+                </button>
+              )}
               {canEditRoles ? (
                 <select value={p.role || "member"} onChange={(e) => changeRole(p, e.target.value)} className={`${inputCls} text-xs py-1`} aria-label={`Role for ${p.name}`}>
                   {(p.role === "manager" ? DESK_ROLES : ROLE_CHOICES).map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
@@ -172,6 +203,7 @@ export default function PeoplePage() {
               ) : (
                 <span className="text-xs text-slate-400">{DESK_ROLES.find((r) => r.value === (p.role || "member"))?.label}</span>
               )}
+              </div>
             </div>
           ))}
         </div>

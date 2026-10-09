@@ -3,7 +3,7 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
 import { DESK_ROLE_VALUES, logActivity, normalizeRole } from "@/lib/permissions";
-import { telegramConnected } from "@/lib/supabase-admin";
+import { createAdminClient, telegramConnected } from "@/lib/supabase-admin";
 
 export async function GET(request: NextRequest) {
   try {
@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
 
     const { data, error } = await supabase
       .from("desk_members")
-      .select("user_id, role, desk_id, users(id, email, full_name)")
+      .select("user_id, role, desk_id, oversees, users(id, email, full_name)")
       .in("desk_id", deskIds);
 
     if (error) throw error;
@@ -31,6 +31,7 @@ export async function GET(request: NextRequest) {
       email: dm.users?.email,
       name: dm.users?.full_name || dm.users?.email,
       role: normalizeRole(dm.role),
+      oversees: !!dm.oversees,
     })) || [];
 
     const myRole = normalizeRole(data?.find((dm: any) => dm.user_id === user.id)?.role);
@@ -102,9 +103,22 @@ export async function PUT(request: NextRequest) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const { user_id, role } = await request.json();
+    const body = await request.json();
+    const { user_id, role } = body;
     if (!user_id || typeof user_id !== "string") {
       return NextResponse.json({ error: "user_id required" }, { status: 400 });
+    }
+
+    // "Gets every update" (desk_members.oversees): only admins and
+    // supervisors can change who hears about everything.
+    if (typeof body.oversees === "boolean" && role === undefined) {
+      const { data: mine } = await supabase.from("desk_members").select("desk_id, role").eq("user_id", user.id);
+      const leadDesks = (mine || []).filter((m: any) => ["admin", "supervisor"].includes(normalizeRole(m.role))).map((m: any) => m.desk_id);
+      if (!leadDesks.length) return NextResponse.json({ error: "Only an admin or supervisor can change this" }, { status: 403 });
+      const db = createAdminClient() || supabase;
+      const { error } = await db.from("desk_members").update({ oversees: body.oversees }).eq("user_id", user_id).in("desk_id", leadDesks);
+      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+      return NextResponse.json({ ok: true, oversees: body.oversees });
     }
     if (!DESK_ROLE_VALUES.includes(role)) {
       return NextResponse.json(

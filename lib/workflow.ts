@@ -60,12 +60,27 @@ export async function completionMove(supabase: any, task: { project_id: string |
 export async function notifyCompleted(supabase: any, task: any, actorId: string | null, how = "") {
   const audience = (await taskAudience(supabase, task)).filter((x) => x !== actorId);
   const word = task.status === "closed" ? "closed" : "completed";
+  // Say who did it, so the alert reads on its own.
+  let who = "";
+  try {
+    const ids = [actorId, task.assigned_to].filter(Boolean);
+    const { data } = ids.length ? await supabase.from("users").select("id, full_name, email").in("id", ids) : { data: [] };
+    const nm = (id: string | null) => (data || []).find((u: any) => u.id === id);
+    const u = nm(actorId) || nm(task.assigned_to);
+    who = u ? u.full_name || u.email : "";
+  } catch {
+    /* the message still reads without a name */
+  }
+  const message =
+    word === "completed"
+      ? `${who || "Someone"} marked "${task.title}" as finished${how}. It is now waiting to be reviewed and approved.`
+      : `"${task.title}" was approved and closed${who ? ` by ${who}` : ""}${how}.`;
   await notifyMany(supabase, audience, {
     task_id: task.id,
     type: "completed",
-    title: `Task ${word}`,
-    message: `Task marked ${word}${how}: ${task.title}`,
-    email: { subject: `Task ${word}: ${task.title}`, body: `${task.title} was marked ${word}${how}.` },
+    title: word === "completed" ? "Work finished" : "Task closed",
+    message,
+    email: { subject: `${word === "completed" ? "Finished" : "Closed"}: ${task.title}${who ? ` (${who})` : ""}` },
   });
 }
 
@@ -152,10 +167,14 @@ export async function decidersFor(supabase: any, task: any, requester: string): 
 
   ids.delete(requester);
   if (ids.size === 0) {
-    const { data: desk } = await supabase.from("desk_members").select("user_id, role").eq("desk_id", task.desk_id);
-    (desk || [])
-      .filter((m: any) => m.user_id !== requester && SUPER_ROLES.includes(normalizeRole(m.role)))
-      .forEach((m: any) => ids.add(m.user_id));
+    // Nobody else on the task: the desk's overseer decides (Shankar), and
+    // only if there is none, every supervisor.
+    const { data: desk } = await supabase.from("desk_members").select("*").eq("desk_id", task.desk_id);
+    const rows = (desk || []).filter((m: any) => m.user_id !== requester);
+    const heads = rows.filter((m: any) => m.oversees === true);
+    (heads.length ? heads : rows.filter((m: any) => SUPER_ROLES.includes(normalizeRole(m.role)))).forEach((m: any) =>
+      ids.add(m.user_id)
+    );
   }
   return Array.from(ids);
 }

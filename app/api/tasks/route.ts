@@ -230,6 +230,15 @@ export async function POST(request: NextRequest) {
     }
 
     if (typeof title !== "string" || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
+    // Every alert about a task carries its description, so anyone reading an
+    // email or Telegram message knows what the work is. Private to-dos are
+    // only for their owner and can stay short.
+    if (!personal && (typeof description !== "string" || description.trim().length < 5)) {
+      return NextResponse.json(
+        { error: "Describe the task in a sentence or two - it goes into every email and Telegram message about it" },
+        { status: 400 }
+      );
+    }
     if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
     // DOCX #10: a task cannot exist without a due date and time.
     const due = normalizeTimestamp(due_date);
@@ -414,6 +423,9 @@ export async function PUT(request: NextRequest) {
         return NextResponse.json({ error: "A task needs a title" }, { status: 400 });
       }
       patch.title = patch.title.trim();
+    }
+    if ("description" in patch && !before.personal && (typeof patch.description !== "string" || patch.description.trim().length < 5)) {
+      return NextResponse.json({ error: "A task needs a description - it goes into every email about it" }, { status: 400 });
     }
     if ("description" in patch && patch.description !== null && typeof patch.description !== "string") {
       return NextResponse.json({ error: "The description must be text" }, { status: 400 });

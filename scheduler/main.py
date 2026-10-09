@@ -201,15 +201,27 @@ class Desks:
 
     def __init__(self):
         # Ordered by columns every version of the table has.
-        rows = fetch_all(lambda: supabase.table("desk_members").select("desk_id, user_id, role").order("user_id"))
-        self.members = {}   # desk_id -> {user ids}
-        self.people = {}    # user_id -> {"desks": set, "leads": set}
+        try:
+            rows = fetch_all(lambda: supabase.table("desk_members").select("desk_id, user_id, role, oversees").order("user_id"))
+        except Exception:
+            # Before the "oversees" column exists.
+            rows = fetch_all(lambda: supabase.table("desk_members").select("desk_id, user_id, role").order("user_id"))
+        self.members = {}    # desk_id -> {user ids}
+        self.people = {}     # user_id -> {"desks": set, "leads": set, "heads": set}
+        self.overseers = {}  # desk_id -> {user ids who hear about everything}
         for r in rows:
             self.members.setdefault(r["desk_id"], set()).add(r["user_id"])
-            p = self.people.setdefault(r["user_id"], {"desks": set(), "leads": set()})
+            p = self.people.setdefault(r["user_id"], {"desks": set(), "leads": set(), "heads": set()})
             p["desks"].add(r["desk_id"])
             if normal_role(r.get("role")) in ("admin", "supervisor"):
                 p["leads"].add(r["desk_id"])
+            if r.get("oversees"):
+                self.overseers.setdefault(r["desk_id"], set()).add(r["user_id"])
+        # Who gets the team view: the desk's overseers, or every supervisor
+        # on a desk that has no overseer.
+        for uid, p in self.people.items():
+            p["heads"] = {d for d in p["desks"] if uid in self.overseers.get(d, set())}
+            p["heads"] |= {d for d in p["leads"] if not self.overseers.get(d)}
 
     def only_on_desk(self, desk_id, ids) -> set:
         """Drop anyone no longer on the task's desk (they can't open it any more)."""
@@ -444,7 +456,7 @@ def _email_for(user_id: str):
     return address
 
 
-def _send_gmail(user_id: str, address: str, subject: str, body: str) -> bool:
+def _send_gmail(user_id: str, address: str, subject: str, body: str, html: str = "") -> bool:
     if _gmail_dead[0]:
         return False
     msg = EmailMessage()
@@ -452,6 +464,8 @@ def _send_gmail(user_id: str, address: str, subject: str, body: str) -> bool:
     msg["To"] = address
     msg["Subject"] = subject
     msg.set_content(body)
+    if html:
+        msg.add_alternative(html, subtype="html")
     # Gmail doesn't like bursts; keep a small gap between messages.
     wait = 1.0 - (time.time() - _last_mail[0])
     if wait > 0:
@@ -473,7 +487,7 @@ def _send_gmail(user_id: str, address: str, subject: str, body: str) -> bool:
         return False
 
 
-def send_mail(user_id: str, subject: str, body: str) -> bool:
+def send_mail(user_id: str, subject: str, body: str, html: str = "") -> bool:
     gmail = bool(GMAIL_USER and GMAIL_APP_PASSWORD)
     key = os.environ.get("RESEND_API_KEY")
     if not gmail and not key:
@@ -482,8 +496,11 @@ def send_mail(user_id: str, subject: str, body: str) -> bool:
     if not address:
         return False
     if gmail:
-        return _send_gmail(user_id, address, subject, body)
-    payload = _json.dumps({"from": MAIL_FROM, "to": [address], "subject": subject, "text": body}).encode()
+        return _send_gmail(user_id, address, subject, body, html)
+    mail = {"from": MAIL_FROM, "to": [address], "subject": subject, "text": body}
+    if html:
+        mail["html"] = html
+    payload = _json.dumps(mail).encode()
     for attempt in range(2):
         # Resend allows a couple of requests a second; space them out.
         wait = 0.6 - (time.time() - _last_mail[0])
@@ -617,7 +634,228 @@ def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=No
     return False
 
 
-def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "") -> bool:
+# ---------------------------------------------------------------------------
+# What the emails look like (same layout as lib/mailfmt.ts in the web app).
+#
+# An email must make sense to someone who has never opened BusyBee: whose
+# task it is, who gave it, what it's about, when it's due, how far it has got
+# and why this reader is getting it.
+# ---------------------------------------------------------------------------
+
+STATUS_WORDS = {
+    "pending": "Not started",
+    "in_progress": "Being worked on",
+    "need_help": "Stuck - needs help",
+    "done": "Finished - waiting for review",
+    "closed": "Approved and closed",
+}
+PRIORITY_WORDS = {"super_high": "Super high", "high": "High", "medium": "Medium", "low": "Low"}
+_names = {}
+_projects = {}
+
+
+def person_name(uid) -> str:
+    if not uid:
+        return ""
+    hit = _names.get(uid)
+    if hit and time.time() - hit[1] < 3600:
+        return hit[0]
+    try:
+        res = supabase.table("users").select("full_name, email").eq("id", uid).limit(1).execute()
+        row = (res.data or [{}])[0]
+        name = row.get("full_name") or row.get("email") or "Someone"
+    except Exception:
+        name = "Someone"
+    _names[uid] = (name, time.time())
+    return name
+
+
+def first_name(uid) -> str:
+    return (person_name(uid) or "").split(" ")[0]
+
+
+def project_name(pid):
+    if not pid:
+        return None
+    if pid in _projects:
+        return _projects[pid]
+    try:
+        res = supabase.table("projects").select("name").eq("id", pid).limit(1).execute()
+        _projects[pid] = (res.data or [{}])[0].get("name")
+    except Exception:
+        _projects[pid] = None
+    return _projects[pid]
+
+
+def when_text(d, finished: bool = False) -> str:
+    """'Fri 9 Oct, 6:00 PM (in 2 days)' / '(overdue by 3 days)'."""
+    if not d:
+        return "No deadline"
+    base = f"{d.astimezone(LOCAL_TZ):%a %d %b, %I:%M %p}".replace(" 0", " ")
+    if finished:
+        return base
+    secs = (d - now_utc()).total_seconds()
+    days = round(abs(secs) / 86400)
+    hours = max(1, round(abs(secs) / 3600))
+    span = f"{days} day{'' if days == 1 else 's'}" if days >= 1 else f"{hours} hour{'' if hours == 1 else 's'}"
+    return f"{base} ({'overdue by ' + span if secs < 0 else 'in ' + span})"
+
+
+def whose(task, reader) -> str:
+    """'your task "X"' for the assignee, 'Dheeraj Burli's task "X"' for anyone else."""
+    owner = task.get("assigned_to")
+    if owner and owner == reader:
+        return f'your task "{task.get("title")}"'
+    if owner:
+        return f'{person_name(owner)}\'s task "{task.get("title")}"'
+    return f'the task "{task.get("title")}"'
+
+
+def task_card(task_id):
+    """Everything the 'About this task' box needs, or None."""
+    try:
+        res = (
+            supabase.table("tasks")
+            .select("id, title, description, status, priority, due_date, assigned_to, created_by, project_id, progress_percent, review_status, is_list")
+            .eq("id", task_id)
+            .limit(1)
+            .execute()
+        )
+        t = (res.data or [None])[0]
+        if not t:
+            return None
+        subs = (
+            supabase.table("subtasks").select("title, done, due_date, position").eq("task_id", task_id).order("position").execute().data
+            or []
+        )
+    except Exception as exc:
+        warn(f"task_card {task_id}: {exc!r}")
+        return None
+    return {**t, "items": subs}
+
+
+def _card_rows(card):
+    finished = card.get("status") in FINISHED
+    rows = [
+        ("To-do list" if card.get("is_list") else "Task", card.get("title") or ""),
+        ("What it's about", (card.get("description") or "").strip() or "No description was given."),
+        ("Assigned to", person_name(card.get("assigned_to")) or "Nobody yet"),
+        ("Given by", (person_name(card.get("created_by")) or "Someone")
+         + (" (set this task for themselves)" if card.get("created_by") and card.get("created_by") == card.get("assigned_to") else "")),
+    ]
+    proj = project_name(card.get("project_id"))
+    if proj:
+        rows.append(("Project", proj))
+    if card.get("priority"):
+        rows.append(("Priority", PRIORITY_WORDS.get(card["priority"], card["priority"])))
+    rows.append(("Deadline", when_text(parse(card.get("due_date")), finished)))
+    stand = STATUS_WORDS.get(card.get("status"), card.get("status") or "")
+    if card.get("review_status") == "sent_back" and not finished:
+        stand += " (sent back for changes)"
+    rows.append(("Where it stands", stand))
+    items = card.get("items") or []
+    if items:
+        done = sum(1 for i in items if i.get("done"))
+        rows.append(("Progress", f"{done} of {len(items)} items done"))
+    elif card.get("progress_percent") is not None:
+        rows.append(("Progress", f"{card['progress_percent']}%"))
+    return rows
+
+
+def why_you(card, uid) -> str:
+    if not card:
+        return "You're getting this because you use BusyBee."
+    if card.get("assigned_to") == uid:
+        return "You're getting this because this task is assigned to you."
+    if card.get("created_by") == uid:
+        return f"You're getting this because you gave this task to {person_name(card.get('assigned_to')) or 'someone'}."
+    return (f"You're getting this to keep you in the loop as a supervisor on BusyBee. "
+            f"{person_name(card.get('created_by')) or 'Someone'} gave this task to {person_name(card.get('assigned_to')) or 'someone'}.")
+
+
+def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=(), cta=None, why="", settings=True):
+    """Returns (text, html). sections: list of (heading, [lines], numbered)."""
+    green = "#2f8f3a"
+    rows = _card_rows(card) if card else []
+    items = (card or {}).get("items") or []
+
+    def item_line(i):
+        d = parse(i.get("due_date"))
+        return f"{'[done] ' if i.get('done') else ''}{i.get('title')}" + (f" - by {when_text(d, True)}" if d else "")
+
+    t = []
+    if greeting:
+        t += [greeting, ""]
+    t.append(headline)
+    for p in paragraphs:
+        t += ["", p]
+    if card:
+        t += ["", "ABOUT THIS TASK"] + [f"{k}: {v}" for k, v in rows]
+        if items:
+            t += ["", "Items:"] + [f"  {n}. {item_line(i)}" for n, i in enumerate(items, 1)]
+    for heading, lines, numbered in sections:
+        t += ["", heading.upper()]
+        t += [f"  {n}. {l}" if numbered else f"  - {l}" for n, l in enumerate(lines, 1)]
+    if cta:
+        t += ["", f"{cta[1]}: {cta[0]}"]
+    t += ["", "--", why or "You're getting this because you use BusyBee."]
+    if settings and APP_URL:
+        t.append(f"Choose which emails you get: {APP_URL}/settings")
+    text = "\n".join(t)
+
+    e = _html
+    h = [
+        f'<div style="background:#f4f6f4;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;color:#1d2a1f">',
+        '<div style="max-width:620px;margin:0 auto;background:#ffffff;border:1px solid #dfe5df;border-radius:8px;overflow:hidden">',
+        f'<div style="background:{green};color:#ffffff;padding:12px 20px;font-size:15px;font-weight:bold">&#128029; BusyBee</div>',
+        '<div style="padding:20px">',
+    ]
+    if greeting:
+        h.append(f'<p style="margin:0 0 12px;font-size:15px">{e(greeting)}</p>')
+    h.append(f'<p style="margin:0 0 12px;font-size:17px;font-weight:bold;line-height:1.4">{e(headline)}</p>')
+    for p in paragraphs:
+        h.append(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.5">{e(p)}</p>')
+    if card:
+        h.append('<div style="margin:16px 0;border:1px solid #dfe5df;border-radius:6px">')
+        h.append(f'<div style="background:#eef5ee;padding:8px 14px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:{green}">ABOUT THIS TASK</div>')
+        h.append('<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px">')
+        for k, v in rows:
+            h.append(
+                f'<tr><td style="padding:7px 14px;color:#5b6b5e;vertical-align:top;white-space:nowrap;width:130px">{e(k)}</td>'
+                f'<td style="padding:7px 14px;vertical-align:top;line-height:1.45">{e(v)}</td></tr>'
+            )
+        h.append("</table>")
+        if items:
+            h.append('<div style="padding:4px 14px 12px"><div style="font-size:13px;color:#5b6b5e;margin:6px 0">Items</div>'
+                     '<ol style="margin:0;padding-left:22px;font-size:14px;line-height:1.6">')
+            for i in items:
+                style = "color:#8a978c;text-decoration:line-through" if i.get("done") else ""
+                d = parse(i.get("due_date"))
+                tail = f' <span style="color:#8a978c">- by {e(when_text(d, True))}</span>' if d else ""
+                h.append(f'<li style="{style}">{e(i.get("title"))}{tail}</li>')
+            h.append("</ol></div>")
+        h.append("</div>")
+    for heading, lines, numbered in sections:
+        tag = "ol" if numbered else "ul"
+        h.append(f'<div style="margin:18px 0 6px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:{green}">{e(heading.upper())}</div>')
+        h.append(f'<{tag} style="margin:0;padding-left:22px;font-size:14px;line-height:1.6">')
+        h += [f"<li>{e(l)}</li>" for l in lines]
+        h.append(f"</{tag}>")
+    if cta:
+        h.append(
+            f'<p style="margin:20px 0 4px"><a href="{e(cta[0])}" style="background:{green};color:#ffffff;text-decoration:none;'
+            f'padding:10px 18px;border-radius:6px;font-size:14px;font-weight:bold;display:inline-block">{e(cta[1])}</a></p>'
+        )
+    foot = e(why or "You're getting this because you use BusyBee.")
+    if settings and APP_URL:
+        foot += f' <a href="{e(APP_URL)}/settings" style="color:#7a887c">Choose which emails you get</a>.'
+    h.append(f'</div><div style="border-top:1px solid #dfe5df;padding:12px 20px;font-size:12px;color:#7a887c;line-height:1.5">{foot}</div></div></div>')
+    return text, "".join(h)
+
+
+
+def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "",
+           email: tuple = None, telegram_text: str = "", overseer: bool = False) -> bool:
     """In-app notification, then the same by email. No email if the in-app one
     couldn't be saved: the saved row is what stops it being sent again.
 
@@ -634,13 +872,27 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
             warn(f"could not write notification for {user_id}: {exc!r}")
             return False
     if _wants(user_id, ntype, "email"):
-        body = message
-        if APP_URL:
-            body += f"\n\nOpen BusyBee: {APP_URL}/dashboard" + (f"?task={task_id}" if task_id else "")
-            body += f"\n\nChoose which alerts you get: {APP_URL}/settings"
-        send_mail(user_id, subject or title, body)
+        try:
+            if email:
+                text, html = email
+            else:
+                # Any task alert carries the task itself, so it makes sense
+                # to someone who has never opened BusyBee.
+                card = task_card(task_id) if task_id else None
+                text, html = render_email(
+                    greeting=f"Hi {first_name(user_id)}," if first_name(user_id) else None,
+                    headline=message,
+                    card=card,
+                    cta=(f"{APP_URL}/dashboard" + (f"?task={task_id}" if task_id else ""),
+                         "Open the task in BusyBee" if task_id else "Open BusyBee") if APP_URL else None,
+                    why=("You're getting this because you oversee all work on BusyBee, so you're told about "
+                         "everything that happens on every task.") if overseer else why_you(card, user_id),
+                )
+            send_mail(user_id, subject or title, text, html)
+        except Exception as exc:
+            warn(f"email to {user_id} failed to build: {exc!r}")
     if _wants(user_id, ntype, "telegram"):
-        send_telegram(user_id, ntype, title, message, task_id)
+        send_telegram(user_id, ntype, title, telegram_text or message, task_id)
     if not wrote:
         mark_sent(task_id, ntype)
     return wrote
@@ -692,9 +944,20 @@ def deadline_reminders() -> None:
                 # Once per deadline: a new deadline (extension) can be overdue again.
                 if already_sent(task["id"], "overdue", due):
                     continue
+                # The overseer hears about it the moment work goes overdue.
+                for o in desks.overseers.get(task.get("desk_id"), set()) - recipients:
+                    giver = person_name(task.get("created_by")) or "Someone"
+                    notify(o, task["id"], "overdue", f"Overdue: {task['title']}",
+                           f"{whose(task, o)[0].upper()}{whose(task, o)[1:]}, given by {giver}, went past its deadline "
+                           f"({when_text(due, True)}) without being finished.",
+                           subject=f"Overdue: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})",
+                           overseer=True)
                 for r in recipients:
-                    notify(r, task["id"], "overdue", "Overdue", f"{task['title']} was due at {local(due)} and isn't finished",
-                           subject=f"Overdue: {task['title']}")
+                    msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} was due {when_text(due, True)} and isn't finished yet."
+                    if r == task.get("assigned_to"):
+                        msg += " Finish it, or open the task and ask for more time."
+                    notify(r, task["id"], "overdue", "Overdue", msg,
+                           subject=f"Overdue: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
                 sent += 1
                 continue
 
@@ -713,8 +976,9 @@ def deadline_reminders() -> None:
                 continue
             title = f"Due in {threshold} hours" if hours_left > threshold - 0.5 else f"Due in {hours_text(hours_left)}"
             for r in recipients:
-                notify(r, task["id"], marker, title, f"{task['title']} is due at {local(due)}",
-                       subject=f"{title}: {task['title']}")
+                msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} is due {when_text(due)}."
+                notify(r, task["id"], marker, title, msg,
+                       subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
             sent += 1
         except Exception as exc:
             warn(f"deadline_reminders: skipping task {task.get('id')}: {exc!r}")
@@ -770,22 +1034,28 @@ def daily_countdown() -> None:
             if hours_left <= 0:
                 days_over = max(1, int((now - due).total_seconds() // 86400))
                 title = f"Overdue by {days_over} day{'' if days_over == 1 else 's'}"
-                body = (
-                    f"{task['title']} was due {local(due)} and is still open. "
-                    "Finish it, or ask for more time from the task."
-                )
+                body = None
                 # Escalation: whoever assigned it hears about it too.
                 people = people | assignors(task, extras)
             else:
                 days_left = max(1, int(hours_left // 24))
                 title = f"{days_left} day{'' if days_left == 1 else 's'} left"
-                body = f"{task['title']} is due {local(due)}."
+                body = ""
 
             recipients = desks.only_on_desk(task.get("desk_id"), people)
             if not recipients:
                 continue
             for r in recipients:
-                notify(r, task["id"], marker, title, body, subject=f"{title}: {task['title']}")
+                lead = whose(task, r)
+                lead = lead[0].upper() + lead[1:]
+                if body is None:
+                    msg = f"{lead} was due {when_text(due, True)} and is still open."
+                    msg += (" Finish it, or open the task and ask for more time." if r == task.get("assigned_to")
+                            else " You're copied in because you gave this task.")
+                else:
+                    msg = f"{lead} is due {when_text(due)}. This is the daily reminder until it's done."
+                notify(r, task["id"], marker, title, msg,
+                       subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
             sent += 1
         except Exception as exc:
             warn(f"daily_countdown: skipping task {task.get('id')}: {exc!r}")
@@ -845,7 +1115,9 @@ def review_reminders() -> None:
             deciders = assignors(task, extras)
             if managers.get(task.get("project_id")):
                 deciders.add(managers[task["project_id"]])
-            deciders |= {
+            # Plus the desk's overseer (or, with none, its supervisors) - not
+            # every supervisor on the desk.
+            deciders |= desks.overseers.get(task.get("desk_id")) or {
                 uid for uid, p in desks.people.items() if task.get("desk_id") in p["leads"]
             }
             workers = {task.get("assigned_to")} | units.members(task)
@@ -858,8 +1130,10 @@ def review_reminders() -> None:
                     task["id"],
                     marker,
                     "Waiting for your review",
-                    f"{task['title']} is finished and waiting to be signed off.",
-                    subject=f"Waiting for review: {task['title']}",
+                    f"{person_name(task.get('assigned_to')) or 'Someone'} finished \"{task['title']}\" and it is waiting for "
+                    "you to review it. Check the work however suits you (a call, a demo, a quick look), then open the task "
+                    "and press Approve or Send back.",
+                    subject=f"Waiting for your review: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})",
                 )
             sent += 1
         except Exception as exc:
@@ -905,7 +1179,7 @@ def checklist_reminders() -> None:
                 who = doers(task, units)
             for r in desks.only_on_desk(task.get("desk_id"), who):
                 notify(r, task["id"], "checklist_due", "Checklist item due",
-                       f"\"{item['title']}\" on {task['title']} is due at {local(due)}",
+                       f"The item \"{item['title']}\" on {whose(task, r)} is due {when_text(due)}.",
                        subject=f"Checklist item due: {item['title']}")
             try:
                 supabase.table("subtasks").update({"reminder_sent_for": item["due_date"]}).eq("id", item["id"]).execute()
@@ -1043,7 +1317,8 @@ def recurring_update_requests() -> None:
             targets = desks.only_on_desk(task.get("desk_id"), doers(task, units))
             for r in targets:
                 notify(r, task["id"], "update_request", "Update requested",
-                       f"No movement on {task['title']} for {UPDATE_REQUEST_DAYS} days. How is it going?",
+                       f"Nothing has changed on {whose(task, r)} for {UPDATE_REQUEST_DAYS} days. How is it going? "
+                       "Open the task to update its progress, tick off items, or leave a comment.",
                        subject=f"Update requested: {task['title']}")
             if targets:
                 asked += 1
@@ -1057,52 +1332,32 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
-def _tally():
-    """Per person, the running score of their work: how many tasks they have,
-    how many were done yesterday, how many today, how many are left.
+def _collect():
+    """Every task that counts towards the daily summaries, with who it's for.
 
-    "Assigned" is every task they're doing that hasn't been cleared away yet:
-    everything still open, plus finished work that hasn't been archived (and
-    anything finished since yesterday, even if someone archived it already),
-    so the number stays steady while "done" grows and "to go" shrinks.
+    That is everything still open, plus finished work that hasn't been
+    archived, plus anything finished since yesterday (even if archived).
+    Private to-dos are left out: nobody assigned them.
 
-    Returns (per_user, per_desk) where each value is a dict of counts:
-    total, earlier, yesterday, today, to_go, overdue, due_today.
+    Returns (per_user, per_desk, desks): lists of entries, each entry a dict
+    with the task and its bucket ("today", "yesterday", "earlier", "to_go").
     """
     now = now_utc()
-    local_now = now.astimezone(LOCAL_TZ)
-    today = local_now.date()
+    today = now.astimezone(LOCAL_TZ).date()
     yesterday = today - timedelta(days=1)
     since = datetime(yesterday.year, yesterday.month, yesterday.day, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
     since_text = since.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # Two plain queries rather than one OR filter (the pinned client library
-    # has no .or_()): everything not archived, plus anything archived that
-    # was finished since yesterday.
-    live = fetch_all(
-        lambda: supabase.table("tasks")
-        .select(TASK_COLUMNS + ", completed_at")
-        .is_("archived_at", "null")
-        .order("id")
-    )
+    cols = TASK_COLUMNS + ", completed_at, project_id, review_status"
+    live = fetch_all(lambda: supabase.table("tasks").select(cols).is_("archived_at", "null").order("id"))
     recent = fetch_all(
-        lambda: supabase.table("tasks")
-        .select(TASK_COLUMNS + ", completed_at")
-        .not_.is_("archived_at", "null")
-        .gte("completed_at", since_text)
-        .order("id")
+        lambda: supabase.table("tasks").select(cols).not_.is_("archived_at", "null").gte("completed_at", since_text).order("id")
     )
     rows = list({t["id"]: t for t in live + recent}.values())
     units, desks = Units(), Desks()
 
-    def blank():
-        return {"total": 0, "earlier": 0, "yesterday": 0, "today": 0, "to_go": 0, "overdue": 0, "due_today": 0}
-
     per_user, per_desk = {}, {}
     for task in rows:
         try:
-            # Private to-dos are nobody's business but their owner's, and
-            # nobody assigned them - they're not part of the score.
             if task.get("personal"):
                 continue
             people = desks.only_on_desk(task.get("desk_id"), doers(task, units))
@@ -1111,69 +1366,151 @@ def _tally():
             finished = task.get("status") in FINISHED
             if not finished and task.get("archived_at"):
                 continue
+            due = parse(task.get("due_date"))
             if finished:
                 done_at = parse(task.get("completed_at"))
                 day = done_at.astimezone(LOCAL_TZ).date() if done_at else None
                 bucket = "today" if day == today else "yesterday" if day == yesterday else "earlier"
             else:
                 bucket = "to_go"
-            due = parse(task.get("due_date"))
-            late = (not finished) and bool(due and due < now)
-            due_now = (not finished) and bool(due and not late and due.astimezone(LOCAL_TZ).date() == today)
-            for counts in [per_user.setdefault(u, blank()) for u in people] + [per_desk.setdefault(task.get("desk_id"), blank())]:
-                counts["total"] += 1
-                counts[bucket] += 1
-                if late:
-                    counts["overdue"] += 1
-                if due_now:
-                    counts["due_today"] += 1
+            entry = {
+                "task": task,
+                "bucket": bucket,
+                "due": due,
+                "late": (not finished) and bool(due and due < now),
+                "due_today": (not finished) and bool(due and due >= now and due.astimezone(LOCAL_TZ).date() == today),
+                "review": task.get("status") == "done" and task.get("review_status") == "pending",
+                "people": people,
+            }
+            for u in people:
+                per_user.setdefault(u, []).append(entry)
+            per_desk.setdefault(task.get("desk_id"), []).append(entry)
         except Exception as exc:
-            warn(f"_tally: skipping task {task.get('id')}: {exc!r}")
-            continue
+            warn(f"_collect: skipping task {task.get('id')}: {exc!r}")
     return per_user, per_desk, desks
 
 
-def _team_line(info, per_desk, with_today: bool) -> str:
-    """For supervisors and admins: the same score for every desk they lead."""
-    team = {"total": 0, "today": 0, "yesterday": 0, "to_go": 0, "overdue": 0}
-    for d in info["leads"]:
-        c = per_desk.get(d)
-        if c:
-            for k in team:
-                team[k] += c[k]
-    if not team["total"]:
-        return ""
-    done = f"{team['today']} done today" if with_today else f"{team['yesterday']} done yesterday"
-    line = f"Your team: {team['total']} assigned, {done}, {team['to_go']} to go"
-    return line + (f" ({team['overdue']} overdue)" if team["overdue"] else "")
+def _by_due(entries):
+    far = datetime.max.replace(tzinfo=timezone.utc)
+    return sorted(entries, key=lambda e: e["due"] or far)
+
+
+def _task_line(e, with_person=False, done_word=None) -> str:
+    t = e["task"]
+    parts = [f'"{t.get("title")}"']
+    if with_person:
+        parts.append(", ".join(person_name(p) for p in sorted(e["people"])) or "unassigned")
+    if done_word:
+        parts.append(done_word)
+    else:
+        parts.append(f"due {when_text(e['due'])}" if e["due"] else "no deadline")
+    proj = project_name(t.get("project_id"))
+    if proj:
+        parts.append(f"project: {proj}")
+    if not with_person and t.get("created_by"):
+        parts.append(f"given by {person_name(t.get('created_by'))}")
+    return " - ".join(parts)
+
+
+def _team(info, per_desk):
+    """Everything on the desks this person oversees, and who is on them."""
+    entries, seen = [], set()
+    for d in info["heads"]:
+        for e in per_desk.get(d, []):
+            if e["task"]["id"] not in seen:
+                seen.add(e["task"]["id"])
+                entries.append(e)
+    return entries
+
+
+def _team_people(info, desks, me):
+    ids = set()
+    for d in info["heads"]:
+        ids |= desks.members.get(d, set())
+    ids.discard(me)
+    return sorted(ids, key=lambda u: person_name(u).lower())
+
+
+def _send_summary(uid, ntype, title, subject, headline, paragraphs, sections):
+    text, html = render_email(
+        greeting=f"Hi {first_name(uid)}," if first_name(uid) else None,
+        headline=headline,
+        paragraphs=paragraphs,
+        sections=sections,
+        cta=(f"{APP_URL}/dashboard", "Open BusyBee") if APP_URL else None,
+        why="You're getting this daily summary because you're on BusyBee.",
+    )
+    # Telegram gets the same words, without the email's footer.
+    tg = text.split("\n--\n")[0]
+    notify(uid, None, ntype, title, headline, subject=subject, email=(text, html), telegram_text=tg)
 
 
 def start_of_day() -> None:
-    """#35: each person's day ahead - what's left, what's due today, what's late."""
-    per_user, per_desk, desks = _tally()
+    """9 AM: what each person has to do today, and for supervisors, where the team stands."""
+    per_user, per_desk, desks = _collect()
     count = 0
     for uid, info in desks.people.items():
         try:
-            c = per_user.get(uid)
-            lines = []
-            if c and c["to_go"]:
-                left = f"{_plural(c['to_go'], 'task')} to go"
+            mine = per_user.get(uid, [])
+            open_ = _by_due([e for e in mine if e["bucket"] == "to_go"])
+            yday = [e for e in mine if e["bucket"] == "yesterday"]
+            late = [e for e in open_ if e["late"]]
+            today = [e for e in open_ if e["due_today"]]
+            sections, paragraphs = [], []
+
+            if open_:
                 extra = []
-                if c["due_today"]:
-                    extra.append(f"{c['due_today']} due today")
-                if c["overdue"]:
-                    extra.append(f"{c['overdue']} overdue")
-                lines.append(left + (f" ({', '.join(extra)})" if extra else ""))
-            elif c and c["total"]:
-                lines.append("Nothing left to do. Everything assigned to you is done")
-            if c and c["yesterday"]:
-                lines.append(f"Yesterday you finished {c['yesterday']}")
-            team = _team_line(info, per_desk, with_today=False) if info["leads"] else ""
-            if team:
-                lines.append(team)
-            if not lines:
+                if late:
+                    extra.append(f"{len(late)} overdue")
+                if today:
+                    extra.append(f"{len(today)} due today")
+                headline = f"Good morning. You have {_plural(len(open_), 'task')} to finish" + (f" ({', '.join(extra)})." if extra else ".")
+                sections.append(("Your tasks, soonest first", [_task_line(e) for e in open_], True))
+            elif mine:
+                headline = "Good morning. Everything assigned to you is done."
+            elif info["heads"]:
+                headline = "Good morning. Here is where your team stands today."
+            else:
+                headline = "Good morning. Nothing is assigned to you right now."
+            if yday:
+                sections.append(("You finished yesterday", [_task_line(e, done_word="finished") for e in yday], True))
+
+            if info["heads"]:
+                team = _team(info, per_desk)
+                people = _team_people(info, desks, uid)
+                t_open = [e for e in team if e["bucket"] == "to_go"]
+                t_late = _by_due([e for e in t_open if e["late"]])
+                t_yday = [e for e in team if e["bucket"] == "yesterday"]
+                t_review = [e for e in team if e["review"]]
+                if people:
+                    paragraphs.append(
+                        f"Your team is {len(people)} {'person' if len(people) == 1 else 'people'}: {', '.join(person_name(p) for p in people)}. "
+                        f"Between them they have {_plural(len(t_open), 'open task')}"
+                        + (f", {len(t_late)} of them overdue" if t_late else "")
+                        + f", and {_plural(len(t_yday), 'task')} were finished yesterday."
+                    )
+                    lines = []
+                    for p in people:
+                        pe = per_user.get(p, [])
+                        po = [e for e in pe if e["bucket"] == "to_go"]
+                        pl = [e for e in po if e["late"]]
+                        py = [e for e in pe if e["bucket"] == "yesterday"]
+                        if not pe:
+                            lines.append(f"{person_name(p)}: nothing assigned")
+                            continue
+                        lines.append(
+                            f"{person_name(p)}: {len(po)} open" + (f" ({len(pl)} overdue)" if pl else "")
+                            + f", {len(py)} finished yesterday"
+                        )
+                    sections.append(("Your team at a glance", lines, False))
+                if t_review:
+                    sections.append(("Finished and waiting for your review", [_task_line(e, with_person=True, done_word="finished") for e in t_review], True))
+                if t_late:
+                    sections.append(("Overdue across the team", [_task_line(e, with_person=True) for e in t_late], True))
+
+            if not mine and not info["heads"]:
                 continue
-            notify(uid, None, "bod_summary", "Good morning", ".\n".join(lines) + ".", subject="BusyBee: your day")
+            _send_summary(uid, "bod_summary", "Your day", "BusyBee: your day", headline, paragraphs, sections)
             count += 1
         except Exception as exc:
             warn(f"start_of_day: skipping {uid}: {exc!r}")
@@ -1181,45 +1518,70 @@ def start_of_day() -> None:
 
 
 def end_of_day() -> None:
-    """The day's score, per person, at the end of the working day:
-
-        8 tasks assigned to you
-        3 done yesterday
-        2 done today
-        3 to go (1 overdue)
-
-    The "assigned" figure holds steady while "done" grows and "to go"
-    shrinks, so it reads like a countdown. Supervisors also get their team's
-    score. Nobody with nothing assigned gets a message.
-    """
-    per_user, per_desk, desks = _tally()
+    """6 PM: how the day went - what was finished, what's left - per person and per team."""
+    per_user, per_desk, desks = _collect()
     count = 0
     for uid, info in desks.people.items():
         try:
-            c = per_user.get(uid)
-            lines = []
-            if c and c["total"]:
-                lines.append(f"{_plural(c['total'], 'task')} assigned to you")
-                if c["earlier"]:
-                    lines.append(f"{c['earlier']} done before yesterday")
-                if c["yesterday"]:
-                    lines.append(f"{c['yesterday']} done yesterday")
-                lines.append(f"{c['today']} done today")
-                if c["to_go"]:
-                    lines.append(f"{c['to_go']} to go" + (f" ({c['overdue']} overdue)" if c["overdue"] else ""))
-                else:
-                    lines.append("All done 🎉")
-            team = _team_line(info, per_desk, with_today=True) if info["leads"] else ""
-            if team:
-                if lines:
-                    lines.append("")
-                lines.append(team)
-            if not lines:
+            mine = per_user.get(uid, [])
+            done_today = [e for e in mine if e["bucket"] == "today"]
+            yday = [e for e in mine if e["bucket"] == "yesterday"]
+            open_ = _by_due([e for e in mine if e["bucket"] == "to_go"])
+            late = [e for e in open_ if e["late"]]
+            sections, paragraphs = [], []
+
+            if mine:
+                headline = (
+                    f"End of day: you finished {_plural(len(done_today), 'task')} today"
+                    + (f" (and {len(yday)} yesterday)" if yday else "")
+                    + (f". {len(open_)} still to go" + (f", {len(late)} overdue." if late else ".") if open_ else ". Nothing left to do. 🎉")
+                )
+                paragraphs.append(
+                    f"Out of {_plural(len(mine), 'task')} on your plate: {len(done_today)} done today, {len(yday)} done yesterday, "
+                    f"{len([e for e in mine if e['bucket'] == 'earlier'])} done before that, and {len(open_)} to go."
+                )
+                if done_today:
+                    sections.append(("Finished today", [_task_line(e, done_word="finished") for e in done_today], True))
+                if open_:
+                    sections.append(("Still to do, soonest first", [_task_line(e) for e in open_], True))
+            elif info["heads"]:
+                headline = "End of day: here is how your team did today."
+            else:
+                headline = "End of day: nothing was assigned to you today."
+
+            if info["heads"]:
+                team = _team(info, per_desk)
+                people = _team_people(info, desks, uid)
+                t_today = [e for e in team if e["bucket"] == "today"]
+                t_open = [e for e in team if e["bucket"] == "to_go"]
+                t_late = _by_due([e for e in t_open if e["late"]])
+                if people:
+                    paragraphs.append(
+                        f"Your team ({', '.join(person_name(p) for p in people)}) finished {_plural(len(t_today), 'task')} today "
+                        f"and has {len(t_open)} still open" + (f", {len(t_late)} of them overdue." if t_late else ".")
+                    )
+                    lines = []
+                    for p in people:
+                        pe = per_user.get(p, [])
+                        pt = [e for e in pe if e["bucket"] == "today"]
+                        po = [e for e in pe if e["bucket"] == "to_go"]
+                        pl = [e for e in po if e["late"]]
+                        if not pe:
+                            lines.append(f"{person_name(p)}: nothing assigned")
+                            continue
+                        lines.append(f"{person_name(p)}: {len(pt)} finished today, {len(po)} to go" + (f" ({len(pl)} overdue)" if pl else ""))
+                    sections.append(("Your team at a glance", lines, False))
+                if t_today:
+                    sections.append(("Finished today across the team", [_task_line(e, with_person=True, done_word="finished") for e in t_today], True))
+                if t_late:
+                    sections.append(("Overdue across the team", [_task_line(e, with_person=True) for e in t_late], True))
+
+            if not mine and not info["heads"]:
                 continue
-            title = "End of day"
-            if c and c["total"]:
-                title = f"End of day: {c['today']} done today, {c['to_go']} to go"
-            notify(uid, None, "eod_summary", title, "\n".join(lines), subject=f"BusyBee: {title.lower()}")
+            subject = (
+                f"BusyBee: end of day - you finished {len(done_today)}, {len(open_)} to go" if mine else "BusyBee: end of day - your team"
+            )
+            _send_summary(uid, "eod_summary", "End of day", subject, headline, paragraphs, sections)
             count += 1
         except Exception as exc:
             warn(f"end_of_day: skipping {uid}: {exc!r}")

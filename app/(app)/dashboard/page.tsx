@@ -276,6 +276,10 @@ export default function DashboardPage() {
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
+    if (form.description.trim().length < 5) {
+      showError("Describe the task in a sentence or two. It goes into every email and Telegram message about it.");
+      return;
+    }
     const due = fromLocalInput(form.due) || (SIMPLE ? latestItemDate(items) : null);
     const others = form.assignees.filter((id) => id !== lookups.me);
     // Simple mode: every task belongs to someone, or nobody gets reminded.
@@ -558,7 +562,7 @@ export default function DashboardPage() {
           className={`${inputCls} w-full`}
         />
         <textarea
-          placeholder="Description / instructions (optional)..."
+          placeholder="What is this task about? (required) - say what needs doing and why, so anyone reading the email understands it"
           value={form.description}
           onChange={(e) => setForm({ ...form, description: e.target.value })}
           disabled={creating}
@@ -615,7 +619,7 @@ export default function DashboardPage() {
               {showMore ? "Fewer options" : "More options"}
             </button>
           )}
-          <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
+          <button type="submit" disabled={creating || !form.title.trim() || form.description.trim().length < 5} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
             {creating
               ? "Creating..."
               : form.assignees.length > 1

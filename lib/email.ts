@@ -53,11 +53,11 @@ function gmail(): nodemailer.Transporter {
 }
 
 /** One message per recipient over Gmail, so nobody sees anyone else's address. */
-async function viaGmail(to: string[], subject: string, text: string): Promise<boolean> {
+async function viaGmail(to: string[], subject: string, text: string, html?: string): Promise<boolean> {
   let ok = false;
   for (const addr of to) {
     try {
-      await gmail().sendMail({ from: mailSender(), to: addr, subject, text });
+      await gmail().sendMail({ from: mailSender(), to: addr, subject, text, ...(html ? { html } : {}) });
       ok = true;
     } catch (err: any) {
       // A failed email must never take down the request that triggered it.
@@ -104,15 +104,16 @@ async function post(path: string, payload: unknown): Promise<boolean> {
  * One message per recipient, so nobody sees anyone else's address. On Resend,
  * several recipients go in one batch request (up to 100 per request).
  */
-export async function deliver(to: string[], subject: string, text: string): Promise<boolean> {
+export async function deliver(to: string[], subject: string, text: string, html?: string): Promise<boolean> {
   const provider = mailProvider();
-  if (provider === "gmail") return viaGmail(to, subject, text);
+  if (provider === "gmail") return viaGmail(to, subject, text, html);
   if (provider !== "resend") return false;
   const from = mailSender();
-  if (to.length === 1) return post("/emails", { from, to, subject, text });
+  const extra = html ? { html } : {};
+  if (to.length === 1) return post("/emails", { from, to, subject, text, ...extra });
   let ok = false;
   for (let i = 0; i < to.length; i += 100) {
-    const part = to.slice(i, i + 100).map((addr) => ({ from, to: [addr], subject, text }));
+    const part = to.slice(i, i + 100).map((addr) => ({ from, to: [addr], subject, text, ...extra }));
     if (await post("/emails/batch", part)) ok = true;
   }
   return ok;
