@@ -142,17 +142,20 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
     ]);
     const actor = actorId ? names.get(actorId) || null : null;
     const overseers = involved ? (await overseersOf(db, involved.desk_id)).filter((x) => x !== actorId) : [];
+    // The head (Shankar) gets exactly one email a day - the 8 PM summary from
+    // the scheduler - and no other email or Telegram message from BusyBee.
+    const heads = new Set(involved ? await overseersOf(db, involved.desk_id) : []);
 
     // People part of the task (or any alert that isn't about a task).
     const isPart = (id: string) => !involved || involved.ids.has(id);
     const fyi = overseers.filter((id) => !(involved && involved.ids.has(id)));
 
     const mailIds = wantMail
-      ? ids.filter((id) => isPart(id) && !fyi.includes(id) && wantsEmail(who.get(id)!.prefs, a.type) && !!who.get(id)!.email)
+      ? ids.filter((id) => isPart(id) && !fyi.includes(id) && !heads.has(id) && wantsEmail(who.get(id)!.prefs, a.type) && !!who.get(id)!.email)
       : [];
     const chats = telegramConfigured()
       ? ids
-          .filter((id) => isPart(id) && !fyi.includes(id) && wantsTelegram(who.get(id)!.prefs, a.type))
+          .filter((id) => isPart(id) && !fyi.includes(id) && !heads.has(id) && wantsTelegram(who.get(id)!.prefs, a.type))
           .map((id) => who.get(id)!.chat)
           .filter((c): c is number => c != null)
       : [];
@@ -194,7 +197,8 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
         .map((id) => ({ user_id: id, task_id: a.task_id ?? null, type: a.type, title: card ? `Update: ${card.title}` : a.title, message: w.headline, read: false }));
       if (bell.length) jobs.push(Promise.resolve(supabase.from("notifications").insert(bell)));
       const subj = card ? `${card.assignee || "Task"}: ${card.title} - ${a.title}` : a.title;
-      for (const id of fyi) {
+      // Bell only: the head's email is the 8 PM summary.
+      for (const id of [] as string[]) {
         const t = fyiWho.get(id);
         if (!t) continue;
         if (mailConfigured() && t.email && t.prefs.email_enabled !== false) {

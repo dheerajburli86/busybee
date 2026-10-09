@@ -715,6 +715,8 @@ def cc_overseers(task, desks, already, ntype, title, text, subject):
     """Send the desk's overseers (Shankar) their own copy of a scheduled alert,
     worded for someone who isn't doing the work. `already` = who got the
     original, so nobody gets it twice."""
+    # The head now gets one daily email instead (head_digest), so no copies.
+    return
     for o in desks.overseers.get(task.get("desk_id"), set()) - set(already):
         try:
             notify(o, task["id"], ntype, title, text, subject=subject, overseer=True)
@@ -867,6 +869,157 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
 
 
 
+# ---------------------------------------------------------------------------
+# The head's one email a day (desk_members.oversees - Shankar).
+#
+# What he asked for: one email, once a day, at 8 PM IST; concise and to the
+# point; covering every task given to everyone; nothing that wastes his time.
+# So the head gets NO other email or Telegram message from BusyBee - no
+# reminders, no copies of events, no morning/evening summaries - only this.
+# ---------------------------------------------------------------------------
+
+HEAD_DIGEST_HOUR = _env_hour("HEAD_DIGEST_HOUR", 20)
+_heads_cache = [set(), 0.0]
+
+
+def head_ids() -> set:
+    """Everyone marked as overseeing a desk. Cached for 5 minutes."""
+    if time.time() - _heads_cache[1] < 300:
+        return _heads_cache[0]
+    try:
+        rows = supabase.table("desk_members").select("user_id").eq("oversees", True).execute().data or []
+        _heads_cache[0] = {r["user_id"] for r in rows}
+    except Exception:
+        _heads_cache[0] = set()
+    _heads_cache[1] = time.time()
+    return _heads_cache[0]
+
+
+def _short_due(d) -> str:
+    return f"{d.astimezone(LOCAL_TZ):%a %d %b}".replace(" 0", " ") if d else "no deadline"
+
+
+def _late_by(d) -> str:
+    days = max(1, int((now_utc() - d).total_seconds() // 86400))
+    return f"{days} day{'' if days == 1 else 's'} late"
+
+
+def head_digest() -> None:
+    """8 PM: one short email per head covering every task on their desks."""
+    heads = head_ids()
+    if not heads:
+        return
+    now = now_utc()
+    today = now.astimezone(LOCAL_TZ).date()
+    start = datetime(today.year, today.month, today.day, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    tomorrow = today + timedelta(days=1)
+    desks = Desks()
+    units = Units()
+    cols = TASK_COLUMNS + ", completed_at, review_status"
+    live = fetch_all(lambda: supabase.table("tasks").select(cols).is_("archived_at", "null").order("id"))
+    done_today_archived = fetch_all(
+        lambda: supabase.table("tasks").select(cols).not_.is_("archived_at", "null")
+        .gte("completed_at", start.strftime("%Y-%m-%dT%H:%M:%SZ")).order("id")
+    )
+    tasks = [t for t in {t["id"]: t for t in live + done_today_archived}.values() if not t.get("personal")]
+    try:
+        pending_ext = fetch_all(
+            lambda: supabase.table("extension_requests").select("task_id, requested_by, requested_date, reason")
+            .eq("status", "pending").order("id")
+        )
+    except Exception:
+        pending_ext = []
+    try:
+        money = fetch_all(
+            lambda: supabase.table("task_adjustments").select("task_id, user_id, kind, amount, reason, voided_at")
+            .gte("created_at", start.isoformat()).order("id")
+        )
+    except Exception:
+        money = []
+
+    for head in heads:
+        try:
+            mine = {d for d, ids in desks.overseers.items() if head in ids}
+            ts = [t for t in tasks if t.get("desk_id") in mine]
+            by_id = {t["id"]: t for t in ts}
+
+            def who(t):
+                return person_name(t.get("assigned_to")) or "Unassigned"
+
+            opened = [t for t in ts if t.get("status") not in FINISHED]
+            late = sorted([t for t in opened if parse(t.get("due_date")) and parse(t["due_date"]) < now],
+                          key=lambda t: t["due_date"])
+            done_today = [t for t in ts if t.get("status") in FINISHED and parse(t.get("completed_at"))
+                          and parse(t["completed_at"]) >= start]
+            new_today = [t for t in ts if parse(t.get("created_at")) and parse(t["created_at"]) >= start]
+            review = [t for t in ts if t.get("status") == "done" and t.get("review_status") == "pending"]
+            due_tmrw = [t for t in opened if parse(t.get("due_date"))
+                        and parse(t["due_date"]).astimezone(LOCAL_TZ).date() == tomorrow]
+            exts = [x for x in pending_ext if x["task_id"] in by_id]
+            cash = [a for a in money if a["task_id"] in by_id and not a.get("voided_at")]
+
+            # Headline: the whole day in one line.
+            bits = [f"{len(done_today)} finished", f"{len(new_today)} new", f"{len(late)} overdue",
+                    f"{len(opened)} open in total"]
+            if review:
+                bits.insert(0, f"{len(review)} waiting for your review")
+            headline = "Today: " + " · ".join(bits) + "."
+
+            sections = []
+            attention = [f'Review: "{t["title"]}" - {who(t)}' for t in review]
+            attention += [f'More time asked: "{by_id[x["task_id"]]["title"]}" - {person_name(x["requested_by"])} wants '
+                          f'{_short_due(parse(x["requested_date"]))}' for x in exts]
+            if attention:
+                sections.append(("Needs your decision", attention, True))
+            if late:
+                sections.append(("Overdue", [f'"{t["title"]}" - {who(t)} - {_late_by(parse(t["due_date"]))}' for t in late], True))
+            if done_today:
+                sections.append(("Finished today", [f'"{t["title"]}" - {who(t)}' for t in done_today], True))
+            if new_today:
+                sections.append(("Given out today", [
+                    f'"{t["title"]}" - {person_name(t.get("created_by")) or "someone"} to {who(t)}, due {_short_due(parse(t.get("due_date")))}'
+                    for t in new_today], True))
+            if due_tmrw:
+                sections.append(("Due tomorrow", [f'"{t["title"]}" - {who(t)}' for t in due_tmrw], True))
+            if cash:
+                sections.append(("Rewards and penalties today", [
+                    f'{"Reward" if a["kind"] == "reward" else "Penalty"} ₹{float(a["amount"]):,.0f} - {person_name(a["user_id"])} - '
+                    f'"{by_id[a["task_id"]]["title"]}"' for a in cash], True))
+            # One line per person with work, busiest first.
+            people = {}
+            for t in ts:
+                for p in desks.only_on_desk(t.get("desk_id"), doers(t, units)):
+                    c = people.setdefault(p, {"open": 0, "late": 0, "done": 0})
+                    if t.get("status") not in FINISHED:
+                        c["open"] += 1
+                        if t in late:
+                            c["late"] += 1
+                    elif t in done_today:
+                        c["done"] += 1
+            if people:
+                rows = sorted(people.items(), key=lambda kv: (-kv[1]["late"], -kv[1]["open"]))
+                sections.append(("By person", [
+                    f'{person_name(p)}: {c["open"]} open' + (f', {c["late"]} overdue' if c["late"] else "")
+                    + (f', {c["done"]} done today' if c["done"] else "") for p, c in rows], False))
+
+            if not ts:
+                headline = "Today: no tasks on BusyBee yet."
+            text, html = render_email(
+                greeting=None,
+                headline=headline,
+                sections=sections,
+                cta=(f"{APP_URL}/dashboard", "Open BusyBee") if APP_URL else None,
+                why="Your one BusyBee email of the day, at 8 PM. Everything about every task is in here.",
+            )
+            subject = (f"BusyBee {today:%d %b}: {len(done_today)} done, {len(late)} overdue"
+                       + (f", {len(review) + len(exts)} need you" if (review or exts) else ""))
+            notify(head, None, "head_digest", "BusyBee today", headline, subject=subject,
+                   email=(text, html), telegram_text=text.split("\n--\n")[0])
+        except Exception as exc:
+            warn(f"head_digest: skipping {head}: {exc!r}")
+    log(f"sent the head's daily email to {len(heads)}")
+
+
 def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "",
            email: tuple = None, telegram_text: str = "", overseer: bool = False) -> bool:
     """In-app notification, then the same by email. No email if the in-app one
@@ -884,7 +1037,9 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
         except Exception as exc:
             warn(f"could not write notification for {user_id}: {exc!r}")
             return False
-    if _wants(user_id, ntype, "email"):
+    # The head gets exactly one email and Telegram message a day (head_digest).
+    quiet = ntype != "head_digest" and user_id in head_ids()
+    if not quiet and _wants(user_id, ntype, "email"):
         try:
             if email:
                 text, html = email
@@ -904,7 +1059,7 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
             send_mail(user_id, subject or title, text, html)
         except Exception as exc:
             warn(f"email to {user_id} failed to build: {exc!r}")
-    if _wants(user_id, ntype, "telegram"):
+    if not quiet and _wants(user_id, ntype, "telegram"):
         send_telegram(user_id, ntype, title, telegram_text or message, task_id)
     if not wrote:
         mark_sent(task_id, ntype)
@@ -958,7 +1113,7 @@ def deadline_reminders() -> None:
                 if already_sent(task["id"], "overdue", due):
                     continue
                 # The overseer hears about it the moment work goes overdue.
-                for o in desks.overseers.get(task.get("desk_id"), set()) - recipients:
+                for o in set():  # the head hears about overdue work in the 8 PM email
                     giver = person_name(task.get("created_by")) or "Someone"
                     notify(o, task["id"], "overdue", f"Overdue: {task['title']}",
                            f"{whose(task, o)[0].upper()}{whose(task, o)[1:]}, given by {giver}, went past its deadline "
@@ -1486,6 +1641,8 @@ def start_of_day() -> None:
     count = 0
     for uid, info in desks.people.items():
         try:
+            if uid in head_ids():
+                continue  # the head gets the 8 PM email instead
             mine = per_user.get(uid, [])
             open_ = _by_due([e for e in mine if e["bucket"] == "to_go"])
             yday = [e for e in mine if e["bucket"] == "yesterday"]
@@ -1558,6 +1715,8 @@ def end_of_day() -> None:
     count = 0
     for uid, info in desks.people.items():
         try:
+            if uid in head_ids():
+                continue  # the head gets the 8 PM email instead
             mine = per_user.get(uid, [])
             done_today = [e for e in mine if e["bucket"] == "today"]
             yday = [e for e in mine if e["bucket"] == "yesterday"]
@@ -1690,6 +1849,7 @@ if __name__ == "__main__":
 
     scheduler.add_job(safe(start_of_day), "cron", hour=BOD_HOUR, minute=0, id="bod")
     scheduler.add_job(safe(end_of_day), "cron", hour=EOD_HOUR, minute=0, id="eod")
+    scheduler.add_job(safe(head_digest), "cron", hour=HEAD_DIGEST_HOUR, minute=0, id="head_digest")
     # Midnight local time: quiet-task nudges and archiving.
     scheduler.add_job(safe(recurring_update_requests), "cron", hour=0, minute=0, id="update_requests")
     scheduler.add_job(safe(auto_archive), "cron", hour=0, minute=15, id="auto_archive")
