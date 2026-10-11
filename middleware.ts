@@ -4,11 +4,16 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/signup"];
+// Open to everyone, signed in or not: the "get the app" guide.
+const OPEN_PATHS = ["/install"];
 
 export async function middleware(request: NextRequest) {
   // API routes check the signed-in user themselves. Checking here as well
   // cost every API call an extra trip to Supabase before it even started.
   if (request.nextUrl.pathname.startsWith("/api/")) return NextResponse.next();
+  if (OPEN_PATHS.some((p) => request.nextUrl.pathname === p || request.nextUrl.pathname.startsWith(p + "/"))) {
+    return NextResponse.next();
+  }
 
   let response = NextResponse.next({ request });
 
@@ -56,6 +61,8 @@ export async function middleware(request: NextRequest) {
   return response;
 }
 
+// Files (icons, launch screens, the service worker sw.js, offline.html, the
+// app manifest) are served as they are, signed in or not.
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|manifest.webmanifest|.*\\.(?:png|jpg|svg|ico)$).*)"],
+  matcher: ["/((?!_next/static|_next/image|.*\\.(?:png|jpg|jpeg|svg|ico|js|html|webmanifest|json|txt|xml)$).*)"],
 };

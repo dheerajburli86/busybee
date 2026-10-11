@@ -6,7 +6,8 @@ import { NextResponse } from "next/server";
 import { getMemberships, requireUser, topRole, SUPER_ROLES } from "@/lib/permissions";
 import { mailConfigured, mailProvider, mailSender } from "@/lib/email";
 import { appUrl, botUsername, telegramConfigured, tg } from "@/lib/telegram";
-import { adminConfigured, telegramConnected } from "@/lib/supabase-admin";
+import { adminConfigured, createAdminClient, telegramConnected } from "@/lib/supabase-admin";
+import { vapidKeys } from "@/lib/push";
 import { formatForPeople } from "@/lib/format";
 
 // Every column the app reads or writes, table by table. A missing one shows up
@@ -41,6 +42,7 @@ const SCHEMA: [string, string, string][] = [
   ["Rewards & penalties", "task_adjustments", "id, task_id, desk_id, user_id, kind, amount, reason, effective_month, created_by, created_at, voided_at, voided_by, void_reason"],
   ["Telegram connections", "user_telegram", "user_id, chat_id, username, linked_at"],
   ["Notification settings", "notification_prefs", "user_id, email_enabled, telegram_enabled, categories"],
+  ["Phones with pop-up notifications", "push_subscriptions", "id, user_id, device, created_at, last_ok_at"],
 ];
 
 export async function GET() {
@@ -191,6 +193,25 @@ export async function GET() {
           detail: adminConfigured() ? "run supabase/migrations/20261007_telegram_and_email_alerts.sql" : "needs SUPABASE_SERVICE_ROLE_KEY",
         });
       }
+    }
+
+    // Pop-up notifications on phones (the installed app): keys and devices.
+    {
+      const admin = createAdminClient();
+      const keys = admin ? await vapidKeys(true).catch(() => null) : null;
+      const people = admin
+        ? await admin.from("push_subscriptions").select("user_id")
+        : { data: null, error: { message: "needs SUPABASE_SERVICE_ROLE_KEY" } };
+      const count = new Set(((people as any).data || []).map((r: any) => r.user_id)).size;
+      checks.push({
+        name: "Pop-up notifications (phone app)",
+        ok: !!keys && !(people as any).error,
+        detail: !admin
+          ? "needs SUPABASE_SERVICE_ROLE_KEY in Vercel"
+          : (people as any).error || !keys
+          ? "run supabase/migrations/20261011_app_push.sql"
+          : `ready - ${count} ${count === 1 ? "person has" : "people have"} them on (others see a Turn on bar at the top of BusyBee)`,
+      });
     }
 
     // The round-2 scheduler records a heartbeat every few minutes.

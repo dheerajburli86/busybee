@@ -44,6 +44,7 @@ export default function ChatPage() {
   const [showRooms, setShowRooms] = useState(true);
   const [lastSeen, setLastSeen] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const linkUsed = useRef(false);
 
   const room = rooms.find((r) => r.id === roomId) || null;
   // The room on screen right now, for answers that arrive after a switch.
@@ -56,7 +57,19 @@ export default function ChatPage() {
     if (!r.ok) throw new Error(d.error || "Could not load chat rooms");
     setRooms(d.rooms || []);
     setMe(d.me);
-    setRoomId((cur) => cur || d.rooms?.find((x: Room) => x.kind === "org")?.id || d.rooms?.[0]?.id || null);
+    // A tapped notification opens its room: /chat?room=<id> (first load only).
+    let linked: string | null = null;
+    if (!linkUsed.current) {
+      linkUsed.current = true;
+      try {
+        const wanted = new URLSearchParams(window.location.search).get("room");
+        linked = wanted && d.rooms?.some((x: Room) => x.id === wanted) ? wanted : null;
+      } catch {
+        /* no query string */
+      }
+      if (linked) setShowRooms(false);
+    }
+    setRoomId((cur) => linked || cur || d.rooms?.find((x: Room) => x.kind === "org")?.id || d.rooms?.[0]?.id || null);
   }, []);
 
   useEffect(() => {

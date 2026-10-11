@@ -28,10 +28,58 @@ body {
   input[type="range"] {
     min-height: 36px;
   }
-  input,
+  /* Stops iPhones zooming into a form field when it's tapped. Needs
+     !important: the fields' own text-sm/text-xs classes would win otherwise. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
   select,
   textarea {
-    font-size: 16px; /* stops iOS zooming into form fields */
+    font-size: 16px !important;
+  }
+}
+
+/* ---- BusyBee as an installed app (phones and tablets) ----
+   The status bar is see-through in the installed app, so the top bar pads
+   itself below it; the tab bar pads itself above the home indicator. In a
+   normal browser these insets are 0 and nothing changes. */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+/* Room for the phone tab bar (3.5rem tall) under every signed-in page. */
+.tabbar-space {
+  padding-bottom: calc(4.5rem + env(safe-area-inset-bottom));
+}
+.above-tabbar {
+  bottom: calc(3.5rem + env(safe-area-inset-bottom));
+}
+/* Little "Saved" messages float above the tab bar on phones. */
+.toast-bottom {
+  bottom: calc(4.5rem + env(safe-area-inset-bottom));
+}
+@media (min-width: 1024px) {
+  .tabbar-space {
+    padding-bottom: 0;
+  }
+  .toast-bottom {
+    bottom: 1rem;
+  }
+}
+/* No long-press link previews or text selection on the app's own buttons. */
+nav a,
+nav button,
+.tabbar a {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+@media (display-mode: standalone) {
+  /* The page doesn't bounce away from the top bar when pulled; BusyBee's
+     own pull-to-refresh takes over. */
+  html,
+  body {
+    overscroll-behavior-y: none;
   }
 }
 

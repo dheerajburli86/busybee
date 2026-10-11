@@ -30,8 +30,8 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950">
-      <div className="bg-slate-800 p-8 rounded w-full max-w-md">
+    <div className="min-h-screen flex items-center justify-center bg-slate-950 px-4 safe-top safe-bottom">
+      <div className="bg-slate-800 p-6 sm:p-8 rounded-xl w-full max-w-md">
         <h1 className="text-2xl font-bold text-white mb-6">BusyBee Sign Up</h1>
         {error && <p className="text-red-500 mb-4">{error}</p>}
         {sent && (
@@ -42,6 +42,9 @@ export default function SignupPage() {
         <form onSubmit={handleSignup} className="space-y-4">
           <input
             type="email"
+            autoComplete="email"
+            inputMode="email"
+            autoCapitalize="none"
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -49,6 +52,7 @@ export default function SignupPage() {
           />
           <input
             type="password"
+            autoComplete="new-password"
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

@@ -201,7 +201,7 @@ export default function ListsPage() {
         </div>
       )}
       {info && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-green-950 border border-green-800 text-green-200 px-4 py-3 rounded shadow-lg text-sm" role="status">
+        <div className="fixed toast-bottom left-1/2 -translate-x-1/2 z-[60] bg-green-950 border border-green-800 text-green-200 px-4 py-3 rounded shadow-lg text-sm" role="status">
           {info}
         </div>
       )}

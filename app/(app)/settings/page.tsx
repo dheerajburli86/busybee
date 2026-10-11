@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import { sendJSON } from "@/lib/api";
 import { TelegramConnect } from "@/components/settings/TelegramConnect";
+import { PushSettings } from "@/components/pwa/PushSettings";
 
 type Category = { key: string; label: string; hint: string };
 type Channel = "in_app" | "email" | "telegram";
@@ -97,8 +98,9 @@ export default function SettingsPage() {
     <div className="max-w-2xl mx-auto p-3 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-bold mb-1">⚙️ Notification settings</h1>
       <p className="text-slate-400 text-sm mb-6">
-        Alerts reach you in the bell, by email and on Telegram. Everything is on by default; switch off what you
-        don&apos;t need. Rewards and penalties always reach you on every channel.
+        Alerts reach you in the app (the bell, and pop-ups on devices where you turn them on), by email and on
+        Telegram. Everything is on by default; switch off what you don&apos;t need. Rewards and penalties always
+        reach you on every channel.
       </p>
 
       {error && (
@@ -107,6 +109,10 @@ export default function SettingsPage() {
           <button onClick={() => setError("")}>dismiss</button>
         </div>
       )}
+
+      <div className="mb-4">
+        <PushSettings />
+      </div>
 
       <div className="mb-4">
         <TelegramConnect />
@@ -147,7 +153,7 @@ export default function SettingsPage() {
       <div className="bg-slate-800 border border-slate-700 rounded divide-y divide-slate-700">
         <div className={`grid ${cols} gap-2 sm:gap-3 px-4 py-2 text-xs text-slate-500 font-semibold`}>
           <span>Category</span>
-          <span className="text-center w-12 sm:w-16">In-app</span>
+          <span className="text-center w-12 sm:w-16" title="The bell, and pop-ups on your devices">App</span>
           <span className="text-center w-12 sm:w-16">Email</span>
           {telegramConfigured && <span className="text-center w-12 sm:w-16">Telegram</span>}
         </div>

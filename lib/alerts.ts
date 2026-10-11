@@ -1,6 +1,7 @@
-// One place that sends an alert on every channel: the in-app bell, email and
-// Telegram. lib/permissions.ts notifyMany() is a thin wrapper over this, so
-// every route that already notifies people gets all three channels.
+// One place that sends an alert on every channel: the in-app bell, pop-ups on
+// phones (lib/push.ts), email and Telegram. lib/permissions.ts notifyMany()
+// is a thin wrapper over this, so every route that already notifies people
+// gets every channel.
 //
 // Rules, per person and per channel:
 //   * their own settings decide (Settings page), except pay alerts, which
@@ -20,6 +21,7 @@ import { involvedIn, overseersOf, overseerWording } from "@/lib/oversight";
 import { formatForPeople } from "@/lib/format";
 import { createAdminClient } from "@/lib/supabase-admin";
 import { appUrl, sendToChats, telegramConfigured } from "@/lib/telegram";
+import { pushConfigured, pushToUsers } from "@/lib/push";
 import {
   EMAIL_QUIET,
   NotificationPrefs,
@@ -118,7 +120,7 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
   // the desk's overseers get their own "here's what happened" version.
   const wantMail = mailConfigured() && a.email !== false && (!EMAIL_QUIET.includes(a.type) || !!a.email);
   const subject = (a.email && a.email.subject) || a.title;
-  const anyChannel = mailConfigured() || telegramConfigured();
+  const anyChannel = mailConfigured() || telegramConfigured() || pushConfigured();
   if (!anyChannel) return result;
 
   const send = async () => {
@@ -181,6 +183,24 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
       jobs.push(deliver([who.get(id)!.email!], subject, text, html));
     }
     if (chats.length) jobs.push(sendToChats(chats, a));
+
+    // Pop-ups on their phones: the same people as email and Telegram, for
+    // whatever shows in their bell. Not to whoever did it, and not to the
+    // head, whose one message a day is the 8 PM summary.
+    const pushIds = ids.filter(
+      (id) => id !== actorId && isPart(id) && !fyi.includes(id) && !heads.has(id) && wantsInApp(who.get(id)!.prefs, a.type)
+    );
+    if (pushIds.length && pushConfigured()) {
+      jobs.push(
+        pushToUsers(pushIds, {
+          title: a.title,
+          body: a.message,
+          // Same place the bell and the email open (to-do lists included).
+          url: a.task_id ? `/dashboard?task=${a.task_id}` : "/dashboard",
+          tag: a.task_id ? `task-${a.task_id}` : `bb-${a.type}`,
+        })
+      );
+    }
 
     // The overseers' copy: everything except routine edits.
     if (fyi.length && !["updated", "subtask_completed", "private_comment"].includes(a.type)) {

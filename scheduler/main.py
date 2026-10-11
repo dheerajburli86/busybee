@@ -29,6 +29,11 @@ Deploy on Railway with these environment variables:
                           a link to the task in emails and Telegram messages
   TELEGRAM_BOT_TOKEN    - optional, the same bot token as the web app, to send
                           every alert to people's Telegram as well
+
+Pop-up notifications on phones (people who installed the BusyBee app and
+turned notifications on) need nothing extra: the key pair is read from the
+database, where the web app keeps it. VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
+override it if set (they must then match the web app's).
 """
 
 import json as _json
@@ -45,7 +50,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.blocking import BlockingScheduler
 from supabase import create_client
 
-VERSION = "2026-10-08"
+VERSION = "2026-10-11"
 
 
 def _env_number(name: str, default, cast=int):
@@ -635,6 +640,138 @@ def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=No
 
 
 # ---------------------------------------------------------------------------
+# Pop-up notifications on phones and tablets (Web Push), mirroring
+# lib/push.ts in the web app: every device a person turned notifications on
+# gets the same alert their bell gets.
+# ---------------------------------------------------------------------------
+try:
+    from pywebpush import WebPushException, webpush
+except Exception:  # library missing: pop-ups are skipped, nothing else changes
+    webpush = None
+    WebPushException = Exception
+
+VAPID_SUBJECT = (os.environ.get("VAPID_SUBJECT") or "").strip() or "mailto:gqbusybee@gmail.com"
+_vapid = [None, 0.0]
+_push_warned = [False]
+
+
+def _vapid_keys():
+    pub = (os.environ.get("VAPID_PUBLIC_KEY") or "").strip()
+    priv = (os.environ.get("VAPID_PRIVATE_KEY") or "").strip()
+    if pub and priv:
+        return {"publicKey": pub, "privateKey": priv, "subject": VAPID_SUBJECT}
+    if _vapid[0] and time.time() - _vapid[1] < 600:
+        return _vapid[0]
+    try:
+        res = supabase.table("app_secrets").select("value").eq("key", "vapid").limit(1).execute()
+        row = (res.data or [None])[0]
+        if row:
+            v = _json.loads(row["value"])
+            if v.get("publicKey") and v.get("privateKey"):
+                _vapid[0] = {"publicKey": v["publicKey"], "privateKey": v["privateKey"],
+                             "subject": v.get("subject") or VAPID_SUBJECT}
+                _vapid[1] = time.time()
+                return _vapid[0]
+    except Exception as exc:
+        warn(f"could not read the pop-up notification keys: {exc!r}")
+    return None
+
+
+def _push_gone(status, text: str) -> bool:
+    """The device is gone for good (same rule as lib/push-core.ts isGone)."""
+    if status in (404, 410):
+        return True
+    if status in (400, 401, 403):
+        low = (text or "").lower()
+        if "jwt" in low:
+            return False
+        return any(w in low for w in ("mismatch", "not correspond", "unsubscribed", "expired subscription",
+                                      "invalid registration", "notregistered"))
+    return False
+
+
+def _clip(text, limit: int) -> str:
+    t = " ".join(str(text or "").split())
+    return t if len(t) <= limit else t[: limit - 1] + "…"
+
+
+def _unread_count(user_id: str) -> int:
+    try:
+        res = (supabase.table("notifications").select("id", count="exact")
+               .eq("user_id", user_id).eq("read", False).limit(1).execute())
+        return int(res.count or 0)
+    except Exception:
+        return 0
+
+
+def send_push(user_id: str, title: str, body: str, task_id=None, ntype: str = "") -> int:
+    """Pop up on every device this person turned notifications on. Returns how many took it."""
+    if webpush is None:
+        return 0
+    try:
+        subs = (supabase.table("push_subscriptions").select("id, endpoint, p256dh, auth")
+                .eq("user_id", user_id).execute().data or [])
+    except Exception as exc:
+        if not _push_warned[0]:
+            warn(f"phone notification devices not readable (run the push migration?): {exc!r}")
+            _push_warned[0] = True
+        return 0
+    if not subs:
+        return 0
+    keys = _vapid_keys()
+    if not keys:
+        return 0
+    payload = _json.dumps({
+        "title": _clip(title, 120) or "BusyBee",
+        "body": _clip(body, 600),
+        "url": f"/dashboard?task={task_id}" if task_id else "/dashboard",
+        "tag": f"task-{task_id}" if task_id else f"bb-{ntype or 'alert'}",
+        "badge": _unread_count(user_id),
+        "ts": int(time.time() * 1000),
+    })
+    sent = 0
+    now = now_utc().isoformat()
+    for s in subs:
+        try:
+            webpush(
+                subscription_info={"endpoint": s["endpoint"], "keys": {"p256dh": s["p256dh"], "auth": s["auth"]}},
+                data=payload,
+                vapid_private_key=keys["privateKey"],
+                # A fresh dict every time: webpush() writes the push service's
+                # address into it, and Google's and Apple's differ.
+                vapid_claims={"sub": keys["subject"]},
+                ttl=86400,
+                timeout=10,
+                headers={"Urgency": "high"},
+            )
+            sent += 1
+            try:
+                supabase.table("push_subscriptions").update({"last_ok_at": now, "last_error": None}).eq("id", s["id"]).execute()
+            except Exception:
+                pass
+        except WebPushException as exc:
+            resp = getattr(exc, "response", None)
+            status = getattr(resp, "status_code", None)
+            text = ""
+            try:
+                text = resp.text if resp is not None else str(exc)
+            except Exception:
+                text = str(exc)
+            try:
+                if _push_gone(status, text):
+                    supabase.table("push_subscriptions").delete().eq("id", s["id"]).execute()
+                else:
+                    warn(f"pop-up to {user_id} failed: HTTP {status} {text[:200]}")
+                    supabase.table("push_subscriptions").update({"last_error": f"{status} {text}"[:300]}).eq("id", s["id"]).execute()
+            except Exception:
+                pass
+        except Exception as exc:
+            # A push failure must never stop the scheduler loop.
+            warn(f"pop-up to {user_id} failed: {exc!r}")
+    return sent
+
+
+# ---------------------------------------------------------------------------
 # What the emails look like (same layout as lib/mailfmt.ts in the web app).
 #
 # An email must make sense to someone who has never opened BusyBee: whose
@@ -1061,6 +1198,10 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
             warn(f"email to {user_id} failed to build: {exc!r}")
     if not quiet and _wants(user_id, ntype, "telegram"):
         send_telegram(user_id, ntype, title, telegram_text or message, task_id)
+    # Pop-up on their phone, for whatever shows in their bell. The head's only
+    # pop-up is the 8 PM summary, like his email.
+    if not quiet and _wants(user_id, ntype, "in_app"):
+        send_push(user_id, title, message, task_id, ntype)
     if not wrote:
         mark_sent(task_id, ntype)
     return wrote

@@ -2,13 +2,17 @@
 
 import { createClient } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { isStandalone } from '@/lib/pushClient';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const signingIn = useRef(false);
+  // Inside the installed app the "get the app" link has nothing to offer.
+  const [inApp, setInApp] = useState(false);
+  useEffect(() => setInApp(isStandalone()), []);
   const router = useRouter();
   const supabase = createClient();
 
@@ -33,13 +37,16 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-950">
-      <div className="bg-slate-800 p-8 rounded w-full max-w-md">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-slate-950 px-4 safe-top safe-bottom">
+      <div className="bg-slate-800 p-6 sm:p-8 rounded-xl w-full max-w-md">
         <h1 className="text-2xl font-bold text-white mb-6">BusyBee Login</h1>
         {error && <p className="text-red-500 mb-4">{error}</p>}
         <form onSubmit={handleLogin} className="space-y-4">
           <input
             type="email"
+            autoComplete="email"
+            inputMode="email"
+            autoCapitalize="none"
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -47,6 +54,7 @@ export default function LoginPage() {
           />
           <input
             type="password"
+            autoComplete="current-password"
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -60,6 +68,11 @@ export default function LoginPage() {
           Don't have an account? <a href="/signup" className="text-blue-500">Sign up</a>
         </p>
       </div>
+      {!inApp && (
+        <a href="/install" className="mt-6 text-sm text-amber-300 hover:text-amber-200">
+          📱 Get BusyBee on your phone as an app
+        </a>
+      )}
     </div>
   );
 }

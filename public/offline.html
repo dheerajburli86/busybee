@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>BusyBee - no connection</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #020617; color: #e2e8f0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center;
+         padding: calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom)); box-sizing: border-box; }
+  img { width: 88px; height: 88px; border-radius: 20px; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0 0 8px; color: #f8fafc; }
+  p { margin: 0 0 24px; color: #94a3b8; font-size: 16px; line-height: 1.5; max-width: 320px; }
+  button { background: #2563eb; color: #fff; border: 0; border-radius: 10px; padding: 14px 28px; font-size: 16px; font-weight: 600; }
+  button:active { background: #1d4ed8; }
+</style>
+</head>
+<body>
+<main>
+  <img src="/icons/icon-192.png" alt="">
+  <h1>No internet connection</h1>
+  <p>BusyBee needs the internet to show your tasks. It will open by itself as soon as you're back online.</p>
+  <button type="button" onclick="location.reload()">Try again</button>
+</main>
+<script>
+  window.addEventListener("online", function () { location.reload(); });
+</script>
+</body>
+</html>

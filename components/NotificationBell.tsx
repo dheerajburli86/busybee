@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { sendJSON } from "@/lib/api";
+import { OPEN_TASK_EVENT, PUSH_EVENT } from "@/lib/appEvents";
 
 type Notification = {
   id: string;
@@ -16,11 +17,23 @@ type Notification = {
 // In-app notification centre (checklist #34), in the navigation bar on every
 // page. Clicking a notification marks it read and, if it is about a task,
 // opens that task - on the Tasks page directly, from anywhere else by going
-// there.
-export const OPEN_TASK_EVENT = "bb-open-task";
+// there. The unread count is also the number on the installed app's icon.
+export { OPEN_TASK_EVENT };
+
+/** The number on the app icon (installed app), where the phone supports it. */
+function setIconBadge(n: number) {
+  try {
+    const nav = navigator as any;
+    if (n > 0) nav.setAppBadge?.(n)?.catch?.(() => {});
+    else nav.clearAppBadge?.()?.catch?.(() => {});
+  } catch {
+    /* not supported */
+  }
+}
 
 export function NotificationBell() {
   const [items, setItems] = useState<Notification[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [open, setOpen] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
@@ -50,6 +63,7 @@ export function NotificationBell() {
       if (res.ok) {
         const data = await res.json();
         setItems(Array.isArray(data) ? data : []);
+        setLoaded(true);
       }
     } catch {
       /* keep what is on screen */
@@ -59,10 +73,22 @@ export function NotificationBell() {
   useEffect(() => {
     load();
     const t = setInterval(load, 30000);
-    return () => clearInterval(t);
+    // A pop-up just arrived, or the app came back to the front: check now.
+    const now = () => load();
+    const back = () => document.visibilityState === "visible" && load();
+    window.addEventListener(PUSH_EVENT, now);
+    document.addEventListener("visibilitychange", back);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener(PUSH_EVENT, now);
+      document.removeEventListener("visibilitychange", back);
+    };
   }, []);
 
   const unread = items.filter((n) => !n.read).length;
+  useEffect(() => {
+    if (loaded) setIconBadge(unread);
+  }, [unread, loaded]);
 
   const click = async (n: Notification) => {
     if (!n.read) {

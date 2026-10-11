@@ -1,8 +1,10 @@
 import { createServerSideClient } from "@/lib/supabase-server";
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { requireUser } from "@/lib/permissions";
 import { roomsFor } from "@/lib/chat";
 import { attachNames } from "@/lib/names";
+import { createAdminClient } from "@/lib/supabase-admin";
+import { pushToUsers } from "@/lib/push";
 
 // Messages in a room, or a search across every room you can see.
 //   GET /api/chat?room_id=<id>[&after=<iso>]
@@ -73,6 +75,26 @@ export async function POST(req: Request) {
     if (error) throw error;
 
     const [named] = await attachNames(supabase, [data], "author_id", "author_name");
+
+    // Pop-up on the phones of everyone else in a private chat or a room they
+    // were added to - like any messaging app. The big organisation and
+    // project rooms don't pop up (too noisy); they show a dot instead.
+    if (room.kind === "private" || room.kind === "custom") {
+      const author = named?.author_name || "Someone";
+      after(async () => {
+        const db = createAdminClient();
+        if (!db) return;
+        const { data: members } = await db.from("chat_room_members").select("user_id").eq("room_id", room.id);
+        const to = (members || []).map((m: any) => m.user_id).filter((id: string) => id && id !== user.id);
+        if (!to.length) return;
+        await pushToUsers(to, {
+          title: room.kind === "private" ? `💬 ${author}` : `💬 ${author} in ${room.name}`,
+          body: data.content,
+          url: `/chat?room=${room.id}`,
+          tag: `chat-${room.id}`,
+        });
+      });
+    }
     return NextResponse.json(named);
   } catch (error: any) {
     console.error("POST /api/chat failed:", error);

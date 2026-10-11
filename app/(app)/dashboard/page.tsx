@@ -536,7 +536,7 @@ export default function DashboardPage() {
       )}
       {/* A floating note, so the page doesn't jump when it appears and goes. */}
       {info && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] bg-green-950 border border-green-800 text-green-200 px-4 py-3 rounded shadow-lg text-sm max-w-[calc(100vw-2rem)]" role="status">
+        <div className="fixed toast-bottom left-1/2 -translate-x-1/2 z-[60] bg-green-950 border border-green-800 text-green-200 px-4 py-3 rounded shadow-lg text-sm max-w-[calc(100vw-2rem)]" role="status">
           {info}
         </div>
       )}
