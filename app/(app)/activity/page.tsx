@@ -112,8 +112,8 @@ export default function ActivityPage() {
           <option value="">Everyone</option>
           {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className={inputCls} aria-label="From" />
-        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} className={inputCls} aria-label="To" />
+        <input type="date" max="9999-12-31" value={from} onChange={(e) => setFrom(e.target.value)} className={inputCls} aria-label="From" />
+        <input type="date" max="9999-12-31" value={to} onChange={(e) => setTo(e.target.value)} className={inputCls} aria-label="To" />
       </div>
 
       {error && <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm">{error}</div>}

@@ -8,7 +8,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase";
 import { sendJSON } from "@/lib/api";
-import { PeoplePicker } from "@/components/tasks/TaskDetail";
+import { cached, keepSame, load as loadApi, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
+import { PeoplePicker } from "@/components/tasks/PeoplePicker";
 
 type Room = {
   id: string;
@@ -20,6 +21,17 @@ type Room = {
 };
 type Message = { id: string; content: string; author_id: string; author_name?: string; room_id: string; room_name?: string; created_at: string };
 type Member = { id: string; name: string; email: string };
+
+// One date formatter for every message (making one per message is slow).
+let stampFormat: Intl.DateTimeFormat | null = null;
+const stamp = (iso: string) => {
+  try {
+    stampFormat ||= new Intl.DateTimeFormat([], { dateStyle: "short", timeStyle: "short" });
+    return stampFormat.format(new Date(iso));
+  } catch {
+    return new Date(iso).toLocaleString();
+  }
+};
 
 const KIND_LABEL: Record<string, string> = {
   org: "Organisation",
@@ -36,7 +48,9 @@ export default function ChatPage() {
   const [presence, setPresence] = useState<Record<string, { online: boolean; last_seen_at: string }>>({});
   const [me, setMe] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  const [sending, setSending] = useState(false);
+  // Messages on their way to the server: on screen at once (faded), then
+  // swapped for the saved copy.
+  const outbox = useRef<Message[]>([]);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<Message[] | null>(null);
@@ -45,17 +59,16 @@ export default function ChatPage() {
   const [lastSeen, setLastSeen] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const linkUsed = useRef(false);
+  const loadMessages = useRef<null | (() => Promise<void>)>(null);
 
   const room = rooms.find((r) => r.id === roomId) || null;
   // The room on screen right now, for answers that arrive after a switch.
   const roomRef = useRef<string | null>(null);
   roomRef.current = roomId;
 
-  const loadRooms = useCallback(async () => {
-    const r = await fetch("/api/chat/rooms", { cache: "no-store" });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || "Could not load chat rooms");
-    setRooms(d.rooms || []);
+  // Rooms on screen from what this phone remembers, then fresh from the server.
+  const applyRooms = useCallback((d: any) => {
+    setRooms((prev) => keepSame(prev, d.rooms || []));
     setMe(d.me);
     // A tapped notification opens its room: /chat?room=<id> (first load only).
     let linked: string | null = null;
@@ -72,23 +85,34 @@ export default function ChatPage() {
     setRoomId((cur) => linked || cur || d.rooms?.find((x: Room) => x.kind === "org")?.id || d.rooms?.[0]?.id || null);
   }, []);
 
-  useEffect(() => {
+  const loadRooms = useCallback(async () => {
+    applyRooms(await loadApi<any>("/api/chat/rooms"));
+  }, [applyRooms]);
+
+  const loadPresence = useCallback(
+    () => fetch("/api/presence", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => d && setPresence(d.presence || {})).catch(() => {}),
+    []
+  );
+
+  useBeforePaint(() => {
     try {
       setLastSeen(JSON.parse(localStorage.getItem("bb-chat-seen") || "{}"));
     } catch {
       /* private mode */
     }
+    const rememberedRooms = cached<any>("/api/chat/rooms");
+    if (rememberedRooms) applyRooms(rememberedRooms);
+    const rememberedPeople = cached<any>("/api/team/members");
+    if (rememberedPeople) setMembers(rememberedPeople.members || []);
     loadRooms().catch((e) => setError(e.message));
-    fetch("/api/team/members").then((r) => (r.ok ? r.json() : null)).then((d) => d && setMembers(d.members || []));
-    const loadPresence = () =>
-      fetch("/api/presence", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => d && setPresence(d.presence || {}));
+    loadApi<any>("/api/team/members").then((d) => setMembers(d.members || [])).catch(() => {});
     loadPresence();
     const t = setInterval(() => {
       loadPresence();
       loadRooms().catch(() => {});
     }, 30000);
     return () => clearInterval(t);
-  }, [loadRooms]);
+  }, [loadRooms, applyRooms, loadPresence]);
 
   const markSeen = useCallback((id: string) => {
     setLastSeen((prev) => {
@@ -103,20 +127,22 @@ export default function ChatPage() {
   }, []);
 
   // Messages for the open room: initial load, live updates, and a slow poll.
-  useEffect(() => {
+  useBeforePaint(() => {
     if (!roomId) return;
     let cancelled = false;
-    // Don't show the previous room's messages under this room's name.
-    setMessages([]);
+    // This room's remembered messages at once (never the previous room's).
+    const url = `/api/chat?room_id=${roomId}`;
+    setMessages(cached<any>(url)?.messages || []);
     const load = async () => {
       try {
-        const r = await fetch(`/api/chat?room_id=${roomId}`, { cache: "no-store" });
-        const d = await r.json();
-        if (!cancelled && r.ok) setMessages(d.messages || []);
+        const d = await loadApi<any>(url);
+        // Nothing new (most polls): the same list, so nothing redraws.
+        if (!cancelled) setMessages((prev) => keepSame(prev, [...(d.messages || []), ...outbox.current.filter((m) => m.room_id === roomId)]));
       } catch {
         /* try again on the next update or poll */
       }
     };
+    loadMessages.current = load;
     load();
     markSeen(roomId);
 
@@ -132,10 +158,21 @@ export default function ChatPage() {
 
     return () => {
       cancelled = true;
+      loadMessages.current = null;
       clearInterval(poll);
       supabase.removeChannel(channel);
     };
   }, [roomId, markSeen]);
+
+  // Pull-to-refresh and coming back to the app: rooms, people online, messages.
+  useRefresh(() => Promise.all([loadRooms().catch(() => {}), loadPresence(), loadMessages.current?.()]));
+
+  // Keep this room's remembered messages in step with what was just sent.
+  useEffect(() => {
+    if (roomId && messages.length && messages.every((m) => m.room_id === roomId)) {
+      remember(`/api/chat?room_id=${roomId}`, { messages: messages.filter((m) => !m.id.startsWith("sending-")), me });
+    }
+  }, [messages, roomId, me]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -180,21 +217,37 @@ export default function ChatPage() {
   const online = (id: string) => presence[id]?.online;
 
   const send = async () => {
-    if (!draft.trim() || !roomId) return;
-    setSending(true);
+    const text = draft.trim();
+    if (!text || !roomId) return;
+    const sentTo = roomId;
+    // On screen straight away; the keyboard stays up for the next message.
+    const temp: Message = {
+      id: `sending-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      content: text,
+      author_id: me || "",
+      room_id: sentTo,
+      created_at: new Date().toISOString(),
+    };
+    outbox.current = [...outbox.current, temp];
+    setMessages((prev) => [...prev, temp]);
+    setDraft("");
+    markSeen(sentTo);
     try {
-      const sentTo = roomId;
-      const msg = await sendJSON("/api/chat", "POST", { content: draft.trim(), room_id: sentTo });
-      // Only add it here if that room is still the one on screen.
+      const msg: Message = await sendJSON("/api/chat", "POST", { content: text, room_id: sentTo });
+      outbox.current = outbox.current.filter((m) => m.id !== temp.id);
+      // Only shown here if that room is still the one on screen.
       if (roomRef.current === sentTo) {
-        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev.filter((m) => m.id !== temp.id);
+          return prev.some((m) => m.id === temp.id) ? prev.map((m) => (m.id === temp.id ? msg : m)) : [...prev, msg];
+        });
       }
-      setDraft("");
-      markSeen(roomId);
     } catch (e: any) {
+      outbox.current = outbox.current.filter((m) => m.id !== temp.id);
+      setMessages((prev) => prev.filter((m) => m.id !== temp.id));
+      // Give the words back so nothing typed is lost.
+      if (roomRef.current === sentTo) setDraft((cur) => (cur.trim() ? cur : text));
       setError(e.message);
-    } finally {
-      setSending(false);
     }
   };
 
@@ -347,8 +400,9 @@ export default function ChatPage() {
               ) : (
                 messages.map((m) => {
                   const mine = m.author_id === me;
+                  const pending = m.id.startsWith("sending-");
                   return (
-                    <div key={m.id} className={mine ? "text-right" : ""}>
+                    <div key={m.id} className={`${mine ? "text-right" : ""} ${pending ? "opacity-60" : ""}`}>
                       <div className={`inline-block max-w-[85%] sm:max-w-md px-3 py-2 rounded text-sm text-left ${mine ? "bg-blue-600 text-white" : "bg-slate-700 text-slate-200"}`}>
                         {!mine && (
                           <p className="text-xs text-slate-300 mb-1 flex items-center gap-1">
@@ -359,7 +413,7 @@ export default function ChatPage() {
                         <p className="whitespace-pre-wrap break-words">{m.content}</p>
                       </div>
                       <p className="text-[11px] text-slate-500 mt-1">
-                        {new Date(m.created_at).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                        {pending ? "Sending..." : stamp(m.created_at)}
                       </p>
                     </div>
                   );
@@ -379,10 +433,14 @@ export default function ChatPage() {
                 }}
                 rows={1}
                 placeholder={room ? `Message #${roomLabel(room)}...` : "Pick a room"}
-                disabled={sending || !room}
+                disabled={!room}
                 className={`${inputCls} flex-1 resize-none`}
               />
-              <button onClick={send} disabled={sending || !draft.trim() || !room} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 rounded text-sm">
+              <button
+                onClick={send}
+                // Tapping Send keeps the typing box (and the phone's keyboard) up.
+                onMouseDown={(e) => e.preventDefault()}
+                disabled={!draft.trim() || !room} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 rounded text-sm">
                 Send
               </button>
             </div>

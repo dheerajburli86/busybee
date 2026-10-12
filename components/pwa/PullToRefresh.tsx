@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { isStandalone } from "@/lib/pushClient";
+import { refreshAll } from "@/lib/apiCache";
 
 const TRIGGER = 70; // px the spinner travels before a release refreshes
 
@@ -60,7 +61,16 @@ export function PullToRefresh() {
       if (dist.current >= TRIGGER) {
         setRefreshing(true);
         setPull(TRIGGER);
-        window.location.reload();
+        // Reload what's on screen in place (no white flash); a screen that
+        // can't do that gets a full reload.
+        const started = Date.now();
+        Promise.race([refreshAll(), new Promise<number>((r) => setTimeout(() => r(-1), 8000))]).then((n) => {
+          if (n === 0) return window.location.reload();
+          setTimeout(() => {
+            setRefreshing(false);
+            setPull(0);
+          }, Math.max(0, 450 - (Date.now() - started)));
+        });
       } else {
         setPull(0);
       }

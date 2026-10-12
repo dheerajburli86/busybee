@@ -10,6 +10,8 @@
 // chat id can't simply be typed in by an admin.
 
 import { createHash } from "crypto";
+import { dueText, type TaskCard } from "@/lib/mailfmt";
+import { formatForPeople } from "@/lib/format";
 
 const API = "https://api.telegram.org";
 
@@ -116,9 +118,29 @@ function iconFor(type: string): string {
 }
 
 /** Format one alert for Telegram (HTML parse mode). */
-export function formatAlert(n: { type: string; title: string; message: string }): string {
-  const body = String(n.message || "").slice(0, 3500);
-  return `${iconFor(n.type)} <b>${escapeHtml(n.title)}</b>\n${escapeHtml(body)}`;
+export function formatAlert(n: { type: string; title: string; message: string }, card?: TaskCard | null): string {
+  const body = String(n.message || "").slice(0, 2000);
+  const text = `${iconFor(n.type)} <b>${escapeHtml(n.title)}</b>\n${escapeHtml(body)}${card ? taskDetails(card) : ""}`;
+  return text.length > 4000 ? `${text.slice(0, 3990)}...` : text;
+}
+
+const PRIORITY_NAMES: Record<string, string> = { super_high: "Super high", high: "High", medium: "Medium", low: "Low" };
+
+/** Everything about a task, for a new-task message: what, when, who, the items. */
+function taskDetails(card: TaskCard): string {
+  const lines: string[] = ["", ""];
+  lines.push(`<b>${card.is_list ? "To-do list" : "Task"}:</b> ${escapeHtml(card.title)}`);
+  if (card.description?.trim()) lines.push(`<b>What it's about:</b> ${escapeHtml(card.description.trim().slice(0, 1200))}`);
+  lines.push(`<b>Deadline:</b> ${escapeHtml(dueText(card.due))}`);
+  const extra = [card.priority ? `Priority: ${PRIORITY_NAMES[card.priority] || card.priority}` : "", card.project ? `Project: ${card.project}` : ""].filter(Boolean);
+  if (extra.length) lines.push(escapeHtml(extra.join(" · ")));
+  if (card.given_by) lines.push(`<b>Given by:</b> ${escapeHtml(card.given_by)}`);
+  if (card.items.length) {
+    lines.push(`<b>${card.items.length} item${card.items.length === 1 ? "" : "s"}:</b>`);
+    card.items.slice(0, 30).forEach((i, k) => lines.push(`${k + 1}. ${escapeHtml(i.title)}${i.due ? ` - by ${escapeHtml(formatForPeople(i.due))}` : ""}`));
+    if (card.items.length > 30) lines.push(`...and ${card.items.length - 30} more in BusyBee`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -127,12 +149,14 @@ export function formatAlert(n: { type: string; title: string; message: string })
  */
 export async function sendToChats(
   chatIds: number[],
-  n: { type: string; title: string; message: string; task_id?: string | null }
+  n: { type: string; title: string; message: string; task_id?: string | null },
+  /** The whole task, for messages that should carry everything about it. */
+  card?: TaskCard | null
 ): Promise<number> {
   if (!telegramConfigured() || chatIds.length === 0) return 0;
   const base = appUrl();
   const link = base.startsWith("https://") ? `${base}/dashboard${n.task_id ? `?task=${n.task_id}` : ""}` : "";
-  const text = formatAlert(n);
+  const text = formatAlert(n, card);
 
   const results = await Promise.allSettled(
     Array.from(new Set(chatIds)).map((chat_id) =>

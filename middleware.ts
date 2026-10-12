@@ -34,9 +34,14 @@ export async function middleware(request: NextRequest) {
     }
   );
 
+  // Pages here are empty shells that load their data from the API, which
+  // checks the sign-in properly on every call. So the page itself only needs
+  // to know whether there is a session: read from the cookie (refreshed when
+  // it has expired), without a round trip to Supabase on every screen.
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: { session },
+  } = await supabase.auth.getSession();
+  const user = session ? true : null;
 
   const path = request.nextUrl.pathname;
   const isApi = path.startsWith("/api/");

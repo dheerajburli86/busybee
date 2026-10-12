@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:heatmap": "node --experimental-strip-types --test tests/heatmap.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

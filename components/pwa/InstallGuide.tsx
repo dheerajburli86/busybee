@@ -228,7 +228,7 @@ export function InstallGuide() {
             <div className="bg-slate-900 border border-slate-700 rounded-xl p-5 mb-4 flex flex-col sm:flex-row gap-5 items-center">
               {host === PROD_HOST && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src="/install-qr.svg" alt="QR code for this page" width={152} height={152} className="rounded-lg bg-white p-1 shrink-0" />
+                <img src="/install-qr.svg" alt="QR code for this page" width={152} height={152} className="rounded-lg bg-paper p-1 shrink-0" />
               )}
               <div className="text-sm text-slate-300">
                 <p className="text-white font-semibold text-base mb-1">On your phone</p>

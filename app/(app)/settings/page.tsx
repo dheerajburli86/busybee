@@ -4,7 +4,8 @@
 // everything on, so nobody has to visit this page for BusyBee to work the
 // way it always has - it only matters once someone wants less.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { cached, load as loadApi, remember, useBeforePaint } from "@/lib/apiCache";
 import { sendJSON } from "@/lib/api";
 import { TelegramConnect } from "@/components/settings/TelegramConnect";
 import { PushSettings } from "@/components/pwa/PushSettings";
@@ -26,24 +27,24 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/notification-prefs", { cache: "no-store" });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || "Could not load settings");
-        setCategoriesMeta(d.categories_meta || []);
-        setEmailEnabled(d.email_enabled !== false);
-        setMailConfigured(!!d.mail_configured);
-        setTelegramEnabled(d.telegram_enabled !== false);
-        setTelegramConfigured(!!d.telegram_configured);
-        setCategories(d.categories || {});
-      } catch (e: any) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    })();
+  const show = (d: any) => {
+    setCategoriesMeta(d.categories_meta || []);
+    setEmailEnabled(d.email_enabled !== false);
+    setMailConfigured(!!d.mail_configured);
+    setTelegramEnabled(d.telegram_enabled !== false);
+    setTelegramConfigured(!!d.telegram_configured);
+    setCategories(d.categories || {});
+  };
+  useBeforePaint(() => {
+    const known = cached<any>("/api/notification-prefs");
+    if (known) {
+      show(known);
+      setLoading(false);
+    }
+    loadApi<any>("/api/notification-prefs")
+      .then(show)
+      .catch((e) => setError(e.message || "Could not load settings"))
+      .finally(() => setLoading(false));
   }, []);
 
   const save = async (next?: {
@@ -60,6 +61,7 @@ export default function SettingsPage() {
         categories: next?.categories ?? categories,
       };
       await sendJSON("/api/notification-prefs", "PUT", body);
+      remember("/api/notification-prefs", { ...(cached<any>("/api/notification-prefs") || {}), ...body });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {

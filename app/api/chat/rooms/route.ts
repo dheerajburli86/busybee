@@ -9,29 +9,33 @@ export async function GET() {
     const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const rooms = await roomsFor(supabase, user.id);
+    // The rooms (with who's in them) and each room's latest message, together.
+    const memberships = await getMemberships(supabase, user.id);
+    const deskIds = memberships.map((m) => m.desk_id);
+    const [rooms, recentRes] = await Promise.all([
+      roomsFor(supabase, user.id),
+      deskIds.length
+        ? supabase.from("chat_messages").select("room_id, created_at").in("desk_id", deskIds).order("created_at", { ascending: false }).limit(500)
+        : Promise.resolve({ data: [] }),
+    ]);
     const ids = rooms.map((r) => r.id);
-    const { data: members } = ids.length
-      ? await supabase.from("chat_room_members").select("room_id, user_id").in("room_id", ids)
-      : { data: [] };
+
+    // Rooms read without their members (older database): look them up.
+    let members: { room_id: string; user_id: string }[] = [];
+    if (ids.length && rooms.some((r) => !r.member_ids)) {
+      const { data } = await supabase.from("chat_room_members").select("room_id, user_id").in("room_id", ids);
+      members = data || [];
+    }
 
     // Latest message time per room, for sorting and unread dots.
     const latest: Record<string, string> = {};
-    if (ids.length) {
-      const { data: recent } = await supabase
-        .from("chat_messages")
-        .select("room_id, created_at")
-        .in("room_id", ids)
-        .order("created_at", { ascending: false })
-        .limit(500);
-      (recent || []).forEach((m: any) => (latest[m.room_id] ||= m.created_at));
-    }
+    ((recentRes as any).data || []).forEach((m: any) => (latest[m.room_id] ||= m.created_at));
 
     return NextResponse.json({
       me: user.id,
-      rooms: rooms.map((r) => ({
+      rooms: rooms.map(({ member_ids, ...r }) => ({
         ...r,
-        members: (members || []).filter((m: any) => m.room_id === r.id).map((m: any) => m.user_id),
+        members: member_ids || members.filter((m) => m.room_id === r.id).map((m) => m.user_id),
         last_message_at: latest[r.id] || null,
       })),
     });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { isFinished, isOverdue } from "@/lib/status";
+import { cached, load as loadApi, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
 import { sendJSON } from "@/lib/api";
 import { COLOR_SWATCHES } from "@/components/tasks/types";
 import { SIMPLE } from "@/lib/simple";
@@ -47,58 +47,51 @@ export default function ProjectsPage() {
   const isSuper = ["admin", "supervisor"].includes(role);
   const canCreate = isSuper;
 
+  // Projects (with their figures) and people: remembered copy first, then fresh.
+  const showProjects = (pd: any) => {
+    setProjects(pd.projects || []);
+    const serverStats: Record<string, Stats> = {};
+    const serverSections: Record<string, number> = {};
+    (pd.projects || []).forEach((proj: any) => {
+      if (proj.stats) serverStats[proj.id] = proj.stats;
+      (proj.sections || []).forEach((sec: any) => {
+        if (typeof sec.task_count === "number") serverSections[sec.id] = sec.task_count;
+      });
+    });
+    setStats(serverStats);
+    setSectionCounts(serverSections);
+  };
+  const showPeople = (d: any) => {
+    setPeople(d.members || []);
+    setRole(d.myRole || "member");
+  };
+  const loadAll = async () => {
+    try {
+      const [pd, md] = await Promise.all([loadApi<any>("/api/projects"), loadApi<any>("/api/team/members").catch(() => null)]);
+      showProjects(pd);
+      if (md) showPeople(md);
+    } catch (e: any) {
+      setError(e.message || "Could not load projects");
+    } finally {
+      setLoading(false);
+    }
+  };
+  useRefresh(loadAll);
+
+  // Edits made here (new project, renamed, sections) are remembered too.
   useEffect(() => {
-    (async () => {
-      try {
-        const [p, t, m] = await Promise.all([fetch("/api/projects"), fetch("/api/tasks"), fetch("/api/team/members")]);
-        const pd = await p.json();
-        if (!p.ok) throw new Error(pd.error || "Could not load projects");
-        setProjects(pd.projects || []);
-        // The server works out each project's figures over all of its tasks.
-        const serverStats: Record<string, Stats> = {};
-        const serverSections: Record<string, number> = {};
-        (pd.projects || []).forEach((proj: any) => {
-          if (proj.stats) serverStats[proj.id] = proj.stats;
-          (proj.sections || []).forEach((sec: any) => {
-            if (typeof sec.task_count === "number") serverSections[sec.id] = sec.task_count;
-          });
-        });
-        const haveServerStats = Object.keys(serverStats).length > 0;
-        if (haveServerStats) {
-          setStats(serverStats);
-          setSectionCounts(serverSections);
-        }
+    if (!loading) remember("/api/projects", { projects });
+  }, [projects, loading]);
 
-        if (m.ok) {
-          const d = await m.json();
-          setPeople(d.members || []);
-          setRole(d.myRole || "member");
-        }
-
-        // Older server without figures: roll up the tasks this person can see.
-        if (t.ok && !haveServerStats) {
-          const tasks = (await t.json()).tasks || [];
-          const s: Record<string, Stats> = {};
-          const perSection: Record<string, number> = {};
-          tasks.forEach((task: any) => {
-            if (task.stage_id) perSection[task.stage_id] = (perSection[task.stage_id] || 0) + 1;
-            if (!task.project_id) return;
-            s[task.project_id] ||= { progress: 0, total: 0, done: 0, overdue: 0 };
-            s[task.project_id].total += 1;
-            s[task.project_id].progress += task.progress_percent || 0;
-            if (isFinished(task.status)) s[task.project_id].done += 1;
-            if (isOverdue(task)) s[task.project_id].overdue += 1;
-          });
-          Object.values(s).forEach((v) => (v.progress = Math.round(v.progress / v.total)));
-          setStats(s);
-          setSectionCounts(perSection);
-        }
-      } catch (e: any) {
-        setError(e.message);
-      } finally {
-        setLoading(false);
-      }
-    })();
+  useBeforePaint(() => {
+    const pd = cached<any>("/api/projects");
+    const md = cached<any>("/api/team/members");
+    if (md) showPeople(md);
+    if (pd) {
+      showProjects(pd);
+      setLoading(false);
+    }
+    loadAll();
   }, []);
 
   const openPanel = async (project: Project) => {
@@ -274,7 +267,7 @@ export default function ProjectsPage() {
                       </span>
                       <span>{s.progress}%</span>
                     </div>
-                    <div className="w-full bg-slate-900 rounded h-2">
+                    <div className="w-full bg-slate-700 rounded h-2">
                       <div className="bg-blue-600 h-2 rounded" style={{ width: `${s.progress}%` }} />
                     </div>
                   </div>

@@ -7,12 +7,13 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ClipboardList, ListChecks, Menu, MessageCircle, Sparkles, FolderKanban, X } from "lucide-react";
-import { createClient } from "@/lib/supabase";
 import { NotificationBell } from "@/components/NotificationBell";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { SIMPLE } from "@/lib/simple";
 import { clearSnapshots } from "@/lib/snapshot";
+import { forgetAll, load, prefetch, refreshAll } from "@/lib/apiCache";
 import { isStandalone } from "@/lib/pushClient";
 
 // Simple mode: just the pages the core flow uses.
@@ -68,9 +69,53 @@ export function AppNav() {
   const [q, setQ] = useState("");
   const [app, setApp] = useState(true);
 
+  // The tab you tap lights up at once, before its page has finished opening.
+  const [pending, setPending] = useState<string | null>(null);
+
   // Close the "More" sheet whenever the page changes.
-  useEffect(() => setOpen(false), [pathname]);
+  useEffect(() => {
+    setOpen(false);
+    setPending(null);
+  }, [pathname]);
   useEffect(() => setApp(isStandalone()), []);
+
+  // Once this screen is up, get every other screen ready: its code, and the
+  // main tabs' data, so moving around never waits on the network. Done again
+  // whenever the app comes back to the front after a while.
+  const warmUp = useCallback(() => {
+    LINKS.forEach((l) => router.prefetch(l.href));
+    prefetch(["/api/tasks", "/api/team/members", "/api/projects", "/api/tasks?lists=1", "/api/notifications"]);
+    load<any>("/api/chat/rooms", { fresh: 20_000 })
+      .then((d) => {
+        const room = (d.rooms || []).find((r: any) => r.kind === "org") || (d.rooms || [])[0];
+        if (room) prefetch([`/api/chat?room_id=${room.id}`]);
+      })
+      .catch(() => {});
+  }, [router]);
+  useEffect(() => {
+    const t = setTimeout(warmUp, 1500);
+    return () => clearTimeout(t);
+  }, [warmUp]);
+
+  // Back in the app after a while: bring what's on screen up to date first,
+  // then the other screens.
+  useEffect(() => {
+    let hiddenAt = 0;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const onVisible = () => {
+      if (document.visibilityState === "hidden") hiddenAt = Date.now();
+      else if (hiddenAt && Date.now() - hiddenAt > 30_000) {
+        refreshAll();
+        clearTimeout(t);
+        t = setTimeout(warmUp, 1000);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [warmUp]);
 
   // Presence heartbeat (checklist #27): "online" means seen in the last 2 min.
   useEffect(() => {
@@ -92,7 +137,9 @@ export function AppNav() {
     // Sign out this browser only (the default signs out every device), then
     // load the login page fresh so no signed-in screen lingers.
     clearSnapshots();
+    forgetAll();
     try {
+      const { createClient } = await import("@/lib/supabase");
       await createClient().auth.signOut({ scope: "local" });
     } catch {
       /* the cookie is cleared locally either way */
@@ -113,7 +160,10 @@ export function AppNav() {
     }
   };
 
-  const isActive = (href: string) => pathname === href || pathname.startsWith(href + "/");
+  const isActive = (href: string) => {
+    const at = pending || pathname;
+    return at === href || at.startsWith(href + "/");
+  };
   const moreActive = MORE.some((l) => isActive(l.href));
 
   return (
@@ -129,6 +179,7 @@ export function AppNav() {
               <Link
                 key={l.href}
                 href={l.href}
+                onClick={() => setPending(l.href)}
                 className={`px-3 py-2 rounded text-sm ${
                   isActive(l.href) ? "bg-blue-600 text-white" : "text-slate-300 hover:bg-slate-800"
                 }`}
@@ -150,6 +201,7 @@ export function AppNav() {
           </form>
 
           <NotificationBell />
+          <ThemeToggle />
 
           <button
             onClick={logout}
@@ -172,6 +224,7 @@ export function AppNav() {
               <Link
                 key={href}
                 href={href}
+                onClick={() => setPending(href)}
                 aria-current={on ? "page" : undefined}
                 className={`flex flex-col items-center justify-center gap-0.5 h-14 text-[11px] font-medium ${
                   on ? "text-amber-300" : "text-slate-400 active:text-slate-200"
@@ -210,6 +263,7 @@ export function AppNav() {
                 <Link
                   key={l.href}
                   href={l.href}
+                  onClick={() => setPending(l.href)}
                   className={`px-4 py-3.5 rounded-xl text-sm font-medium ${
                     isActive(l.href) ? "bg-blue-600 text-white" : "text-slate-200 bg-slate-800 active:bg-slate-700"
                   }`}

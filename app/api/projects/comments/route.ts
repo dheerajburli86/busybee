@@ -1,6 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { getMemberships, logActivity } from "@/lib/permissions";
+import { getMemberships, logActivity, requireUser } from "@/lib/permissions";
 import { attachNames } from "@/lib/names";
 
 async function projectOnMyDesk(supabase: any, userId: string, projectId: string) {
@@ -15,7 +15,7 @@ async function projectOnMyDesk(supabase: any, userId: string, projectId: string)
 export async function GET(req: Request) {
   try {
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const url = new URL(req.url);
@@ -53,7 +53,7 @@ export async function POST(req: Request) {
     }
 
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const project = await projectOnMyDesk(supabase, user.id, project_id);
@@ -90,7 +90,7 @@ export async function DELETE(req: Request) {
     }
 
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     // Only the author can remove their own comment.

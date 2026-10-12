@@ -166,11 +166,20 @@ export function fromLocalInput(value: string): string | null {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+// Building a date formatter is slow; a list of tasks needs dozens of dates,
+// so one formatter is made once and reused (same output as toLocaleString).
+let dueFormat: Intl.DateTimeFormat | null = null;
+
 export function formatDue(iso: string | null | undefined): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
-  return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  try {
+    dueFormat ||= new Intl.DateTimeFormat([], { dateStyle: "medium", timeStyle: "short" });
+    return dueFormat.format(d);
+  } catch {
+    return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
 }
 
 /** Sections of a project, in order. */

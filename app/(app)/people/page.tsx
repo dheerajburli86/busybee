@@ -2,10 +2,17 @@
 
 // Checklist #21: desk roles and who is allowed onto the desk. Controls only
 // appear for people allowed to use them; the server enforces the same rules.
+//
+// Everyone's box is coloured by the live performance heatmap (lib/heatmap.ts):
+// how their work stands against how far along it should be by now. Tapping a
+// box opens that person's open and finished tasks (?person=<id>).
 
 import { useEffect, useState } from "react";
+import { cached, load as loadApi, useBeforePaint, useRefresh } from "@/lib/apiCache";
 import { sendJSON } from "@/lib/api";
 import { SIMPLE } from "@/lib/simple";
+import { HeatLegend, HowItWorks, PersonTasks, PersonTile } from "@/components/people/Heat";
+import { useHeatmap } from "@/components/people/useHeatmap";
 
 type Person = { id: string; name: string; email: string; role?: string; telegram?: boolean; oversees?: boolean };
 
@@ -30,29 +37,52 @@ export default function PeoplePage() {
   const [health, setHealth] = useState<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] } | null>(null);
   const [showHealth, setShowHealth] = useState(false);
 
+  // Whose tasks are open (?person=<id>); the back button closes it.
+  const [personId, setPersonId] = useState<string | null>(null);
+  useEffect(() => {
+    const read = () => setPersonId(new URLSearchParams(window.location.search).get("person"));
+    read();
+    window.addEventListener("popstate", read);
+    return () => window.removeEventListener("popstate", read);
+  }, []);
+  const openPerson = (id: string | null) => {
+    const url = id ? `?person=${encodeURIComponent(id)}` : window.location.pathname;
+    window.history.pushState({}, "", url);
+    setPersonId(id);
+    window.scrollTo(0, 0);
+  };
+
+  const heat = useHeatmap(people.map((p) => p.id));
+
   const isSuper = ["admin", "supervisor"].includes(role);
   const noPrivilegedYet = !people.some((p) => ["admin", "supervisor"].includes(p.role || "member"));
   const canEditRoles = isSuper || noPrivilegedYet;
 
+  const show = (md: any) => {
+    setPeople(md.members || []);
+    setPending(md.pending || []);
+    setRole(md.myRole || "member");
+    setMe(md.me || null);
+  };
   const load = async () => {
     try {
       // full=1: this is the one page that shows who is waiting for access and
       // who has their phone connected.
-      const m = await fetch("/api/team/members?full=1", { cache: "no-store" });
-      if (!m.ok) throw new Error("Could not load people");
-      const md = await m.json();
-      setPeople(md.members || []);
-      setPending(md.pending || []);
-      setRole(md.myRole || "member");
-      setMe(md.me || null);
+      show(await loadApi<any>("/api/team/members?full=1"));
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message || "Could not load people");
     } finally {
       setLoading(false);
     }
   };
+  useRefresh(load);
 
-  useEffect(() => {
+  useBeforePaint(() => {
+    const known = cached<any>("/api/team/members?full=1");
+    if (known) {
+      show(known);
+      setLoading(false);
+    }
     load();
   }, []);
 
@@ -118,6 +148,20 @@ export default function PeoplePage() {
 
   if (loading) return <p className="text-slate-400 p-6">Loading people...</p>;
 
+  const opened = personId ? people.find((p) => p.id === personId) : null;
+  if (opened) {
+    return (
+      <PersonTasks
+        name={opened.name}
+        me={opened.id === me}
+        heat={heat.people.get(opened.id)}
+        now={heat.now}
+        scope={heat.scope}
+        onBack={() => (window.history.length > 1 ? window.history.back() : openPerson(null))}
+      />
+    );
+  }
+
   const card = "bg-slate-800 border border-slate-700 rounded p-4 mb-6";
   const inputCls = "px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm";
 
@@ -158,35 +202,42 @@ export default function PeoplePage() {
         </>
       )}
 
-      {/* Roles */}
-      <h2 className="text-lg font-semibold mb-2">People &amp; roles</h2>
-      <div className={card}>
-        <ul className="text-xs text-slate-400 mb-3 space-y-0.5">
-          {ROLE_CHOICES.map((r) => <li key={r.value}><span className="text-slate-300">{r.label}</span> - {r.help}</li>)}
-        </ul>
-        {noPrivilegedYet && (
-          <p className="text-xs text-amber-400 mb-3">Nobody is a supervisor yet. Make someone a supervisor to lock role changes down.</p>
-        )}
-        <div className="space-y-2">
-          {people.map((p) => (
-            <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 rounded px-3 py-2">
-              <div className="min-w-0">
-                <p className="text-sm truncate">
-                  {p.name}
-                  {p.id === me && " (you)"}
-                  {p.oversees && <span className="ml-2 text-xs px-2 py-0.5 rounded bg-amber-900/60 text-amber-200">Head · gets every update</span>}
-                </p>
-                <p className="text-xs text-slate-500 truncate">
-                  {p.email}
-                  {p.telegram !== undefined && (
-                    <span className={p.telegram ? "text-sky-400" : "text-slate-600"}>
-                      {" · "}
-                      {p.telegram ? "Telegram connected" : "no Telegram yet"}
-                    </span>
-                  )}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
+      {/* People, coloured by the live heatmap, with their roles */}
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+        <h2 className="text-lg font-semibold">People &amp; how their work is going</h2>
+        <p className="text-xs text-slate-400">
+          {heat.error ? <span className="text-red-400">{heat.error}</span> : heat.loadedAt ? "Live - colours update every minute" : "Loading the heatmap..."}
+        </p>
+      </div>
+      <div className="mb-3">
+        <HeatLegend />
+      </div>
+      <p className="text-xs text-slate-400 mb-3">
+        Colour = work done compared with the work expected by now, given each deadline. Tap a name to see their open and finished tasks.
+        {heat.scope === "visible" && " Worked out from the tasks you can see."}
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 mb-4">
+        {people.map((p) => (
+          <PersonTile
+            key={p.id}
+            name={p.name}
+            me={p.id === me}
+            head={!!p.oversees}
+            heat={heat.people.get(p.id)}
+            now={heat.now}
+            ready={heat.ready}
+            onOpen={() => openPerson(p.id)}
+          >
+            <p className="text-xs text-slate-400 min-w-0 truncate">
+              {p.email}
+              {p.telegram !== undefined && (
+                <span className={p.telegram ? "text-sky-400" : "text-slate-500"}>
+                  {" · "}
+                  {p.telegram ? "Telegram connected" : "no Telegram yet"}
+                </span>
+              )}
+            </p>
+            <div className="flex items-center gap-2 ml-auto">
               {isSuper && (
                 <button
                   onClick={() => toggleOversees(p)}
@@ -203,10 +254,23 @@ export default function PeoplePage() {
               ) : (
                 <span className="text-xs text-slate-400">{DESK_ROLES.find((r) => r.value === (p.role || "member"))?.label}</span>
               )}
-              </div>
             </div>
-          ))}
-        </div>
+          </PersonTile>
+        ))}
+      </div>
+      <div className="mb-6">
+        <HowItWorks />
+      </div>
+
+      {/* What the roles mean */}
+      <div className={card}>
+        <h2 className="text-sm font-semibold mb-2">Roles</h2>
+        <ul className="text-xs text-slate-400 space-y-0.5">
+          {ROLE_CHOICES.map((r) => <li key={r.value}><span className="text-slate-300">{r.label}</span> - {r.help}</li>)}
+        </ul>
+        {noPrivilegedYet && (
+          <p className="text-xs text-amber-400 mt-3">Nobody is a supervisor yet. Make someone a supervisor to lock role changes down.</p>
+        )}
       </div>
 
       {isSuper && (

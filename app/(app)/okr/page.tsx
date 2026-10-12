@@ -196,7 +196,7 @@ export default function OkrPage() {
                     <h2 className="text-lg font-semibold">{o.title}</h2>
                     <span className="text-slate-400 text-sm">{pct}%</span>
                   </div>
-                  <div className="w-full bg-slate-900 rounded h-2 mb-4">
+                  <div className="w-full bg-slate-700 rounded h-2 mb-4">
                     <div className="bg-blue-600 h-2 rounded" style={{ width: `${pct}%` }} />
                   </div>
 
@@ -230,7 +230,7 @@ export default function OkrPage() {
                                 </span>
                               </div>
                             </div>
-                            <div className="w-full bg-slate-900 rounded h-1.5">
+                            <div className="w-full bg-slate-700 rounded h-1.5">
                               <div
                                 className="bg-green-600 h-1.5 rounded"
                                 style={{ width: `${kpct}%` }}
@@ -245,7 +245,7 @@ export default function OkrPage() {
                                 {linked.map((t) => (
                                   <a key={t.id} href={`/dashboard?task=${t.id}`} className="flex items-center gap-2 text-xs text-slate-300 hover:text-white">
                                     <span className="flex-1 truncate">{t.title}</span>
-                                    <span className="w-16 bg-slate-900 rounded h-1.5 shrink-0">
+                                    <span className="w-16 bg-slate-700 rounded h-1.5 shrink-0">
                                       <span className="block bg-blue-500 h-1.5 rounded" style={{ width: `${t.progress_percent || 0}%` }} />
                                     </span>
                                     <span className="w-9 text-right">{t.progress_percent || 0}%</span>

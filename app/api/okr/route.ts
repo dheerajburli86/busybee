@@ -1,6 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { deny, getMemberships, logActivity, roleIn, MANAGER_ROLES, SUPER_ROLES } from "@/lib/permissions";
+import { deny, getMemberships, logActivity, roleIn, MANAGER_ROLES, SUPER_ROLES, requireUser } from "@/lib/permissions";
 
 // SOW #35 / #36: objectives with key results, and tasks linked to them.
 async function deskFor(supabase: any, userId: string) {
@@ -16,7 +16,7 @@ async function deskFor(supabase: any, userId: string) {
 export async function GET() {
   try {
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const deskId = await deskFor(supabase, user.id);
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const memberships = await getMemberships(supabase, user.id);
@@ -124,7 +124,7 @@ export async function PUT(req: Request) {
     }
 
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { data: kr } = await supabase.from("key_results").select("id, objective_id").eq("id", key_result_id).maybeSingle();

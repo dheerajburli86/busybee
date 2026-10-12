@@ -15,6 +15,8 @@ import {
   projectMemberIds,
   userProjectIds,
   visibleTasks,
+  visibilitySets,
+  filterVisible,
 } from "@/lib/permissions";
 import { isFinished, PRIORITY_VALUES, STATUS_VALUES } from "@/lib/status";
 import { isValidColor } from "@/components/tasks/types";
@@ -147,6 +149,8 @@ async function resolveContext(supabase: any, userId: string, projectId?: string 
   return { desk_id: project.desk_id, project_id: project.id, memberships };
 }
 
+const ITEM_COLS = "id, task_id, title, done, progress_percent, progress_type, progress_target, progress_current, due_date, assigned_to, position";
+
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
@@ -154,44 +158,82 @@ export async function GET(request: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     // ?archived=only -> archived tasks, ?archived=all -> both, default -> live only.
+    // ?lists=1 -> only the to-do lists, each with its items (the To-Do page).
     const archived = request.nextUrl.searchParams.get("archived");
+    const listsOnly = request.nextUrl.searchParams.get("lists") === "1";
 
     const memberships = await getMemberships(supabase, user.id);
     const deskIds = memberships.map((m) => m.desk_id);
-    if (deskIds.length === 0) return NextResponse.json({ tasks: [] });
+    if (deskIds.length === 0) return NextResponse.json(listsOnly ? { tasks: [], items: [] } : { tasks: [] });
 
-    const tasks = await selectAll<any>(() => {
-      let q = supabase.from("tasks").select("*").in("desk_id", deskIds);
+    const query = (cols: string) => () => {
+      let q = supabase.from("tasks").select(cols).in("desk_id", deskIds);
+      if (listsOnly) q = q.eq("is_list", true);
       if (archived === "only") q = q.not("archived_at", "is", null);
       else if (archived !== "all") q = q.is("archived_at", null);
       return q.order("created_at", { ascending: false }).order("id");
-    });
+    };
 
-    const [visible, myProjects, reminders] = await Promise.all([
-      visibleTasks(supabase, user.id, tasks || []),
+    // One round trip for everything: the tasks with their item counts (or,
+    // for lists, the items themselves), alongside what decides which of them
+    // this person may see.
+    const [joined, sets, myProjects, reminders] = await Promise.all([
+      selectAll<any>(query(listsOnly ? `*, subtasks(${ITEM_COLS})` : "*, subtasks(count)")).catch(() => null),
+      visibilitySets(supabase, user.id),
       userProjectIds(supabase, user.id),
       myReminders(supabase, user.id),
     ]);
 
-    // How many subtasks each task has, so the UI knows when progress is rolled up.
-    const ids = visible.map((t: any) => t.id);
     const counts: Record<string, number> = {};
-    const subs = await inChunks<any>(ids, (part) => supabase.from("subtasks").select("task_id").in("task_id", part).order("id"), { all: true });
-    subs.forEach((s: any) => (counts[s.task_id] = (counts[s.task_id] || 0) + 1));
+    let items: any[] = [];
+    let tasks: any[];
+    if (joined) {
+      tasks = joined.map(({ subtasks, ...t }: any) => {
+        const list = Array.isArray(subtasks) ? subtasks : [];
+        if (listsOnly) {
+          counts[t.id] = list.length;
+          items.push(...list);
+        } else {
+          counts[t.id] = Number(list[0]?.count) || 0;
+        }
+        return t;
+      });
+    } else {
+      // A database that can't join them: tasks first, then their items.
+      tasks = await selectAll<any>(query("*"));
+    }
+    const visible = filterVisible(tasks, user.id, memberships, sets);
+    const shown = new Set(visible.map((t: any) => t.id));
 
-    return NextResponse.json({
-      tasks: visible.map((t: any) => ({
-        ...t,
-        // Your own "remind me at" time, not whoever else set one on the task.
-        ...(reminders ? { remind_at: reminders.get(t.id) ?? null } : {}),
-        subtask_count: counts[t.id] || 0,
-        for_me: isForMe(t, user.id, myProjects),
-      })),
-    });
+    if (!joined && visible.length) {
+      const subs = await inChunks<any>(Array.from(shown), (part) =>
+        supabase.from("subtasks").select(listsOnly ? ITEM_COLS : "task_id").in("task_id", part).order("id"), { all: true }
+      );
+      subs.forEach((x: any) => (counts[x.task_id] = (counts[x.task_id] || 0) + 1));
+      if (listsOnly) items = subs;
+    }
+
+    const out = visible.map((t: any) => ({
+      ...t,
+      // Your own "remind me at" time, not whoever else set one on the task.
+      ...(reminders ? { remind_at: reminders.get(t.id) ?? null } : {}),
+      subtask_count: counts[t.id] || 0,
+      for_me: isForMe(t, user.id, myProjects),
+    }));
+    if (listsOnly) {
+      items = items.filter((x: any) => shown.has(x.task_id)).sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0));
+      return NextResponse.json({ tasks: out, items });
+    }
+    return NextResponse.json({ tasks: out });
   } catch (error: any) {
     console.error("GET /api/tasks failed:", error);
     return NextResponse.json({ error: error?.message || "Failed to fetch tasks" }, { status: 500 });
   }
+}
+
+/** "Asha", "Asha and Ravi", "Asha, Ravi and Neha". */
+function listOf(names: string[]): string {
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 }
 
 export async function POST(request: NextRequest) {
@@ -217,6 +259,11 @@ export async function POST(request: NextRequest) {
     } = body;
     // #1: an item added to "My To-Do" is private to its owner.
     const personal = body.personal === true;
+    // Given to several people at once (one copy each): who else has it, so
+    // every copy's alerts say so.
+    const withIds: string[] = Array.isArray(body.with)
+      ? (Array.from(new Set(body.with.filter((x: any) => typeof x === "string" && x && x !== assigned_to))) as string[]).slice(0, 100)
+      : [];
     // To-do lists: one task whose items are its subtasks, sent in one go.
     const isList = body.is_list === true;
     const rawItems: any[] = Array.isArray(body.items) ? body.items.slice(0, 100) : [];
@@ -230,14 +277,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (typeof title !== "string" || !title.trim()) return NextResponse.json({ error: "Title is required" }, { status: 400 });
-    // Every alert about a task carries its description, so anyone reading an
-    // email or Telegram message knows what the work is. Private to-dos are
-    // only for their owner and can stay short.
-    if (!personal && (typeof description !== "string" || description.trim().length < 5)) {
-      return NextResponse.json(
-        { error: "Describe the task in a sentence or two - it goes into every email and Telegram message about it" },
-        { status: 400 }
-      );
+    // The description is optional; when there is one, every alert carries it.
+    if (description != null && typeof description !== "string") {
+      return NextResponse.json({ error: "The description must be text" }, { status: 400 });
     }
     if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
     // DOCX #10: a task cannot exist without a due date and time.
@@ -261,21 +303,26 @@ export async function POST(request: NextRequest) {
     const ctx = await resolveContext(supabase, user.id, project_id);
     if (!ctx) return NextResponse.json({ error: "No project is set up for your desk yet" }, { status: 400 });
 
-    if (!personal) {
-      const problem = await notOnDesk(supabase, ctx.desk_id, { assigned_to, project_id });
-      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    // Both checks at once: the people and project are on this desk, and #20
+    // the task goes into the chosen section of its project, or the first one.
+    const [problem, sectionOk, mates] = await Promise.all([
+      personal ? Promise.resolve(null) : notOnDesk(supabase, ctx.desk_id, { assigned_to, project_id }),
+      stage_id ? sectionInProject(supabase, stage_id, ctx.project_id) : firstSection(supabase, ctx.project_id),
+      // Names of the others given the same task (people on this desk only).
+      withIds.length && !personal && assigned_to
+        ? supabase
+            .from("desk_members")
+            .select("user_id, users(full_name, email)")
+            .eq("desk_id", ctx.desk_id)
+            .in("user_id", withIds)
+            .then((r: any) => Array.from(new Set<string>((r.data || []).map((m: any) => m.users?.full_name || m.users?.email).filter(Boolean))))
+        : Promise.resolve([] as string[]),
+    ]);
+    if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    if (stage_id && !sectionOk) {
+      return NextResponse.json({ error: "That section isn't part of the project" }, { status: 400 });
     }
-
-    // #20: the task goes into the chosen section of its project, or the first one.
-    let section: string | null = null;
-    if (stage_id) {
-      if (!(await sectionInProject(supabase, stage_id, ctx.project_id))) {
-        return NextResponse.json({ error: "That section isn't part of the project" }, { status: 400 });
-      }
-      section = stage_id;
-    } else {
-      section = await firstSection(supabase, ctx.project_id);
-    }
+    const section: string | null = stage_id ? stage_id : (sectionOk as string | null);
 
     const { data: task, error } = await supabase
       .from("tasks")
@@ -284,7 +331,7 @@ export async function POST(request: NextRequest) {
         project_id: ctx.project_id,
         stage_id: section,
         title: title.trim(),
-        description: description || null,
+        description: typeof description === "string" && description.trim() ? description.trim() : null,
         priority,
         status,
         due_date: due,
@@ -350,16 +397,17 @@ export async function POST(request: NextRequest) {
     recipients.delete(user.id);
     if (recipients.size) {
       // Step 4 of the assignment flow: a task with a deadline asks to be accepted.
-      const ask = task.due_date && !task.personal
-        ? ` - due ${formatForPeople(task.due_date)}. Open it to accept the deadline or ask for more time.`
-        : "";
+      const deadline = task.due_date && !task.personal;
+      const due = deadline ? ` - due ${formatForPeople(task.due_date)}.` : "";
+      const also = mates.length ? ` Also given to ${listOf(mates)} - each of you has your own copy.` : "";
+      const ask = deadline ? " Open it to accept the deadline or ask for more time." : "";
       await notifyMany(supabase, Array.from(recipients), {
         task_id: task.id,
         type: "assigned",
         title: isList ? "New to-do list" : "New task assigned",
         message: isList
-          ? `You were given a to-do list: ${task.title} (${subtaskCount} item${subtaskCount === 1 ? "" : "s"})${ask}`
-          : `You were assigned: ${task.title}${ask}`,
+          ? `You were given a to-do list: ${task.title} (${subtaskCount} item${subtaskCount === 1 ? "" : "s"})${due}${also}${ask}`
+          : `You were assigned: ${task.title}${due}${also}${ask}`,
         email: { subject: `${isList ? "New to-do list" : "New task assigned"}: ${task.title}` },
       });
     }
@@ -424,9 +472,8 @@ export async function PUT(request: NextRequest) {
       }
       patch.title = patch.title.trim();
     }
-    if ("description" in patch && !before.personal && (typeof patch.description !== "string" || patch.description.trim().length < 5)) {
-      return NextResponse.json({ error: "A task needs a description - it goes into every email about it" }, { status: 400 });
-    }
+    // The description is optional: clearing it is fine.
+    if ("description" in patch && typeof patch.description === "string" && !patch.description.trim()) patch.description = null;
     if ("description" in patch && patch.description !== null && typeof patch.description !== "string") {
       return NextResponse.json({ error: "The description must be text" }, { status: 400 });
     }

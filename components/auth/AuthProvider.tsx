@@ -1,54 +1,52 @@
 // components/auth/AuthProvider.tsx
 "use client";
 
-import { createClient } from "@/lib/supabase";
+// Signed-out visitors never reach these pages (the middleware sends them to
+// the login page first), so pages show straight away instead of waiting on a
+// session check. This only watches, in the background, for the session
+// ending - signed out in another tab, or expired - and goes to the login
+// page then. The sign-in library loads after the page is up; it isn't needed
+// to show the page.
+
 import { useRouter } from "next/navigation";
-import { useEffect, useState, ReactNode } from "react";
+import { useEffect, ReactNode } from "react";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [isLoading, setIsLoading] = useState(true);
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
 
   useEffect(() => {
     let cancelled = false;
-    supabase.auth
-      .getSession()
-      .then(({ data: { session } }) => {
+    let stop: (() => void) | undefined;
+    const t = setTimeout(async () => {
+      try {
+        const { createClient } = await import("@/lib/supabase");
         if (cancelled) return;
-        setIsAuthenticated(!!session);
-        if (!session) router.push("/login");
-      })
-      .finally(() => !cancelled && setIsLoading(false));
-
-    // Follow sign-outs (and sign-ins in another tab).
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setIsAuthenticated(!!session);
-      if (!session) router.push("/login");
-    });
-
+        const supabase = createClient();
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        if (cancelled) return;
+        if (!session) {
+          router.push("/login");
+          return;
+        }
+        // Follow sign-outs (and sign-ins in another tab).
+        const {
+          data: { subscription },
+        } = supabase.auth.onAuthStateChange((_event, s) => {
+          if (!s) router.push("/login");
+        });
+        stop = () => subscription.unsubscribe();
+      } catch {
+        /* offline: try again on the next visit */
+      }
+    }, 800);
     return () => {
       cancelled = true;
-      subscription?.unsubscribe();
+      clearTimeout(t);
+      stop?.();
     };
-  }, [supabase, router]);
+  }, [router]);
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-slate-950">
-        <div className="text-slate-400">Loading...</div>
-      </div>
-    );
-  }
-
-  return isAuthenticated ? (
-    <>{children}</>
-  ) : (
-    <div className="flex items-center justify-center min-h-screen bg-slate-950">
-      <div className="text-slate-400">Redirecting to login...</div>
-    </div>
-  );
+  return <>{children}</>;
 }

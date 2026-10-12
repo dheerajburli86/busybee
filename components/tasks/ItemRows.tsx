@@ -3,7 +3,10 @@
 // The items inside one task: each line gets a tick box for the person doing
 // it and an optional date of its own. Used by the Tasks form and To-Do lists.
 
+import { useState } from "react";
+import { CalendarPlus } from "lucide-react";
 import { fromLocalInput } from "./types";
+import { DateTimeInput } from "./DateInputs";
 
 export type ItemRow = { key: number; title: string; due: string };
 
@@ -42,6 +45,9 @@ export function ItemRows({
   placeholder?: string;
 }) {
   const set = (key: number, patch: Partial<ItemRow>) => onChange(rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  // An item's date box shows once asked for (or when it has a date), so the
+  // list stays short on a phone.
+  const [dated, setDated] = useState<Set<number>>(new Set());
 
   // Pasting several lines into one box makes one item per line.
   const paste = (key: number, text: string) => {
@@ -75,15 +81,28 @@ export function ItemRows({
             disabled={disabled}
             aria-label={`Item ${i + 1}`}
           />
-          <input
-            type="datetime-local"
-            value={r.due}
-            onChange={(e) => set(r.key, { due: e.target.value })}
-            className={`${inputCls} w-auto`}
-            disabled={disabled}
-            aria-label={`Item ${i + 1} date (optional)`}
-            title="Date for this item (optional)"
-          />
+          {r.due || dated.has(r.key) ? (
+            <DateTimeInput
+              value={r.due}
+              onChange={(due) => set(r.key, { due })}
+              className={`${inputCls} w-auto`}
+              disabled={disabled}
+              aria-label={`Item ${i + 1} date (optional)`}
+              title="Date for this item (optional)"
+              autoFocus={!r.due}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setDated((d) => new Set(d).add(r.key))}
+              disabled={disabled}
+              className="w-10 h-10 flex items-center justify-center rounded border border-slate-600 text-slate-400 hover:text-white hover:border-slate-400"
+              aria-label={`Add a date to item ${i + 1}`}
+              title="Add a date to this item (optional)"
+            >
+              <CalendarPlus size={18} aria-hidden="true" />
+            </button>
+          )}
           {rows.length > 1 && (
             <button
               type="button"
@@ -99,7 +118,7 @@ export function ItemRows({
       <button type="button" onClick={() => onChange([...rows, blankItem()])} disabled={disabled} className="text-sm text-blue-400 hover:text-blue-300 px-1">
         + Add item
       </button>
-      <p className="text-xs text-slate-500">Dates are optional. Paste several lines into one box and each line becomes an item.</p>
+      <p className="text-xs text-slate-500">Dates on items are optional (the calendar button). Paste several lines into one box and each line becomes an item.</p>
     </div>
   );
 }

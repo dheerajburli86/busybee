@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
+import { cached, load as loadApi, useBeforePaint } from "@/lib/apiCache";
 import { Person, Task, formatDue, fromLocalInput, nameOf, toLocalInput } from "./types";
 
 type Acceptance = {
@@ -102,24 +103,49 @@ export function TaskWorkflow({
   });
   const [money, setMoney] = useState(blankMoney);
 
+  const acceptState = useRef(onAcceptState);
+  acceptState.current = onAcceptState;
+  const apply = useCallback((a: any, m: any) => {
+    if (a) {
+      setAccept(a);
+      acceptState.current?.(!!a.needs_my_decision);
+    }
+    if (m) {
+      setAdjustments(m.entries || []);
+      setCanAddMoney(!!m.can_add);
+    }
+  }, []);
+
+  // A task opened before: its panels as this phone remembers them, at once.
+  useBeforePaint(() => {
+    const d = cached<any>(`/api/tasks/${task.id}/details`);
+    if (d) apply(d.accept, d.adjustment);
+  }, [task.id, apply]);
+
+  // The first time a task is shown, these come with the rest of the task
+  // (one request for the whole panel); after a change, straight from here.
+  const fromPanel = useRef<string | null>(null);
   const load = useCallback(async () => {
     try {
-      const [a, m] = await Promise.all([
-        fetch(`/api/tasks/${task.id}/accept`).then((r) => (r.ok ? r.json() : null)),
-        fetch(`/api/tasks/${task.id}/adjustment`).then((r) => (r.ok ? r.json() : null)),
-      ]);
-      if (a) {
-        setAccept(a);
-        onAcceptState?.(!!a.needs_my_decision);
+      let a: any = null;
+      let m: any = null;
+      if (fromPanel.current !== task.id) {
+        fromPanel.current = task.id;
+        const d = await loadApi<any>(`/api/tasks/${task.id}/details`, { fresh: 3000 }).catch(() => null);
+        a = d?.accept || null;
+        m = d?.adjustment || null;
       }
-      if (m) {
-        setAdjustments(m.entries || []);
-        setCanAddMoney(!!m.can_add);
+      if (!a && !m) {
+        [a, m] = await Promise.all([
+          fetch(`/api/tasks/${task.id}/accept`).then((r) => (r.ok ? r.json() : null)),
+          fetch(`/api/tasks/${task.id}/adjustment`).then((r) => (r.ok ? r.json() : null)),
+        ]);
       }
+      apply(a, m);
     } catch {
       /* the panels simply don't appear - never block the task view */
     }
-  }, [task.id]);
+  }, [task.id, apply]);
 
   useEffect(() => {
     load();
@@ -275,7 +301,7 @@ export function TaskWorkflow({
                   <label className="flex flex-col gap-1 text-xs text-slate-300">
                     Date you need
                     <input
-                      type="datetime-local"
+                      type="datetime-local" max="9999-12-31T23:59"
                       value={declineDate}
                       min={toLocalInput(task.due_date)}
                       onChange={(e) => setDeclineDate(e.target.value)}
@@ -377,7 +403,7 @@ export function TaskWorkflow({
                 <label className="flex flex-col gap-1 text-xs text-slate-400">
                   If you send it back: new deadline (optional - the current one is {formatDue(task.due_date)})
                   <input
-                    type="datetime-local"
+                    type="datetime-local" max="9999-12-31T23:59"
                     value={sendBackDue}
                     min={toLocalInput(new Date().toISOString())}
                     onChange={(e) => setSendBackDue(e.target.value)}

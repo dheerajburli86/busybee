@@ -1,5 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    // Screens fetched ahead of time (see AppNav) stay ready to open instantly
+    // for half an hour instead of the default five minutes. The pages are
+    // empty shells - their data is loaded separately - so nothing goes stale.
+    staleTimes: { static: 1800 },
+  },
   async headers() {
     return [
       {

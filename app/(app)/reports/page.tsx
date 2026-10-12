@@ -4,7 +4,8 @@
 // completion, status distribution, project and member performance, overdue
 // work and the activity log for the period - with CSV export and print-to-PDF.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { cached, load as loadApi, useBeforePaint, useRefresh } from "@/lib/apiCache";
 
 type Report = {
   period: string;
@@ -34,9 +35,15 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const TZ = "Asia/Kolkata";
-const fmtDate = (iso: string) => new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: TZ });
+// Formatters made once and reused: a report can show hundreds of dates.
+let dateFormat: Intl.DateTimeFormat | null = null;
+let dateTimeFormat: Intl.DateTimeFormat | null = null;
+const fmtDate = (iso: string) =>
+  (dateFormat ||= new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: TZ })).format(new Date(iso));
 const fmtDateTime = (iso: string) =>
-  new Date(iso).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: TZ });
+  (dateTimeFormat ||= new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZone: TZ })).format(
+    new Date(iso)
+  );
 const lateLabel = (days: number) => (days < 1 ? "Today" : days === 1 ? "1 day" : `${days} days`);
 
 function toCsv(rows: Record<string, any>[]): string {
@@ -58,28 +65,35 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    fetch("/api/projects").then((r) => (r.ok ? r.json() : { projects: [] })).then((d) => setProjects(d.projects || []));
+  useBeforePaint(() => {
+    const known = cached<any>("/api/projects");
+    if (known) setProjects(known.projects || []);
+    loadApi<any>("/api/projects")
+      .then((d) => setProjects(d.projects || []))
+      .catch(() => {});
   }, []);
 
-  useEffect(() => {
+  const [refreshTick, setRefreshTick] = useState(0);
+  useRefresh(() => setRefreshTick((n) => n + 1));
+
+  useBeforePaint(() => {
     // Switching period quickly: only the latest request may fill the page.
     let current = true;
-    setLoading(true);
     setError("");
     const qs = new URLSearchParams({ period, date, ...(projectId ? { project_id: projectId } : {}) });
-    fetch(`/api/reports?${qs}`, { cache: "no-store" })
-      .then(async (r) => {
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.error || "Could not build the report");
-        if (current) setReport(d);
-      })
-      .catch((e) => current && setError(e.message))
+    const url = `/api/reports?${qs}`;
+    // The same report as last time shows at once while a fresh one is built.
+    const known = cached<any>(url);
+    if (known) setReport(known);
+    setLoading(!known);
+    loadApi<any>(url)
+      .then((d) => current && setReport(d))
+      .catch((e) => current && setError(e.message || "Could not build the report"))
       .finally(() => current && setLoading(false));
     return () => {
       current = false;
     };
-  }, [period, date, projectId]);
+  }, [period, date, projectId, refreshTick]);
 
   const download = () => {
     if (!report) return;
@@ -128,7 +142,7 @@ export default function ReportsPage() {
             {p.label}
           </button>
         ))}
-        <input type="date" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Report date (the day, week or month containing it)" />
+        <input type="date" max="9999-12-31" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Report date (the day, week or month containing it)" />
 {(
         <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className="px-3 py-2 bg-slate-800 border border-slate-700 rounded text-sm" aria-label="Project">
           <option value="">All projects</option>

@@ -12,6 +12,7 @@
 // than by this page.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { cached, load as loadApi, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
 import { useRouter } from "next/navigation";
 import { rupees } from "@/components/tasks/TaskWorkflow";
 import { formatDue } from "@/components/tasks/types";
@@ -61,13 +62,10 @@ export default function PayrollPage() {
   const [formMsg, setFormMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const qs = new URLSearchParams({ month });
-      if (desk) qs.set("desk", desk);
-      const res = await fetch(`/api/payroll?${qs.toString()}`);
-      if (!res.ok) throw new Error((await res.json().catch(() => ({})))?.error || "Could not load the report");
-      const data = await res.json();
+    const qs = new URLSearchParams({ month });
+    if (desk) qs.set("desk", desk);
+    const url = `/api/payroll?${qs.toString()}`;
+    const show = (data: any) => {
       setRows(data.rows || []);
       setEntries(data.entries || []);
       setTotals(data.totals || { reward: 0, penalty: 0, net: 0 });
@@ -75,18 +73,32 @@ export default function PayrollPage() {
       setDesks(data.desks || []);
       setPeople(data.people || []);
       setTasks(data.tasks || []);
-      if (!desk && data.desk_id) setDesk(data.desk_id);
+      if (!desk && data.desk_id) {
+        // The same answer is the desk's answer: remember it there too, so
+        // picking the desk below doesn't show "Loading..." again.
+        const withDesk = new URLSearchParams({ month, desk: data.desk_id });
+        remember(`/api/payroll?${withDesk.toString()}`, data);
+        setDesk(data.desk_id);
+      }
+    };
+    // This month's figures as this phone remembers them, then fresh.
+    const known = cached<any>(url);
+    if (known) show(known);
+    setLoading(!known);
+    try {
+      show(await loadApi<any>(url));
       setError("");
     } catch (e: any) {
-      setError(e.message);
+      setError(e.message || "Could not load the report");
     } finally {
       setLoading(false);
     }
   }, [month, desk]);
 
-  useEffect(() => {
+  useBeforePaint(() => {
     load();
   }, [load]);
+  useRefresh(load);
 
   const amountNum = Number(fAmount);
   const personTasks = tasks.filter((t) => t.assigned_to === fPerson);

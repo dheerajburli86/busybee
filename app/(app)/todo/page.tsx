@@ -222,11 +222,11 @@ export default function TodoPage() {
             />
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Due
-              <input type="datetime-local" required aria-label="Due date and time" value={newDue} onChange={(e) => setNewDue(e.target.value)} disabled={creating || !meId} className={inputCls} />
+              <input type="datetime-local" max="9999-12-31T23:59" required aria-label="Due date and time" value={newDue} onChange={(e) => setNewDue(e.target.value)} disabled={creating || !meId} className={inputCls} />
             </label>
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Remind me (optional)
-              <input type="datetime-local" aria-label="Remind me at" value={newRemind} onChange={(e) => setNewRemind(e.target.value)} disabled={creating || !meId} className={inputCls} />
+              <input type="datetime-local" max="9999-12-31T23:59" aria-label="Remind me at" value={newRemind} onChange={(e) => setNewRemind(e.target.value)} disabled={creating || !meId} className={inputCls} />
             </label>
             <button type="submit" disabled={creating || !newTitle.trim() || !newDue || !meId} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 rounded text-sm">
               {creating ? "Adding..." : "Add"}
@@ -267,7 +267,7 @@ export default function TodoPage() {
                     <label className="flex items-center gap-1">
                       ⏰
                       <input
-                        type="datetime-local"
+                        type="datetime-local" max="9999-12-31T23:59"
                         defaultValue={t.remind_at ? toLocal(t.remind_at) : ""}
                         key={`${t.id}-${t.remind_at || ""}`}
                         onBlur={(e) => e.target.value !== (t.remind_at ? toLocal(t.remind_at) : "") && setReminder(t, e.target.value)}

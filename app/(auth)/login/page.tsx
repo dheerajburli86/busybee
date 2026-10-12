@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { isStandalone } from '@/lib/pushClient';
+import { forgetAll, prefetch } from '@/lib/apiCache';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -27,6 +28,10 @@ export default function LoginPage() {
         password,
       });
       if (error) throw error;
+      // A fresh start for whoever signed in: nobody else's remembered data,
+      // and their tasks already on the way while the next page opens.
+      forgetAll();
+      prefetch(['/api/tasks', '/api/team/members', '/api/projects', '/api/notifications']);
       const next = new URLSearchParams(window.location.search).get('next');
       // Only ever go back to a page of this site ("//x" and "/\x" are other sites).
       router.push(next && /^\/(?![\/\\])/.test(next) ? next : '/dashboard');

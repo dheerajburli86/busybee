@@ -72,7 +72,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       message,
       email: { subject: isUpdateRequest ? `Update requested: ${task.title}` : `Reminder: ${task.title}` },
       in_app: false,
-    });
+    }, { wait: true });
     const emailed = sent.email > 0;
 
     await logActivity(supabase, {

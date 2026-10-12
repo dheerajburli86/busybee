@@ -1,15 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { STATUSES, isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
 import { sendJSON } from "@/lib/api";
 import { OPEN_TASK_EVENT } from "@/components/NotificationBell";
-import { TaskDetail } from "@/components/tasks/TaskDetail";
-import { GanttView } from "@/components/tasks/GanttView";
+import dynamic from "next/dynamic";
 import { SIMPLE } from "@/lib/simple";
-import { readSnapshot, writeSnapshot } from "@/lib/snapshot";
+import { cached, freshKeeper, keepSame, load, prefetch, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
-import { quickDeadlines } from "@/lib/deadlines";
+import { DateTimeInput, DeadlinePicker } from "@/components/tasks/DateInputs";
 import { ItemRow, ItemRows, blankItems, itemsPayload, latestItemDate } from "@/components/tasks/ItemRows";
 
 import {
@@ -25,6 +24,12 @@ import {
   sectionsFor,
   toLocalInput,
 } from "@/components/tasks/types";
+
+// The task panel and the timeline are big and only needed after a tap: they
+// load in the background (see below), so the list itself appears sooner.
+const loadTaskDetail = () => import("@/components/tasks/TaskDetail");
+const TaskDetail = dynamic(() => loadTaskDetail().then((m) => m.TaskDetail), { ssr: false });
+const GanttView = dynamic(() => import("@/components/tasks/GanttView").then((m) => m.GanttView), { ssr: false });
 
 const SORT_OPTIONS = [
   { value: "created_at", label: "Newest first" },
@@ -58,7 +63,69 @@ const BOARD_FIELD: Record<string, string> = {
 
 type View = "list" | "board" | "gantt";
 
+// Dates here are ISO strings, which sort correctly as plain text - much
+// faster than localeCompare on a long list.
+const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 const emptyLookups: Lookups = { people: [], projects: [], keyResults: [], me: null };
+
+/**
+ * One task in the list. Memoised: typing in the form above or ticking a
+ * filter doesn't redraw every card, only the ones whose task changed.
+ */
+const TaskCard = memo(function TaskCard({
+  t,
+  project,
+  section,
+  assignee,
+  onOpen,
+}: {
+  t: Task;
+  project: string | null;
+  section: string | null;
+  assignee: string;
+  onOpen: (id: string) => void;
+}) {
+  const late = isOverdue(t);
+  const sending = t.id.startsWith("sending-");
+  return (
+    <button
+      onClick={() => !sending && onOpen(t.id)}
+      // A finger on the card starts loading its details before the tap ends.
+      onPointerDown={() => !sending && prefetch([`/api/tasks/${t.id}/details`], 10_000)}
+      aria-busy={sending || undefined}
+      style={!late && t.color ? { borderLeftColor: t.color, borderLeftWidth: 4 } : undefined}
+      className={`cv-auto text-left bg-slate-800 rounded border p-4 hover:border-blue-500 ${sending ? "opacity-70" : ""} ${late ? "border-l-4 border-l-red-500 border-slate-700" : "border-slate-700"}`}
+    >
+      <div className="flex justify-between items-start gap-3 mb-1">
+        <h3 className={`font-bold ${late ? "text-red-400" : ""}`}>
+          {t.color && <span className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle" style={{ backgroundColor: t.color }} title="Custom color" />}
+          {t.title}
+          {late && <span className="ml-2 text-xs font-normal">OVERDUE</span>}
+        </h3>
+        <span className={`text-xs px-2 py-1 rounded shrink-0 ${sending ? "bg-slate-700 text-slate-300" : statusClass(t.status)}`}>{sending ? "Sending..." : statusLabel(t.status)}</span>
+      </div>
+      {t.description && <p className="text-slate-400 text-sm mb-2 line-clamp-2">{t.description}</p>}
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 mb-2">
+        <span>{PRIORITIES.find((p) => p.value === t.priority)?.label}</span>
+        {t.due_date && <span>Due {formatDue(t.due_date)}</span>}
+        {t.completed_at && <span>Finished {formatDue(t.completed_at)}</span>}
+        {section && <span>§ {section}</span>}
+        {!SIMPLE && t.milestone && <span>◆ {milestoneLabel(t.milestone)}</span>}
+        {project && <span>📁 {project}</span>}
+        {(t.subtask_count || 0) > 0 && <span>{t.subtask_count} subtasks</span>}
+        {t.personal && <span>🔒 personal</span>}
+        <span className="ml-auto">👤 {assignee}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 bg-slate-700 rounded h-2">
+          <div className="bg-blue-600 h-2 rounded" style={{ width: `${t.progress_percent}%` }} />
+        </div>
+        <span className="text-xs text-slate-400 w-9 text-right">{t.progress_percent}%</span>
+      </div>
+    </button>
+  );
+});
 
 export default function DashboardPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -101,6 +168,9 @@ export default function DashboardPage() {
     subtasks: "",
   });
   const [creating, setCreating] = useState(false);
+  // Tasks being sent or just made here: a reload that set off before the
+  // server had them doesn't wipe them from the list.
+  const [fresh] = useState(() => freshKeeper<Task>());
   // Simple mode: the things to do inside this one task, each with a tick box.
   const [items, setItems] = useState<ItemRow[]>(() => blankItems(1));
   const [showMore, setShowMore] = useState(false);
@@ -115,67 +185,34 @@ export default function DashboardPage() {
     setTimeout(() => setInfo((cur) => (cur === m ? "" : cur)), 4000);
   }, []);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("project")) {
-      const pid = params.get("project") as string;
-      setProjectF(pid);
-      // New tasks made while looking at a project go into it unless changed.
-      if (SIMPLE) setForm((f) => ({ ...f, project: pid }));
-    }
-    if (params.get("task")) setOpenId(params.get("task"));
-    if (params.get("assignee")) {
-      setAssigneeF(params.get("assignee") as string);
-      setShowFilters(true);
-    }
-
-    // Paint the last-seen tasks at once; the real data replaces them below.
-    const snap = readSnapshot<{ tasks: Task[]; lookups: Lookups; role: string }>("dashboard");
-    if (snap) {
-      setTasks(snap.tasks || []);
-      setLookups(snap.lookups || emptyLookups);
-      setMyRole(snap.role || "member");
-      setLoading(false);
-    }
-
-    (async () => {
+  // Load (or reload) everything this page shows. On the first load the
+  // remembered copy is already on screen; this swaps in fresh data.
+  const loadAll = useCallback(
+    async (first: boolean) => {
+      const params = new URLSearchParams(window.location.search);
       try {
-        const get = async (u: string) => {
-          const r = await fetch(u, { cache: "no-store" });
-          return r.ok ? r.json() : null;
-        };
-        // All five go out at once, but the people list is what the form at the
-        // top needs first, so it is shown the moment it lands instead of
-        // waiting for the tasks, projects, OKRs and templates behind it.
-        const tasksReq = fetch("/api/tasks", { cache: "no-store" });
-        const membersReq = get("/api/team/members");
-        const projectsReq = get("/api/projects");
+        // All at once, but the people list is what the form at the top needs
+        // first, so it is shown the moment it lands.
+        const tasksReq = load<{ tasks: Task[] }>("/api/tasks");
+        const membersReq = load<any>("/api/team/members").catch(() => null);
+        const projectsReq = load<any>("/api/projects").catch(() => null);
         // Simple mode never shows OKRs or templates: don't load them.
-        const okrReq = SIMPLE ? Promise.resolve(null) : get("/api/okr");
-        const templatesReq = SIMPLE ? Promise.resolve(null) : get("/api/templates");
+        const okrReq = SIMPLE ? Promise.resolve(null) : load<any>("/api/okr").catch(() => null);
+        const templatesReq = SIMPLE ? Promise.resolve(null) : load<any>("/api/templates").catch(() => null);
 
-        membersReq
-          .then((m) => {
-            if (!m) return;
-            setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
-            setMyRole(m.myRole || "member");
-          })
-          .catch(() => {});
+        membersReq.then((m) => {
+          if (!m) return;
+          setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
+          setMyRole(m.myRole || "member");
+        });
 
-        const [t, m, p, okr, tpl] = await Promise.all([
-          tasksReq,
-          membersReq,
-          projectsReq,
-          okrReq,
-          templatesReq,
-        ]);
-        const td = await t.json();
-        if (!t.ok) throw new Error(td.error || "Could not load tasks");
-        setTasks(td.tasks || []);
+        const [td, m, p, okr, tpl] = await Promise.all([tasksReq, membersReq, projectsReq, okrReq, templatesReq]);
+        // Unchanged tasks keep their old objects: nothing redraws for them.
+        setTasks((prev) => keepSame(prev, fresh.merge(td.tasks || [])));
         // A link to an archived task (?task=...) still opens it.
-        const wanted = params.get("task");
+        const wanted = first ? params.get("task") : null;
         if (wanted && !(td.tasks || []).some((x: Task) => x.id === wanted)) {
-          const all = await get("/api/tasks?archived=only");
+          const all = await load<any>("/api/tasks?archived=only").catch(() => null);
           const found = (all?.tasks || []).find((x: Task) => x.id === wanted);
           if (found) {
             setArchivedTasks([found]);
@@ -192,34 +229,66 @@ export default function DashboardPage() {
         setLookups((cur) => ({
           people: m?.members || cur.people,
           me: m?.me || cur.me,
-          projects: p?.projects || [],
-          keyResults: okr?.keyResults || [],
+          projects: p?.projects || cur.projects,
+          keyResults: okr?.keyResults || cur.keyResults,
         }));
-        setMyRole(m?.myRole || "member");
-        setTemplates(tpl?.templates || []);
-        writeSnapshot("dashboard", {
-          tasks: td.tasks || [],
-          lookups: {
-            people: m?.members || [],
-            me: m?.me || null,
-            projects: p?.projects || [],
-            keyResults: okr?.keyResults || [],
-          },
-          role: m?.myRole || "member",
-        });
+        if (m) setMyRole(m.myRole || "member");
+        if (tpl) setTemplates(tpl.templates || []);
       } catch (e: any) {
-        showError(e.message);
+        showError(e.message || "Could not load tasks");
       } finally {
         setLoading(false);
       }
-    })();
-  }, [showError]);
+    },
+    [showError, fresh]
+  );
 
-  // Keep the instant-paint copy in step with edits made on this page.
+  useBeforePaint(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("project")) {
+      const pid = params.get("project") as string;
+      setProjectF(pid);
+      // New tasks made while looking at a project go into it unless changed.
+      if (SIMPLE) setForm((f) => ({ ...f, project: pid }));
+    }
+    if (params.get("task")) setOpenId(params.get("task"));
+    if (params.get("assignee")) {
+      setAssigneeF(params.get("assignee") as string);
+      setShowFilters(true);
+    }
+
+    // Paint what this phone remembers at once; fresh data replaces it below.
+    const t = cached<{ tasks: Task[] }>("/api/tasks");
+    const m = cached<any>("/api/team/members");
+    const p = cached<any>("/api/projects");
+    if (t) {
+      setTasks(t.tasks || []);
+      setLoading(false);
+    }
+    if (m) {
+      setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
+      setMyRole(m.myRole || "member");
+    }
+    if (p) setLookups((cur) => ({ ...cur, projects: p.projects || [] }));
+
+    loadAll(true);
+  }, [loadAll]);
+
+  // Pull-to-refresh and coming back to the app reload in place.
+  useRefresh(() => loadAll(false));
+
+  // Have the task panel ready before anyone taps a task.
+  useEffect(() => {
+    const t = setTimeout(() => loadTaskDetail().catch(() => {}), 1200);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Keep the remembered copy in step with edits made on this page, so other
+  // screens (To-Do, Projects) and the next visit show them straight away.
   useEffect(() => {
     if (loading || !lookups.me) return;
-    writeSnapshot("dashboard", { tasks, lookups, role: myRole });
-  }, [tasks, lookups, myRole, loading]);
+    remember("/api/tasks", { tasks: tasks.filter((t) => !t.id.startsWith("sending-")) });
+  }, [tasks, lookups.me, loading]);
 
   // Archive view (checklist #12): archived tasks come from their own query.
   useEffect(() => {
@@ -231,11 +300,8 @@ export default function DashboardPage() {
   }, [showArchived, showError]);
 
   const refreshProjects = useCallback(async () => {
-    const r = await fetch("/api/projects", { cache: "no-store" });
-    if (r.ok) {
-      const d = await r.json();
-      setLookups((l) => ({ ...l, projects: d.projects || [] }));
-    }
+    const d = await load<any>("/api/projects").catch(() => null);
+    if (d) setLookups((l) => ({ ...l, projects: d.projects || [] }));
   }, []);
 
   const replaceTask = useCallback((t: Partial<Task> & { id: string }) => {
@@ -276,10 +342,6 @@ export default function DashboardPage() {
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.title.trim()) return;
-    if (form.description.trim().length < 5) {
-      showError("Describe the task in a sentence or two. It goes into every email and Telegram message about it.");
-      return;
-    }
     const due = fromLocalInput(form.due) || (SIMPLE ? latestItemDate(items) : null);
     const others = form.assignees.filter((id) => id !== lookups.me);
     // Simple mode: every task belongs to someone, or nobody gets reminded.
@@ -307,26 +369,63 @@ export default function DashboardPage() {
     // Several people means several tasks, one each: every person accepts,
     // is reviewed on, and is paid or penalised for their own work.
     const targets: (string | null)[] = form.assignees.length ? form.assignees : [null];
-    const made: Task[] = [];
+    const keepForm = form;
+    const keepItems = items;
+    const itemsBody = SIMPLE ? itemsPayload(items) : [];
+
+    // The new task is in the list the moment "Assign" is tapped, and the
+    // form is ready for the next one; the server confirms behind it.
+    const stamp = Date.now();
+    const now = new Date().toISOString();
+    const placeholders = targets.map(
+      (assignee, i) =>
+        ({
+          ...base,
+          id: `sending-${stamp}-${i}`,
+          assigned_to: assignee,
+          created_by: lookups.me,
+          status: "pending",
+          progress_percent: 0,
+          created_at: now,
+          completed_at: null,
+          archived_at: null,
+          personal: false,
+          subtask_count: itemsBody.length,
+          for_me: assignee === lookups.me,
+        }) as unknown as Task
+    );
+    placeholders.forEach((p) => fresh.add(p));
+    setTasks((prev) => [...placeholders, ...prev]);
+    setForm({ ...form, title: "", description: "", start: "", due: "", assignees: [], color: "", subtasks: "" });
+    setItems(blankItems(1));
+
     const failed: string[] = [];
     const subFailed: string[] = [];
     const failedIds: string[] = [];
     try {
-      for (const assignee of targets) {
-        try {
-          const data = await sendJSON("/api/tasks", "POST", {
-            ...base,
-            assigned_to: assignee,
-            ...(SIMPLE ? { items: itemsPayload(items) } : {}),
-          });
-          made.push(data.task);
-        } catch (err: any) {
-          failed.push(`${assignee ? nameOf(lookups.people, assignee) : "task"}: ${err.message}`);
-          if (assignee) failedIds.push(assignee);
-        }
-      }
+      // All the copies at once, not one after another.
+      const results = await Promise.all(
+        targets.map(async (assignee, i) => {
+          try {
+            const data = await sendJSON("/api/tasks", "POST", {
+              ...base,
+              assigned_to: assignee,
+              // Everyone given it, so each person's alerts say who else has it.
+              with: targets.filter(Boolean),
+              ...(SIMPLE ? { items: itemsBody } : {}),
+            });
+            return { temp: placeholders[i].id, task: data.task as Task };
+          } catch (err: any) {
+            failed.push(`${assignee ? nameOf(lookups.people, assignee) : "task"}: ${err.message}`);
+            if (assignee) failedIds.push(assignee);
+            return { temp: placeholders[i].id, task: null as Task | null };
+          }
+        })
+      );
+      const made = results.map((r) => r.task).filter((t): t is Task => !!t);
+
       // Subtasks typed in the form go onto every copy, in the order written.
-      const subLines = (SIMPLE ? "" : form.subtasks)
+      const subLines = (SIMPLE ? "" : keepForm.subtasks)
         .split("\n")
         .map((x) => x.trim())
         .filter(Boolean)
@@ -345,18 +444,24 @@ export default function DashboardPage() {
           (t as any).subtask_count = added;
         }
       }
-      if (made.length && failed.length) {
-        // Keep what's needed to retry just the ones that didn't go through,
-        // so nobody ends up with two copies.
-        setTasks((prev) => [...made, ...prev]);
-        setForm({ ...form, assignees: failedIds });
+
+      // Swap each placeholder for the real task, or take it away if it failed.
+      const byTemp = new Map(results.map((r) => [r.temp, r.task]));
+      results.forEach((r) => {
+        fresh.drop(r.temp);
+        if (r.task) fresh.add(r.task);
+      });
+      setTasks((prev) => prev.flatMap((t) => (byTemp.has(t.id) ? (byTemp.get(t.id) ? [byTemp.get(t.id) as Task] : []) : [t])));
+
+      if (failed.length) {
+        // Put the form back for just the ones that didn't go through, so
+        // nobody ends up with two copies.
+        setForm({ ...keepForm, assignees: failedIds });
+        setItems(keepItems);
+        showError(`Not created - ${failed.join("; ")}`);
+      } else if (subFailed.length) {
+        showError(`Task created, but these subtasks didn't save: ${Array.from(new Set(subFailed)).join(", ")}. Open the task to add them.`);
       } else if (made.length) {
-        setTasks((prev) => [...made, ...prev]);
-        setForm({ ...form, title: "", description: "", start: "", due: "", assignees: [], color: "", subtasks: "" });
-        setItems(blankItems(1));
-        // A new task may have created a project's first section; refresh the lookups quietly.
-        const first = made[0];
-        if (!sectionsFor(lookups.projects, first.project_id).some((x) => x.id === first.stage_id)) refreshProjects();
         showInfo(
           made.length === 1
             ? others.length
@@ -365,9 +470,9 @@ export default function DashboardPage() {
             : `${made.length} tasks created, one for each person. Each has been asked to accept the deadline.`
         );
       }
-      if (failed.length) showError(`Not created - ${failed.join("; ")}`);
-      else if (subFailed.length)
-        showError(`Task created, but these subtasks didn't save: ${Array.from(new Set(subFailed)).join(", ")}. Open the task to add them.`);
+      // A new task may have created a project's first section; refresh the lookups quietly.
+      const first = made[0];
+      if (first && !sectionsFor(lookups.projects, first.project_id).some((x) => x.id === first.stage_id)) refreshProjects();
     } finally {
       setCreating(false);
     }
@@ -388,7 +493,7 @@ export default function DashboardPage() {
   };
 
   // To-do lists live on their own page (Lists), not in the task list.
-  const source = (showArchived ? archivedTasks : tasks).filter((t) => !(t as any).is_list);
+  const source = useMemo(() => (showArchived ? archivedTasks : tasks).filter((t) => !(t as any).is_list), [showArchived, archivedTasks, tasks]);
   const q = search.toLowerCase().trim();
 
   const filtered = useMemo(() => {
@@ -409,7 +514,7 @@ export default function DashboardPage() {
           if (!a.due_date && !b.due_date) return 0;
           if (!a.due_date) return 1;
           if (!b.due_date) return -1;
-          return a.due_date.localeCompare(b.due_date);
+          return byText(a.due_date, b.due_date);
         }
         if (sortBy === "priority") return (PRIORITY_RANK[b.priority] ?? 0) - (PRIORITY_RANK[a.priority] ?? 0);
         if (sortBy === "progress") return (b.progress_percent || 0) - (a.progress_percent || 0);
@@ -419,9 +524,9 @@ export default function DashboardPage() {
           if (!a.completed_at && !b.completed_at) return 0;
           if (!a.completed_at) return 1;
           if (!b.completed_at) return -1;
-          return b.completed_at.localeCompare(a.completed_at);
+          return byText(b.completed_at, a.completed_at);
         }
-        return b.created_at.localeCompare(a.created_at);
+        return byText(b.created_at, a.created_at);
       });
   }, [source, q, mine, projectF, statusF, priorityF, assigneeF, sortBy, lookups]);
 
@@ -473,6 +578,17 @@ export default function DashboardPage() {
     moveTo(dragged, key);
     setDragged(null);
   };
+
+  const projectNames = useMemo(() => new Map(lookups.projects.map((p) => [p.id, p.name])), [lookups.projects]);
+
+  // A long list paints its first cards at once and the rest straight after,
+  // so the screen is never held up drawing cards below the fold.
+  const [shown, setShown] = useState(10);
+  useEffect(() => {
+    if (shown >= filtered.length) return;
+    const t = setTimeout(() => setShown(Number.MAX_SAFE_INTEGER), 30);
+    return () => clearTimeout(t);
+  }, [shown, filtered.length]);
 
   const sectionName = (t: Task) => {
     const list = sectionsFor(lookups.projects, t.project_id);
@@ -549,7 +665,6 @@ export default function DashboardPage() {
           me={lookups.me}
           selected={form.assignees}
           onChange={(ids) => setForm({ ...form, assignees: ids })}
-          disabled={creating}
           loading={loading}
         />
         {SIMPLE && <p className="text-sm font-semibold text-white pt-1">2. What needs doing?</p>}
@@ -558,14 +673,12 @@ export default function DashboardPage() {
           placeholder="Task title"
           value={form.title}
           onChange={(e) => setForm({ ...form, title: e.target.value })}
-          disabled={creating}
           className={`${inputCls} w-full`}
         />
         <textarea
-          placeholder="What is this task about? (required) - say what needs doing and why, so anyone reading the email understands it"
+          placeholder="What is this task about? (optional)"
           value={form.description}
           onChange={(e) => setForm({ ...form, description: e.target.value })}
-          disabled={creating}
           rows={2}
           className={`${inputCls} w-full resize-y`}
         />
@@ -574,31 +687,28 @@ export default function DashboardPage() {
             <p className="text-xs text-slate-400 pt-1">
               Things to do in this task (optional) - one task, as many items as you like. They get a tick box each.
             </p>
-            <ItemRows rows={items} onChange={setItems} disabled={creating} placeholder="Item to do" />
+            <ItemRows rows={items} onChange={setItems} placeholder="Item to do" />
             <p className="text-sm font-semibold text-white pt-1">3. By when?</p>
-            <div className="flex flex-wrap gap-2" role="group" aria-label="Quick deadline">
-              {quickDeadlines().map((q) => (
-                <button
-                  key={q.label}
-                  type="button"
-                  onClick={() => setForm({ ...form, due: q.value })}
-                  className={`px-3 py-1.5 rounded-full text-sm border ${form.due === q.value ? "bg-blue-600 border-blue-500 text-white" : "bg-slate-900 border-slate-600 text-slate-300 hover:border-slate-400"}`}
-                >
-                  {q.label}
-                </button>
-              ))}
-            </div>
+            <DeadlinePicker
+              value={form.due}
+              onChange={(due) => setForm((f) => ({ ...f, due }))}
+              emptyNote={
+                latestItemDate(items)
+                  ? `No deadline picked: the last item's date (${formatDue(latestItemDate(items))}) will be used.`
+                  : form.assignees.some((id) => id !== lookups.me)
+                  ? "Pick a deadline - they'll be asked to accept it."
+                  : "Pick a deadline (optional when it's just for you)."
+              }
+            />
           </>
         )}
         <div className="flex flex-wrap gap-2 items-end">
-          <label className="flex flex-col text-xs text-slate-400 gap-1">
-            {form.assignees.some((id) => id !== lookups.me)
-              ? SIMPLE
-                ? `Deadline (or pick a date and time)${!form.due && latestItemDate(items) ? ` - blank = ${formatDue(latestItemDate(items))}, the last item's date` : ""}`
-                : "Deadline"
-              : "Due (optional)"}
-            <input type="datetime-local" value={form.due} onChange={(e) => setForm({ ...form, due: e.target.value })} className={inputCls} />
-          </label>
+          {!SIMPLE && (
+            <label className="flex flex-col text-xs text-slate-400 gap-1">
+              {form.assignees.some((id) => id !== lookups.me) ? "Deadline" : "Due (optional)"}
+              <DateTimeInput value={form.due} onChange={(due) => setForm((f) => ({ ...f, due }))} className={inputCls} />
+            </label>
+          )}
           <label className="flex flex-col text-xs text-slate-400 gap-1">
             Priority
             <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} className={inputCls}>
@@ -619,7 +729,7 @@ export default function DashboardPage() {
               {showMore ? "Fewer options" : "More options"}
             </button>
           )}
-          <button type="submit" disabled={creating || !form.title.trim() || form.description.trim().length < 5} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
+          <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
             {creating
               ? "Creating..."
               : form.assignees.length > 1
@@ -631,7 +741,7 @@ export default function DashboardPage() {
           <div className="flex flex-wrap gap-2 items-end">
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Start
-              <input type="datetime-local" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} className={inputCls} />
+              <DateTimeInput value={form.start} onChange={(start) => setForm((f) => ({ ...f, start }))} className={inputCls} />
             </label>
             <label className="flex flex-col text-xs text-slate-400 gap-1">
               Project
@@ -751,46 +861,16 @@ export default function DashboardPage() {
         </p>
       ) : view === "list" ? (
         <div className="grid gap-3">
-          {filtered.map((t) => {
-            const late = isOverdue(t);
-            return (
-              <button
-                key={t.id}
-                onClick={() => setOpenId(t.id)}
-                style={!late && t.color ? { borderLeftColor: t.color, borderLeftWidth: 4 } : undefined}
-                className={`text-left bg-slate-800 rounded border p-4 hover:border-blue-500 ${late ? "border-l-4 border-l-red-500 border-slate-700" : t.color ? "border-slate-700" : "border-slate-700"}`}
-              >
-                <div className="flex justify-between items-start gap-3 mb-1">
-                  <h3 className={`font-bold ${late ? "text-red-400" : ""}`}>
-                    {t.color && <span className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle" style={{ backgroundColor: t.color }} title="Custom color" />}
-                    {t.title}
-                    {late && <span className="ml-2 text-xs font-normal">OVERDUE</span>}
-                  </h3>
-                  <span className={`text-xs px-2 py-1 rounded shrink-0 ${statusClass(t.status)}`}>{statusLabel(t.status)}</span>
-                </div>
-                {t.description && <p className="text-slate-400 text-sm mb-2 line-clamp-2">{t.description}</p>}
-                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 mb-2">
-                  <span>{PRIORITIES.find((p) => p.value === t.priority)?.label}</span>
-                  {t.due_date && <span>Due {formatDue(t.due_date)}</span>}
-                  {t.completed_at && <span>Finished {formatDue(t.completed_at)}</span>}
-                  {!SIMPLE && sectionName(t) && <span>§ {sectionName(t)}</span>}
-                  {!SIMPLE && t.milestone && <span>◆ {milestoneLabel(t.milestone)}</span>}
-                  {SIMPLE && t.project_id && lookups.projects.find((p) => p.id === t.project_id) && (
-                    <span>📁 {lookups.projects.find((p) => p.id === t.project_id)?.name}</span>
-                  )}
-                  {(t.subtask_count || 0) > 0 && <span>{t.subtask_count} subtasks</span>}
-                  {t.personal && <span>🔒 personal</span>}
-                  <span className="ml-auto">👤 {nameOf(lookups.people, t.assigned_to)}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 bg-slate-900 rounded h-2">
-                    <div className="bg-blue-600 h-2 rounded" style={{ width: `${t.progress_percent}%` }} />
-                  </div>
-                  <span className="text-xs text-slate-400 w-9 text-right">{t.progress_percent}%</span>
-                </div>
-              </button>
-            );
-          })}
+          {filtered.slice(0, shown).map((t) => (
+            <TaskCard
+              key={t.id}
+              t={t}
+              project={SIMPLE && t.project_id ? projectNames.get(t.project_id) || null : null}
+              section={!SIMPLE ? sectionName(t) || null : null}
+              assignee={nameOf(lookups.people, t.assigned_to)}
+              onOpen={setOpenId}
+            />
+          ))}
         </div>
       ) : view === "gantt" && !SIMPLE ? (
         <GanttView

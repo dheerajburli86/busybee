@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { sendJSON } from "@/lib/api";
 import { OPEN_TASK_EVENT, PUSH_EVENT } from "@/lib/appEvents";
+import { cached, keepSame, load as loadApi, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
 
 type Notification = {
   id: string;
@@ -59,18 +60,18 @@ export function NotificationBell() {
 
   const load = async () => {
     try {
-      const res = await fetch("/api/notifications", { cache: "no-store" });
-      if (res.ok) {
-        const data = await res.json();
-        setItems(Array.isArray(data) ? data : []);
-        setLoaded(true);
-      }
+      const data = await loadApi<Notification[]>("/api/notifications");
+      setItems((prev) => keepSame(prev, Array.isArray(data) ? data : []));
+      setLoaded(true);
     } catch {
       /* keep what is on screen */
     }
   };
 
-  useEffect(() => {
+  useBeforePaint(() => {
+    // The remembered list (and count) at once; fresh below.
+    const known = cached<Notification[]>("/api/notifications");
+    if (Array.isArray(known)) setItems(known);
     load();
     const t = setInterval(load, 30000);
     // A pop-up just arrived, or the app came back to the front: check now.
@@ -85,7 +86,14 @@ export function NotificationBell() {
     };
   }, []);
 
+  // Pull-to-refresh and coming back to the app refresh the bell too.
+  useRefresh(() => load());
+
   const unread = items.filter((n) => !n.read).length;
+  // Reading notifications here updates the remembered copy too.
+  useEffect(() => {
+    if (loaded) remember("/api/notifications", items);
+  }, [items, loaded]);
   useEffect(() => {
     if (loaded) setIconBadge(unread);
   }, [unread, loaded]);

@@ -1,22 +1,19 @@
 ﻿// app/api/team/members/route.ts
 
 import { createServerSideClient } from "@/lib/supabase-server";
+import { accessChanged } from "@/lib/serverCache";
 import { NextRequest, NextResponse } from "next/server";
-import { DESK_ROLE_VALUES, logActivity, normalizeRole } from "@/lib/permissions";
+import { DESK_ROLE_VALUES, getMemberships, logActivity, normalizeRole, requireUser } from "@/lib/permissions";
 import { createAdminClient, telegramConnected } from "@/lib/supabase-admin";
 
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const { data: memberships } = await supabase
-      .from("desk_members")
-      .select("desk_id")
-      .eq("user_id", user.id);
-
-    const deskIds = (memberships || []).map((m: any) => m.desk_id);
+    const memberships = await getMemberships(supabase, user.id);
+    const deskIds = memberships.map((m) => m.desk_id);
     if (deskIds.length === 0) return NextResponse.json({ members: [], me: user.id, myRole: "member", onDesk: false, email: user.email });
 
     const { data, error } = await supabase
@@ -69,8 +66,9 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    accessChanged();
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { user_id, role = "member" } = await request.json();
@@ -99,8 +97,9 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    accessChanged();
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await request.json();

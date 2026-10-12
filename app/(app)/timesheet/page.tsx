@@ -193,7 +193,7 @@ export default function TimesheetPage() {
         <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-6">
           <div className="flex flex-wrap gap-3">
             <input
-              type="date"
+              type="date" max="9999-12-31"
               value={date}
               onChange={(e) => setDate(e.target.value)}
               className="px-3 py-2 bg-slate-900 border border-slate-600 rounded"

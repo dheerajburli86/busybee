@@ -53,7 +53,7 @@ export function DateTimeField({
 
   return (
     <input
-      type="datetime-local"
+      type="datetime-local" max="9999-12-31T23:59"
       value={draft}
       disabled={disabled}
       onFocus={() => setEditing(true)}

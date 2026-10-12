@@ -22,6 +22,7 @@ import { formatForPeople } from "@/lib/format";
 import { createAdminClient } from "@/lib/supabase-admin";
 import { appUrl, sendToChats, telegramConfigured } from "@/lib/telegram";
 import { pushConfigured, pushToUsers } from "@/lib/push";
+import { tokenSubject } from "@/lib/serverCache";
 import {
   EMAIL_QUIET,
   NotificationPrefs,
@@ -86,7 +87,7 @@ async function targets(supabase: any, ids: string[]): Promise<Map<string, Target
   return out;
 }
 
-export async function sendAlert(supabase: any, userIds: string[], a: Alert): Promise<AlertResult> {
+export async function sendAlert(supabase: any, userIds: string[], a: Alert, opts: { inline?: boolean } = {}): Promise<AlertResult> {
   const result: AlertResult = { in_app: 0, email: 0, telegram: 0 };
   const ids = Array.from(new Set(userIds.filter(Boolean)));
   if (ids.length === 0) return result;
@@ -128,9 +129,11 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
     const base = appUrl();
     const now = formatForPeople(new Date().toISOString());
 
+    // Who did it. The request already checked this sign-in; here it only
+    // names the actor and keeps them off the recipient list.
     const actorId: string | null = await supabase.auth
-      .getUser()
-      .then((r: any) => r?.data?.user?.id || null)
+      .getSession()
+      .then((r: any) => tokenSubject(r?.data?.session?.access_token || ""))
       .catch(() => null);
     const [card, involved, names] = await Promise.all([
       a.task_id ? loadTaskCard(db, a.task_id) : Promise.resolve(null),
@@ -182,7 +185,9 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
       });
       jobs.push(deliver([who.get(id)!.email!], subject, text, html));
     }
-    if (chats.length) jobs.push(sendToChats(chats, a));
+    // A new task arrives on Telegram with everything in it (description,
+    // deadline, items...), like the email - not just its name.
+    if (chats.length) jobs.push(sendToChats(chats, a, a.type === "assigned" ? card : null));
 
     // Pop-ups on their phones: the same people as email and Telegram, for
     // whatever shows in their bell. Not to whoever did it, and not to the
@@ -248,6 +253,11 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert): Pro
   // Counts are what could go out; who exactly is decided after the response.
   result.email = wantMail ? ids.filter((id) => wantsEmail(who.get(id)!.prefs, a.type) && !!who.get(id)!.email).length : 0;
   result.telegram = telegramConfigured() ? ids.filter((id) => who.get(id)!.chat != null).length : 0;
+  if (opts.inline) {
+    // Already running after the response (notifyMany): just send.
+    await send();
+    return result;
+  }
   try {
     after(send);
   } catch {

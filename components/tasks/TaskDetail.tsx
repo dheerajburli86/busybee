@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sendJSON } from "@/lib/api";
+import { cached, cachedAt, load as loadApi, remember, useBeforePaint } from "@/lib/apiCache";
 import { createClient } from "@/lib/supabase";
 import { STATUSES, isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
 import { SIMPLE } from "@/lib/simple";
@@ -25,6 +26,8 @@ import {
 import { MentionTextarea } from "./MentionTextarea";
 import { DateTimeField } from "./DateTimeField";
 import { TaskWorkflow } from "./TaskWorkflow";
+import { PeoplePicker } from "@/components/tasks/PeoplePicker";
+export { PeoplePicker };
 
 type Access = { canManage: boolean; canWork: boolean; isSuper: boolean; isAssignor?: boolean; role: string };
 type Comment = {
@@ -148,6 +151,8 @@ export function TaskDetail({
   const [deps, setDeps] = useState<string[]>([]);
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [assignors, setAssignors] = useState<{ id: string; user_id: string }[]>([]);
+  // The same task given to others at the same time (each has their own copy).
+  const [siblings, setSiblings] = useState<{ user_id: string; name: string; status: string }[]>([]);
   const [tab, setTab] = useState<"details" | "files" | "comments" | "history">("details");
 
   const [newComment, setNewComment] = useState("");
@@ -166,38 +171,63 @@ export function TaskDetail({
   const people = lookups.people;
   const me = lookups.me;
 
-  const load = useCallback(async () => {
-    const get = async (url: string) => {
-      const r = await fetch(url, { cache: "no-store" });
-      return r.ok ? r.json() : null;
-    };
-    try {
-      const [a, c, f, s, h, d, x, g] = await Promise.all([
-        get(`/api/tasks/${task.id}/access`),
-        get(`/api/tasks/${task.id}/comments`),
-        get(`/api/tasks/${task.id}/attachments`),
-        get(`/api/tasks/${task.id}/subtasks`),
-        get(`/api/tasks/${task.id}/activity`),
-        get(`/api/tasks/${task.id}/dependencies`),
-        get(`/api/tasks/${task.id}/extension`),
-        get(`/api/tasks/${task.id}/assignors`),
-      ]);
-      setAccess(a || { canManage: false, canWork: false, isSuper: false, role: "member" });
-      setComments(c || []);
-      setAttachments(f || []);
-      setSubtasks(s || []);
-      setActivity(h || []);
-      setDeps((d || []).map((r: any) => r.depends_on_task_id));
-      setExtensions(x || []);
-      setAssignors(g || []);
-    } catch {
-      onError("Could not load task details");
-    }
-  }, [task.id, onError]);
+  // Everything in the panel comes in one request (/details). A task opened
+  // before shows what this phone remembers at once, then refreshes.
+  const [shown, setShown] = useState(false);
+  const show = useCallback((d: any) => {
+    setShown(true);
+    setAccess(d.access || { canManage: false, canWork: false, isSuper: false, role: "member" });
+    setComments(d.comments || []);
+    setAttachments(d.attachments || []);
+    setSubtasks(d.subtasks || []);
+    setActivity(d.activity || []);
+    setDeps((d.dependencies || []).map((r: any) => r.depends_on_task_id));
+    setExtensions(d.extension || []);
+    setAssignors(d.assignors || []);
+    setSiblings(Array.isArray(d.siblings) ? d.siblings : []);
+  }, []);
 
+  const load = useCallback(
+    async (opts?: { fresh?: number }) => {
+      try {
+        show(await loadApi<any>(`/api/tasks/${task.id}/details`, opts));
+      } catch {
+        onError("Could not load task details");
+      }
+    },
+    [task.id, onError, show]
+  );
+
+  useBeforePaint(() => {
+    const known = cached<any>(`/api/tasks/${task.id}/details`);
+    if (known) show(known);
+    // The tap already asked for it as the finger landed: an answer from the
+    // last few seconds is used as it is.
+    load({ fresh: 3000 });
+  }, [load, show, task.id]);
+
+  // Changes made in the panel (comments, items, files...) go into the
+  // remembered copy too, so reopening the task shows them straight away.
   useEffect(() => {
-    load();
-  }, [load]);
+    if (!shown || !access) return;
+    const key = `/api/tasks/${task.id}/details`;
+    remember(
+      key,
+      {
+        ...cached<any>(key),
+        access,
+        comments: comments.filter((c) => !c.id.startsWith("sending-")),
+        attachments,
+        subtasks,
+        activity,
+        dependencies: deps.map((id) => ({ depends_on_task_id: id })),
+        extension: extensions,
+        assignors,
+      },
+      // Still as old as the server's answer: this is the screen's copy.
+      cachedAt(key)
+    );
+  }, [shown, task.id, access, comments, attachments, subtasks, activity, deps, extensions, assignors]);
 
   // Double clicks mustn't create the same comment, item or request twice: a
   // ref (not state) so the second click of a fast double click sees it.
@@ -295,16 +325,31 @@ export function TaskDetail({
   const postComment = async () => {
     if (!newComment.trim()) return;
     if (privateTo && privateTo.length === 0) return onError("Pick who should see this private comment.");
+    // The comment shows at once (marked "Sending..."); the server confirms it.
+    const content = newComment.trim();
+    const to = privateTo;
+    const temp: Comment = {
+      id: `sending-${Date.now()}`,
+      content,
+      author_id: me || "",
+      created_at: new Date().toISOString(),
+      ...(to ? { is_private: true, recipients: to, recipient_names: to.map((id) => nameOf(people, id)) } : {}),
+    };
+    setComments((prev) => [temp, ...prev]);
+    setNewComment("");
+    setPrivateTo(null);
     try {
       const c = await sendJSON(`/api/tasks/${task.id}/comments`, "POST", {
-        content: newComment.trim(),
-        ...(privateTo ? { private_to: privateTo } : {}),
+        content,
+        ...(to ? { private_to: to } : {}),
       });
-      setComments((prev) => [c, ...prev]);
-      setNewComment("");
-      setPrivateTo(null);
+      setComments((prev) => prev.map((x) => (x.id === temp.id ? c : x)));
       refreshHistory();
     } catch (e: any) {
+      setComments((prev) => prev.filter((x) => x.id !== temp.id));
+      // Nothing typed is lost.
+      setNewComment((cur) => (cur.trim() ? cur : content));
+      setPrivateTo((cur) => cur ?? to);
       onError(e.message);
     }
   };
@@ -515,7 +560,7 @@ export function TaskDetail({
                             <button onClick={() => once(`ext-${x.id}`, async () => { await decide(x, "rejected"); })} disabled={busy(`ext-${x.id}`)} className="px-3 py-1.5 bg-slate-600 hover:bg-slate-500 disabled:opacity-50 rounded text-xs">Reject</button>
                           </div>
                           <div className="flex flex-wrap gap-2 items-center">
-                            <input type="datetime-local" value={amend[x.id]?.date || ""}
+                            <input type="datetime-local" max="9999-12-31T23:59" value={amend[x.id]?.date || ""}
                               onChange={(e) => setAmend({ ...amend, [x.id]: { ...(amend[x.id] || { note: "" }), date: e.target.value } })}
                               className={`${input} text-xs py-1`} aria-label="Different deadline" />
                             <button onClick={() => once(`ext-${x.id}`, async () => { await decide(x, "approved", amend[x.id]?.date); })} disabled={!amend[x.id]?.date || busy(`ext-${x.id}`)}
@@ -537,7 +582,7 @@ export function TaskDetail({
                       <input value={ext.reason} onChange={(e) => setExt({ ...ext, reason: e.target.value })}
                         placeholder={SIMPLE ? "Why do you need more time?" : "Reason for the delay..."} className={`${input} w-full`} />
                       <div className="flex flex-wrap gap-2">
-                        <input type="datetime-local" value={ext.date} onChange={(e) => setExt({ ...ext, date: e.target.value })} className={input} aria-label="Requested deadline" />
+                        <input type="datetime-local" max="9999-12-31T23:59" value={ext.date} onChange={(e) => setExt({ ...ext, date: e.target.value })} className={input} aria-label="Requested deadline" />
                         <button onClick={() => once("extension", requestExtension)} disabled={busy("extension")} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm">{SIMPLE ? "Send request" : "Request extension"}</button>
                       </div>
                     </div>
@@ -701,7 +746,7 @@ export function TaskDetail({
                     value={draftDescription}
                     onChange={(e) => setDraftDescription(e.target.value)}
                     rows={4}
-                    placeholder="Description / instructions (optional)"
+                    placeholder={task.personal ? "Notes (optional)" : "What is this task about?"}
                     className={`${input} w-full`}
                     aria-label="Description"
                   />
@@ -757,7 +802,7 @@ export function TaskDetail({
                     onReplace={onReplace}
                     onError={onError}
                     onInfo={onInfo}
-                    onChanged={load}
+                    onChanged={() => load()}
                     onAcceptState={setNeedsDecision}
                     reloadKey={extensions.map((x) => `${x.id}:${x.status}`).join(",")}
                   />
@@ -901,6 +946,19 @@ export function TaskDetail({
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
                   </label>
+                  {siblings.length > 0 && (
+                    <div className="flex flex-col gap-1 sm:col-span-2">
+                      <span className="text-slate-400 text-xs">Also given to (each has their own copy with the same details)</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {siblings.map((x) => (
+                          <span key={x.user_id} className="px-2 py-1 rounded bg-slate-900 border border-slate-700 text-xs">
+                            {x.name}
+                            {x.user_id === me ? " (you)" : ""} <span className="text-slate-400">· {statusLabel(x.status)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {!SIMPLE && <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Task manager</span>
                     <select value={task.task_manager_id || ""} disabled={!canManage} onChange={(e) => patch({ task_manager_id: e.target.value || null })} className={input}>
@@ -921,7 +979,7 @@ export function TaskDetail({
               {/* Progress (checklist #11 / #37) */}
               <div className={section}>
                 <h4 className={h4}>Progress: {task.progress_percent}%</h4>
-                <div className="w-full bg-slate-900 rounded h-2 mb-3">
+                <div className="w-full bg-slate-700 rounded h-2 mb-3">
                   <div className="bg-blue-600 h-2 rounded" style={{ width: `${task.progress_percent}%` }} />
                 </div>
                 {hasSubtasks ? (
@@ -1045,7 +1103,7 @@ export function TaskDetail({
                     <input value={newSub.title} onChange={(e) => setNewSub({ ...newSub, title: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && once("subtask", addSubtask)}
                       placeholder={SIMPLE ? "Add a subtask..." : "Add a subtask or checklist item..."} className={`${input} flex-1 min-w-48`} />
-                    {!SIMPLE && <input type="datetime-local" value={newSub.due} onChange={(e) => setNewSub({ ...newSub, due: e.target.value })} className={input} aria-label="Deadline" />}
+                    {!SIMPLE && <input type="datetime-local" max="9999-12-31T23:59" value={newSub.due} onChange={(e) => setNewSub({ ...newSub, due: e.target.value })} className={input} aria-label="Deadline" />}
                     {!SIMPLE && <select value={newSub.assignee} onChange={(e) => setNewSub({ ...newSub, assignee: e.target.value })} className={input} aria-label="Assign to">
                       <option value="">Unassigned</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -1067,7 +1125,7 @@ export function TaskDetail({
                   onReplace={onReplace}
                   onError={onError}
                   onInfo={onInfo}
-                  onChanged={load}
+                  onChanged={() => load()}
                   reloadKey={extensions.map((x) => `${x.id}:${x.status}`).join(",")}
                 />
               )}
@@ -1268,7 +1326,7 @@ export function TaskDetail({
                     <div className="flex justify-between gap-2 items-baseline">
                       <span className="font-semibold text-slate-200">{c.author_name || nameOf(people, c.author_id, "Someone")}</span>
                       <span className="text-xs text-slate-500">
-                        {new Date(c.created_at).toLocaleString()}{c.edited && " · edited"}
+                        {c.id.startsWith("sending-") ? "Sending..." : <>{new Date(c.created_at).toLocaleString()}{c.edited && " · edited"}</>}
                       </span>
                     </div>
                     {editing?.id === c.id ? (
@@ -1282,7 +1340,7 @@ export function TaskDetail({
                     ) : (
                       <p className="text-slate-300 mt-1 whitespace-pre-wrap break-words">{c.content}</p>
                     )}
-                    {(c.author_id === me || (access.isSuper && !c.is_private)) && editing?.id !== c.id && (
+                    {(c.author_id === me || (access.isSuper && !c.is_private)) && editing?.id !== c.id && !c.id.startsWith("sending-") && (
                       <div className="flex gap-3 mt-1">
                         {c.author_id === me && (
                           <button onClick={() => setEditing({ id: c.id, text: c.content })} className="text-xs text-slate-400 hover:text-white">Edit</button>
@@ -1324,35 +1382,6 @@ export function TaskDetail({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-export function PeoplePicker({
-  people,
-  value,
-  onChange,
-}: {
-  people: { id: string; name: string }[];
-  value: string[];
-  onChange: (ids: string[]) => void;
-}) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {people.map((p) => {
-        const on = value.includes(p.id);
-        return (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => onChange(on ? value.filter((x) => x !== p.id) : [...value, p.id])}
-            className={`px-2 py-1 rounded text-xs border ${on ? "bg-blue-600 border-blue-500 text-white" : "bg-slate-800 border-slate-600 text-slate-300"}`}
-            aria-pressed={on}
-          >
-            {p.name}
-          </button>
-        );
-      })}
     </div>
   );
 }

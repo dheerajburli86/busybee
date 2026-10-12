@@ -6,6 +6,7 @@
 // project alongside projects.manager_id.
 
 import { createServerSideClient } from "@/lib/supabase-server";
+import { accessChanged } from "@/lib/serverCache";
 import { NextResponse } from "next/server";
 import { deny, logActivity, projectAccess, requireUser } from "@/lib/permissions";
 
@@ -49,6 +50,7 @@ export async function GET(req: Request) {
 /** POST - add someone to a project. */
 export async function POST(req: Request) {
   try {
+    accessChanged();
     const { project_id, user_id, role = "member" } = await req.json();
     if (!project_id || !user_id) {
       return NextResponse.json({ error: "project_id and user_id required" }, { status: 400 });
@@ -119,6 +121,7 @@ export async function POST(req: Request) {
 /** PUT - change a member's role on the project. */
 export async function PUT(req: Request) {
   try {
+    accessChanged();
     const { id, role } = await req.json();
     if (!id || !MEMBER_ROLES.includes(role)) {
       return NextResponse.json({ error: "id and a valid role required" }, { status: 400 });
@@ -165,6 +168,7 @@ export async function PUT(req: Request) {
 /** DELETE /api/projects/members?id=... - take someone off a project. */
 export async function DELETE(req: Request) {
   try {
+    accessChanged();
     const id = new URL(req.url).searchParams.get("id");
     if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 

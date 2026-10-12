@@ -2,6 +2,7 @@
 // private (two or more people) and custom rooms.
 
 import { getMemberships, managedProjectIds, roleIn, userProjectIds, SUPER_ROLES } from "@/lib/permissions";
+import { remembered } from "@/lib/serverCache";
 
 export type Room = {
   id: string;
@@ -10,6 +11,8 @@ export type Room = {
   kind: "org" | "project" | "private" | "custom";
   project_id: string | null;
   created_by: string | null;
+  /** Who's in the room, when it was read along with the room. */
+  member_ids?: string[];
 };
 
 // When each desk's default rooms were last checked (per server instance).
@@ -50,30 +53,43 @@ export async function ensureDefaultRooms(supabase: any, deskId: string, force = 
  * Rooms this user may read and post in. The database applies the same rule
  * (can_access_room), so this list and what the database returns agree.
  */
-export async function roomsFor(supabase: any, userId: string): Promise<Room[]> {
-  const memberships = await getMemberships(supabase, userId);
-  const deskIds = memberships.map((m) => m.desk_id);
-  if (!deskIds.length) return [];
+export function roomsFor(supabase: any, userId: string): Promise<Room[]> {
+  return remembered(supabase, `rooms:${userId}`, 0, async () => {
+    const memberships = await getMemberships(supabase, userId);
+    const deskIds = memberships.map((m) => m.desk_id);
+    if (!deskIds.length) return [];
 
-  for (const d of deskIds) await ensureDefaultRooms(supabase, d);
+    for (const d of deskIds) await ensureDefaultRooms(supabase, d);
 
-  const [{ data: rooms }, { data: mine }, myProjects, managed] = await Promise.all([
-    supabase.from("chat_rooms").select("*").in("desk_id", deskIds).order("created_at"),
-    supabase.from("chat_room_members").select("room_id").eq("user_id", userId),
-    userProjectIds(supabase, userId),
-    managedProjectIds(supabase, userId),
-  ]);
-  const memberOf = new Set((mine || []).map((m: any) => m.room_id));
+    // Rooms come with who's in them, in the same round trip.
+    const roomsQuery = supabase
+      .from("chat_rooms")
+      .select("*, chat_room_members(user_id)")
+      .in("desk_id", deskIds)
+      .order("created_at")
+      .then((r: any) => (r.error ? supabase.from("chat_rooms").select("*").in("desk_id", deskIds).order("created_at") : r));
+    const [{ data: rooms }, { data: mine }, myProjects, managed] = await Promise.all([
+      roomsQuery,
+      supabase.from("chat_room_members").select("room_id").eq("user_id", userId),
+      userProjectIds(supabase, userId),
+      managedProjectIds(supabase, userId),
+    ]);
+    const memberOf = new Set((mine || []).map((m: any) => m.room_id));
 
-  return (rooms || []).filter((r: any) => {
-    const isSuper = SUPER_ROLES.includes(roleIn(memberships, r.desk_id));
-    switch (r.kind) {
-      case "org":
-        return true;
-      case "project":
-        return isSuper || myProjects.includes(r.project_id) || managed.includes(r.project_id);
-      default:
-        return memberOf.has(r.id) || r.created_by === userId;
-    }
+    return (rooms || [])
+      .filter((r: any) => {
+        const isSuper = SUPER_ROLES.includes(roleIn(memberships, r.desk_id));
+        switch (r.kind) {
+          case "org":
+            return true;
+          case "project":
+            return isSuper || myProjects.includes(r.project_id) || managed.includes(r.project_id);
+          default:
+            return memberOf.has(r.id) || r.created_by === userId;
+        }
+      })
+      .map(({ chat_room_members, ...r }: any) =>
+        Array.isArray(chat_room_members) ? { ...r, member_ids: chat_room_members.map((m: any) => m.user_id) } : r
+      );
   });
 }

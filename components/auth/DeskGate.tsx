@@ -3,14 +3,15 @@
 // #21: someone who has signed up but hasn't been let onto the desk sees a
 // clear "waiting for access" screen instead of empty pages and errors.
 
-import { ReactNode, useCallback, useEffect, useState } from "react";
-import { createClient } from "@/lib/supabase";
+import { ReactNode, useCallback, useState } from "react";
+import { cached, forgetAll, load, useBeforePaint } from "@/lib/apiCache";
 
 export function DeskGate({ children }: { children: ReactNode }) {
   const [waiting, setWaiting] = useState<{ email: string } | null>(null);
-  // The layout (and this check) runs once per visit, not on every page, so
-  // holding the page until it answers costs one short wait and spares people
-  // who aren't on the desk yet a flash of empty pages and errors.
+  // Someone this phone already knows is on the desk goes straight in, and
+  // the check runs behind the page (sharing its request with the page's own
+  // people list). Only the very first visit waits for the answer, which
+  // spares people not on the desk yet a flash of empty pages and errors.
   const [checked, setChecked] = useState(false);
   // A network error or a non-OK response is not the same as "confirmed on
   // the desk" - failing open here (rendering children anyway) would defeat
@@ -21,21 +22,21 @@ export function DeskGate({ children }: { children: ReactNode }) {
   const check = useCallback(async () => {
     setCheckFailed(false);
     try {
-      const r = await fetch("/api/team/members", { cache: "no-store" });
-      if (!r.ok) {
-        setCheckFailed(true);
-        return;
-      }
-      const d = await r.json();
+      const d = await load<any>("/api/team/members");
       setWaiting(d.onDesk === false ? { email: d.email || "" } : null);
     } catch {
-      setCheckFailed(true);
+      // Already in on the strength of an earlier check: a dropped connection
+      // isn't a reason to throw them out.
+      if (!cached<any>("/api/team/members")) setCheckFailed(true);
     } finally {
       setChecked(true);
     }
   }, []);
 
-  useEffect(() => {
+  // Before the first paint, so a known member never sees "Loading...".
+  useBeforePaint(() => {
+    const known = cached<any>("/api/team/members");
+    if (known && known.onDesk !== false) setChecked(true);
     check();
   }, [check]);
 
@@ -69,7 +70,9 @@ export function DeskGate({ children }: { children: ReactNode }) {
           <button onClick={check} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm">Check again</button>
           <button
             onClick={async () => {
+              forgetAll();
               try {
+                const { createClient } = await import("@/lib/supabase");
                 await createClient().auth.signOut({ scope: "local" });
               } catch {
                 /* the cookie is cleared locally either way */

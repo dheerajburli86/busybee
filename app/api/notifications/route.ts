@@ -1,12 +1,13 @@
 // app/api/notifications/route.ts
 
 import { createServerSideClient } from "@/lib/supabase-server";
+import { requireUser } from "@/lib/permissions";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { data, error } = await supabase
@@ -27,7 +28,7 @@ export async function GET(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const { id, all } = await request.json();

@@ -1,16 +1,19 @@
 import { createServerSideClient } from "@/lib/supabase-server";
+import { accessChanged } from "@/lib/serverCache";
 import { NextResponse } from "next/server";
 import {
   deny,
+  filterVisible,
   getMemberships,
   logActivity,
   managedProjectIds,
   requireUser,
   roleIn,
-  visibleProjects,
+  userProjectIds,
+  visibilitySets,
   SUPER_ROLES,
 } from "@/lib/permissions";
-import { inChunks } from "@/lib/chunks";
+import { inChunks, selectAll } from "@/lib/chunks";
 import { isFinished } from "@/lib/status";
 import { isValidColor } from "@/components/tasks/types";
 
@@ -19,20 +22,64 @@ import { isValidColor } from "@/components/tasks/types";
 // Everyone else sees the projects they are a member of and any project
 // holding a task they can see (checklist #21).
 
+const TASK_COLS = "id, desk_id, project_id, stage_id, status, progress_percent, due_date, archived_at, personal, created_by, assigned_to, task_manager_id, team_id";
+
 export async function GET() {
   try {
     const supabase = await createServerSideClient();
     const user = await requireUser(supabase);
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-    const out = await visibleProjects(supabase, user.id);
+    const memberships = await getMemberships(supabase, user.id);
+    const deskIds = memberships.map((m) => m.desk_id);
+    if (!deskIds.length) return NextResponse.json({ projects: [] });
+
+    // One round trip: the desk's projects with their sections, every task's
+    // figures, and what decides which projects this person sees.
+    const [joined, managed, myProjects, sets, allTasks] = await Promise.all([
+      selectAll<any>(() =>
+        supabase
+          .from("projects")
+          .select("*, stages(id, project_id, name, position, created_at)")
+          .in("desk_id", deskIds)
+          .order("created_at", { ascending: false })
+          .order("id")
+      ).catch(() => null),
+      managedProjectIds(supabase, user.id),
+      userProjectIds(supabase, user.id),
+      visibilitySets(supabase, user.id),
+      selectAll<any>(() => supabase.from("tasks").select(TASK_COLS).in("desk_id", deskIds).order("id")),
+    ]);
+
+    // A database that can't join sections onto projects: read them separately.
+    let projects: any[];
+    let stages: any[];
+    if (joined) {
+      stages = joined.flatMap((p: any) => (Array.isArray(p.stages) ? p.stages : []));
+      projects = joined.map(({ stages: _s, ...p }: any) => p);
+    } else {
+      projects = await selectAll<any>(() =>
+        supabase.from("projects").select("*").in("desk_id", deskIds).order("created_at", { ascending: false }).order("id")
+      );
+      stages = await inChunks<any>(projects.map((p: any) => p.id), (part) =>
+        supabase.from("stages").select("id, project_id, name, position, created_at").in("project_id", part)
+      );
+    }
+
+    // Projects the person can see: supervisors see all on their desks; others
+    // see the ones they run, belong to, or that hold a task they can see.
+    const isSuperOn = (deskId: string) => SUPER_ROLES.includes(roleIn(memberships, deskId));
+    const live = allTasks.filter((t: any) => !t.archived_at);
+    const withTasks = new Set(filterVisible(live, user.id, memberships, sets).map((t: any) => t.project_id));
+    const out = projects
+      .filter((p: any) => isSuperOn(p.desk_id) || p.manager_id === user.id || managed.includes(p.id) || myProjects.includes(p.id) || withTasks.has(p.id))
+      .map((p: any) => ({ ...p, can_manage: isSuperOn(p.desk_id) || p.manager_id === user.id || managed.includes(p.id) }));
+    const visibleIds = new Set(out.map((p: any) => p.id));
 
     // #20: each project's sections, in order.
-    const stages = await inChunks<any>(out.map((p: any) => p.id), (part) =>
-      supabase.from("stages").select("id, project_id, name, position, created_at").in("project_id", part)
-    );
     const byProject = new Map<string, any[]>();
     stages
+      .filter((st: any) => visibleIds.has(st.project_id))
       .sort((a: any, b: any) => (a.position ?? 0) - (b.position ?? 0) || String(a.created_at).localeCompare(String(b.created_at)))
       .forEach((st: any) => byProject.set(st.project_id, [...(byProject.get(st.project_id) || []), { id: st.id, name: st.name || "Section", position: st.position ?? 0 }]));
 
@@ -41,20 +88,11 @@ export async function GET() {
     // to-do items left out. Counting only the tasks one person can see gave
     // different numbers to different people, and finished work dropped out of
     // the figures once it was archived.
-    const projectTasks = await inChunks<any>(
-      out.map((p: any) => p.id),
-      (part) =>
-        supabase
-          .from("tasks")
-          .select("id, project_id, stage_id, status, progress_percent, due_date, archived_at, personal")
-          .in("project_id", part)
-          .order("id"),
-      { all: true }
-    );
     const stats = new Map<string, { total: number; done: number; overdue: number; sum: number }>();
     const perSection = new Map<string, number>();
     const now = Date.now();
-    for (const t of projectTasks) {
+    for (const t of allTasks) {
+      if (!t.project_id || !visibleIds.has(t.project_id)) continue;
       if (t.personal) continue;
       const s = stats.get(t.project_id) || { total: 0, done: 0, overdue: 0, sum: 0 };
       const finished = isFinished(t.status);
@@ -90,6 +128,7 @@ export async function GET() {
 // Create a project (supervisor/admin only).
 export async function POST(req: Request) {
   try {
+    accessChanged();
     const { name, description, manager_id, color } = await req.json();
     if (!name?.trim()) return NextResponse.json({ error: "A name is required" }, { status: 400 });
     if (color && !isValidColor(color)) return NextResponse.json({ error: "Color must be a hex value like #3b82f6" }, { status: 400 });
@@ -147,6 +186,7 @@ export async function POST(req: Request) {
 // Edit name/description, the project's manager, or its workflow rules.
 export async function PUT(req: Request) {
   try {
+    accessChanged();
     const body = await req.json();
     const { id } = body;
     if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });

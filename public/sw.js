@@ -4,15 +4,25 @@
  * it fast, shows a friendly page instead of the browser's error when there is
  * no signal, and shows pop-up notifications even when the app is closed.
  *
- *   pages          always fresh from the network; the offline page if there's none
+ *   pages          the copy saved last time, at once (pages are empty
+ *                  shells - the data comes separately), while the network
+ *                  copy is fetched behind it for next time; a copy older
+ *                  than a week waits for the network first. No copy and no
+ *                  network: the offline page
  *   /_next/static  build files (their names change every release): cached
- *   /api           never cached
+ *   /api           never cached here
  */
 // Change VERSION whenever the cached files below change (icons, offline page);
 // old caches are deleted when the new worker takes over.
-const VERSION = "bb-2026-10-11";
+const VERSION = "bb-2026-10-12";
 const SHELL = VERSION + "-shell";
 const STATIC = VERSION + "-static";
+const PAGES = VERSION + "-pages";
+// How long a page may take from the network before an old saved copy is shown.
+const SLOW_MS = 2500;
+// Saved pages younger than this open straight away, without waiting for the
+// network at all.
+const INSTANT_MS = 7 * 24 * 3600 * 1000;
 const SHELL_FILES = ["/offline.html", "/icons/icon-192.png", "/icons/badge-96.png"];
 
 self.addEventListener("install", (event) => {
@@ -56,13 +66,65 @@ self.addEventListener("fetch", (event) => {
   if (req.mode === "navigate") {
     event.respondWith(
       (async () => {
-        try {
+        const pages = await caches.open(PAGES);
+        const key = url.origin + url.pathname;
+        const saved = await pages.match(key);
+        const savedText = saved ? saved.clone().text().catch(() => null) : Promise.resolve(null);
+        const fetched = (async () => {
           const preloaded = await event.preloadResponse;
-          if (preloaded) return preloaded;
-          return await fetch(req);
+          const res = preloaded || (await fetch(req));
+          // Real pages only - not sign-in redirects or errors.
+          const ok = res.ok && res.type === "basic" && !res.redirected && (res.headers.get("content-type") || "").includes("text/html");
+          return { res, copy: ok ? res.clone() : null };
+        })();
+        const network = fetched.then((f) => f.res);
+        // Saved for next time, behind whatever is shown now.
+        event.waitUntil(
+          fetched
+            .then(async ({ copy }) => {
+              if (!copy) return;
+              const text = await copy.text();
+              const before = await savedText;
+              // A page different from the saved one means a new release: the
+              // other saved pages belong to the old one, so they go (each is
+              // fetched fresh, and saved again, the next time it's opened).
+              if (before !== null && before !== text) {
+                const keys = await pages.keys();
+                await Promise.all(keys.filter((k) => k.url !== key).map((k) => pages.delete(k)));
+              }
+              const headers = new Headers(copy.headers);
+              headers.delete("content-length");
+              headers.delete("content-encoding");
+              headers.set("x-bb-saved", String(Date.now()));
+              await pages.put(key, new Response(text, { status: 200, headers }));
+            })
+            .catch(() => {})
+        );
+        const offline = async () =>
+          (await caches.match("/offline.html")) || new Response("You're offline.", { status: 503, headers: { "Content-Type": "text/plain" } });
+        // Opened recently: the saved copy at once, no waiting on the network.
+        // (A reload asks the network first.)
+        const age = saved ? Date.now() - Number(saved.headers.get("x-bb-saved") || 0) : Infinity;
+        if (saved && age < INSTANT_MS && req.cache !== "reload" && req.cache !== "no-cache") {
+          network.catch(() => {});
+          return saved;
+        }
+        if (!saved) {
+          try {
+            return await network;
+          } catch (e) {
+            return offline();
+          }
+        }
+        // A saved copy exists: the network gets a moment, then the copy is
+        // shown and the network answer still updates it for next time.
+        try {
+          const winner = await Promise.race([network, new Promise((r) => setTimeout(() => r(null), SLOW_MS))]);
+          if (winner) return winner;
+          event.waitUntil(network.catch(() => {}));
+          return saved;
         } catch (e) {
-          const offline = await caches.match("/offline.html");
-          return offline || new Response("You're offline.", { status: 503, headers: { "Content-Type": "text/plain" } });
+          return saved;
         }
       })()
     );

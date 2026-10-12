@@ -9,6 +9,7 @@
 // attach to one person and one piece of work, never to a crowd.
 
 import { useMemo, useState } from "react";
+import { Search, X } from "lucide-react";
 import { Person } from "./types";
 
 export function AssigneePicker({
@@ -37,9 +38,13 @@ export function AssigneePicker({
     [people, me]
   );
   const term = q.trim().toLowerCase();
+  // Names starting with what was typed come first, then any other match.
   const shown = term
-    ? sorted.filter((p) => `${p.name} ${p.email}`.toLowerCase().includes(term))
+    ? sorted
+        .filter((p) => `${p.name} ${p.email}`.toLowerCase().includes(term))
+        .sort((a, b) => Number(!String(a.name).toLowerCase().startsWith(term)) - Number(!String(b.name).toLowerCase().startsWith(term)))
     : sorted;
+  const nameOf = (id: string) => people.find((p) => p.id === id)?.name || "Someone";
 
   const toggle = (id: string) =>
     onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
@@ -72,18 +77,53 @@ export function AssigneePicker({
         </div>
       </div>
 
-      {people.length > 8 && (
+      {/* Search: type part of a name or email; Enter picks the top match. */}
+      <div className="relative">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" aria-hidden="true" />
         <input
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Find someone..."
-          aria-label="Find someone to assign"
-          className="w-full px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              // Never submits the form: picks the first match instead.
+              e.preventDefault();
+              if (term && shown[0]) {
+                if (!selected.includes(shown[0].id)) onChange([...selected, shown[0].id]);
+                setQ("");
+              }
+            } else if (e.key === "Escape") setQ("");
+          }}
+          placeholder={available > 0 ? `Search ${available} people by name or email...` : "Search people by name or email..."}
+          aria-label="Search people to assign"
+          enterKeyHint="done"
+          autoComplete="off"
+          disabled={disabled}
+          className="w-full pl-9 pr-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm"
         />
+      </div>
+
+      {/* Who's picked, even when the search hides them. */}
+      {selected.length > 0 && (term || people.length > 12) && (
+        <div className="flex flex-wrap gap-1.5" aria-label="Picked">
+          {selected.map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => toggle(id)}
+              disabled={disabled}
+              className="inline-flex items-center gap-1 pl-2.5 pr-1.5 py-1 rounded-full text-xs bg-blue-600 border border-blue-500 text-white"
+              aria-label={`Remove ${nameOf(id)}`}
+            >
+              {nameOf(id)}
+              {id === me ? " (you)" : ""}
+              <X size={12} aria-hidden="true" />
+            </button>
+          ))}
+        </div>
       )}
 
-      <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto" role="group" aria-label="Assignees">
+      <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto" role="group" aria-label="Assignees">
         {shown.map((p) => {
           const on = selected.includes(p.id);
           return (
@@ -106,14 +146,14 @@ export function AssigneePicker({
           );
         })}
         {shown.length === 0 && !stillLoading && (
-          <p className="text-xs text-slate-500">Nobody matches.</p>
+          <p className="text-sm text-slate-400">{term ? `Nobody matches "${q.trim()}".` : "Nobody to assign to yet."}</p>
         )}
       </div>
 
       {selected.length > 1 && (
         <p className="text-xs text-slate-400">
-          Each of the {selected.length} people gets their own copy of this task, so each accepts their own deadline
-          and is reviewed on their own work.
+          Each of the {selected.length} people gets their own copy with everything in it - the description, every item, the
+          deadline and who else is on it - and each accepts their own deadline and is reviewed on their own work.
         </p>
       )}
     </div>

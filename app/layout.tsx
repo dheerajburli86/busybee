@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
+import "./theme.css";
 import "./globals.css";
 import { RegisterSW } from "@/components/pwa/RegisterSW";
 import { SPLASH_SCREENS } from "@/lib/splash";
+import { THEME_SCRIPT } from "@/lib/theme";
 
 // BusyBee installs as an app on phones, tablets and computers (no app store):
 // manifest + icons + launch screens here, the service worker in public/sw.js.
@@ -28,8 +30,8 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#0f172a",
-  colorScheme: "dark",
+  themeColor: "#000000",
+  colorScheme: "dark light",
 };
 
 // Android shows its own "Install" bar unless the page takes the offer; BusyBee
@@ -38,11 +40,14 @@ const CATCH_INSTALL = `window.addEventListener("beforeinstallprompt",function(e)
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
+    // data-theme is set before the page is drawn (THEME_SCRIPT), so React
+    // mustn't complain that it differs from this default.
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
         <script dangerouslySetInnerHTML={{ __html: CATCH_INSTALL }} />
       </head>
-      <body className="bg-slate-950 text-slate-100 antialiased">
+      <body className="bg-slate-950 text-white antialiased">
         {children}
         <RegisterSW />
       </body>

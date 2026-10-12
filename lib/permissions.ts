@@ -18,9 +18,14 @@
 // Personal to-do items (tasks.personal) belong to their owner alone: nobody
 // else sees them, supervisors included.
 
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { selectAll } from "@/lib/chunks";
 import { Alert, AlertResult, sendAlert } from "@/lib/alerts";
+import { remembered, tokenExpiry } from "@/lib/serverCache";
+
+// How long a person's desk, projects and teams are reused between API calls.
+// Changes to any of them clear it at once (forgetAccess in lib/serverCache).
+const ACCESS_TTL = 10_000;
 
 export const SUPER_ROLES = ["admin", "supervisor"];
 export const MANAGER_ROLES = ["admin", "supervisor", "manager"];
@@ -60,11 +65,19 @@ export function deny(message = "You don't have permission to do that", status = 
 }
 
 export async function getMemberships(supabase: any, userId: string): Promise<Membership[]> {
-  const { data } = await supabase
-    .from("desk_members")
-    .select("desk_id, role")
-    .eq("user_id", userId);
-  return (data || []).map((m: any) => ({ desk_id: m.desk_id, role: normalizeRole(m.role) }));
+  const list = await remembered<Membership[]>(
+    supabase,
+    `m:${userId}`,
+    ACCESS_TTL,
+    async () => {
+      const { data } = await supabase.from("desk_members").select("desk_id, role").eq("user_id", userId);
+      return (data || []).map((m: any) => ({ desk_id: m.desk_id as string, role: normalizeRole(m.role) }));
+    },
+    // Someone not let onto a desk yet is checked afresh every time, so the
+    // moment a supervisor adds them, they're in.
+    (v) => v.length > 0
+  );
+  return list.map((m) => ({ ...m }));
 }
 
 export function roleIn(memberships: Membership[], deskId: string | null | undefined): string {
@@ -85,19 +98,25 @@ export function topRole(memberships: Membership[]): string {
  * sit on as a 'manager'.
  */
 export async function managedProjectIds(supabase: any, userId: string): Promise<string[]> {
-  const [{ data: led }, { data: asMember }] = await Promise.all([
-    supabase.from("projects").select("id").eq("manager_id", userId),
-    supabase.from("project_members").select("project_id").eq("user_id", userId).eq("role", "manager"),
-  ]);
-  return Array.from(
-    new Set([...(led || []).map((p: any) => p.id), ...(asMember || []).map((p: any) => p.project_id)])
-  );
+  const ids = await remembered(supabase, `pm:${userId}`, ACCESS_TTL, async () => {
+    const [{ data: led }, { data: asMember }] = await Promise.all([
+      supabase.from("projects").select("id").eq("manager_id", userId),
+      supabase.from("project_members").select("project_id").eq("user_id", userId).eq("role", "manager"),
+    ]);
+    return Array.from(
+      new Set<string>([...(led || []).map((p: any) => p.id), ...(asMember || []).map((p: any) => p.project_id)])
+    );
+  });
+  return [...ids];
 }
 
 /** Project ids the user is a member of, whatever their role on them. */
 export async function userProjectIds(supabase: any, userId: string): Promise<string[]> {
-  const { data } = await supabase.from("project_members").select("project_id").eq("user_id", userId);
-  return Array.from(new Set((data || []).map((p: any) => p.project_id).filter(Boolean)));
+  const ids = await remembered(supabase, `pj:${userId}`, ACCESS_TTL, async () => {
+    const { data } = await supabase.from("project_members").select("project_id").eq("user_id", userId);
+    return Array.from(new Set<string>((data || []).map((p: any) => p.project_id).filter(Boolean)));
+  });
+  return [...ids];
 }
 
 /**
@@ -110,13 +129,16 @@ export async function userProjectIds(supabase: any, userId: string): Promise<str
  * here means "no teams", not a failed request.
  */
 export async function userTeamIds(supabase: any, userId: string): Promise<string[]> {
-  try {
-    const { data, error } = await supabase.from("team_members").select("team_id").eq("user_id", userId);
-    if (error) return [];
-    return Array.from(new Set((data || []).map((t: any) => t.team_id).filter(Boolean)));
-  } catch {
-    return [];
-  }
+  const ids = await remembered(supabase, `tm:${userId}`, ACCESS_TTL, async () => {
+    try {
+      const { data, error } = await supabase.from("team_members").select("team_id").eq("user_id", userId);
+      if (error) return [] as string[];
+      return Array.from(new Set<string>((data || []).map((t: any) => t.team_id).filter(Boolean)));
+    } catch {
+      return [] as string[];
+    }
+  });
+  return [...ids];
 }
 
 /** Everyone in a team or group, for assignment and notifications. */
@@ -156,11 +178,12 @@ export function isPrivateToSomeoneElse(task: any, userId: string): boolean {
 }
 
 export async function taskAccess(supabase: any, userId: string, taskId: string): Promise<TaskAccess | null> {
-  const { data: task } = await supabase.from("tasks").select("*").eq("id", taskId).maybeSingle();
+  const [{ data: task }, memberships] = await Promise.all([
+    supabase.from("tasks").select("*").eq("id", taskId).maybeSingle(),
+    getMemberships(supabase, userId),
+  ]);
   if (!task) return null;
   if (isPrivateToSomeoneElse(task, userId)) return null;
-
-  const memberships = await getMemberships(supabase, userId);
   if (!memberships.some((m) => m.desk_id === task.desk_id)) return null;
 
   const role = roleIn(memberships, task.desk_id);
@@ -217,26 +240,37 @@ export async function taskAccess(supabase: any, userId: string, taskId: string):
  * Supervisors/admins see everything on their desks; everyone else sees work
  * they created, manage, do, or that sits in a project they belong to.
  */
-export async function visibleTasks(supabase: any, userId: string, tasks: any[]): Promise<any[]> {
-  if (tasks.length === 0) return tasks;
-  const memberships = await getMemberships(supabase, userId);
+export type VisibilitySets = { extraIds: Set<string>; subIds: Set<string>; projectIds: Set<string>; teamIds: Set<string> };
 
-  // Filtered by person only - a list of every task id would not fit in a URL.
-  const [extra, subs, managed, myProjects, myTeams] = await Promise.all([
-    selectAll<any>(() => supabase.from("task_assignors").select("task_id").eq("user_id", userId).order("id")),
-    selectAll<any>(() => supabase.from("subtasks").select("task_id").eq("assigned_to", userId).order("id")),
-    managedProjectIds(supabase, userId),
-    userProjectIds(supabase, userId),
-    userTeamIds(supabase, userId),
-  ]);
+/**
+ * Everything besides their role that lets this person see a task: tasks they
+ * were added to as an assignor, tasks with an item given to them, and their
+ * projects and teams. Looked up once per request; start it alongside the
+ * task query so both arrive together.
+ */
+export function visibilitySets(supabase: any, userId: string): Promise<VisibilitySets> {
+  return remembered(supabase, `vis:${userId}`, 0, async () => {
+    // Filtered by person only - a list of every task id would not fit in a URL.
+    const [extra, subs, managed, myProjects, myTeams] = await Promise.all([
+      selectAll<any>(() => supabase.from("task_assignors").select("task_id").eq("user_id", userId).order("id")),
+      selectAll<any>(() => supabase.from("subtasks").select("task_id").eq("assigned_to", userId).order("id")),
+      managedProjectIds(supabase, userId),
+      userProjectIds(supabase, userId),
+      userTeamIds(supabase, userId),
+    ]);
+    return {
+      extraIds: new Set<string>((extra || []).map((x: any) => x.task_id)),
+      subIds: new Set<string>((subs || []).map((x: any) => x.task_id)),
+      // Checklist #22: projects this user manages, plus the ones they are on.
+      projectIds: new Set<string>([...managed, ...myProjects]),
+      // SOW #29: plus anything handed to a team or group they belong to.
+      teamIds: new Set<string>(myTeams),
+    };
+  });
+}
 
-  const extraIds = new Set((extra || []).map((x: any) => x.task_id));
-  const subIds = new Set((subs || []).map((x: any) => x.task_id));
-  // Checklist #22: projects this user manages, plus the ones they are on.
-  const myProjectIds = new Set<string>([...managed, ...myProjects]);
-  // SOW #29: plus anything handed to a team or group they belong to.
-  const myTeamIds = new Set<string>(myTeams);
-
+/** The tasks this person may see, given their desks and visibilitySets(). */
+export function filterVisible(tasks: any[], userId: string, memberships: Membership[], sets: VisibilitySets): any[] {
   return tasks.filter((t) => {
     if (isPrivateToSomeoneElse(t, userId)) return false;
     const role = roleIn(memberships, t.desk_id);
@@ -245,12 +279,18 @@ export async function visibleTasks(supabase: any, userId: string, tasks: any[]):
       t.created_by === userId ||
       t.assigned_to === userId ||
       t.task_manager_id === userId ||
-      extraIds.has(t.id) ||
-      subIds.has(t.id) ||
-      (!!t.team_id && myTeamIds.has(t.team_id)) ||
-      (!!t.project_id && myProjectIds.has(t.project_id))
+      sets.extraIds.has(t.id) ||
+      sets.subIds.has(t.id) ||
+      (!!t.team_id && sets.teamIds.has(t.team_id)) ||
+      (!!t.project_id && sets.projectIds.has(t.project_id))
     );
   });
+}
+
+export async function visibleTasks(supabase: any, userId: string, tasks: any[]): Promise<any[]> {
+  if (tasks.length === 0) return tasks;
+  const [memberships, sets] = await Promise.all([getMemberships(supabase, userId), visibilitySets(supabase, userId)]);
+  return filterVisible(tasks, userId, memberships, sets);
 }
 
 /**
@@ -274,13 +314,21 @@ export async function visibleProjects(supabase: any, userId: string): Promise<an
   const memberships = await getMemberships(supabase, userId);
   const deskIds = memberships.map((m) => m.desk_id);
   if (!deskIds.length) return [];
-  const [projects, managed, myProjects, tasks] = await Promise.all([
+  const [projects, managed, myProjects, tasks, sets] = await Promise.all([
     selectAll<any>(() => supabase.from("projects").select("*").in("desk_id", deskIds).order("created_at", { ascending: false }).order("id")),
     managedProjectIds(supabase, userId),
     userProjectIds(supabase, userId),
-    selectAll<any>(() => supabase.from("tasks").select("*").in("desk_id", deskIds).is("archived_at", null).order("id")),
+    selectAll<any>(() =>
+      supabase
+        .from("tasks")
+        .select("id, desk_id, project_id, team_id, personal, created_by, assigned_to, task_manager_id")
+        .in("desk_id", deskIds)
+        .is("archived_at", null)
+        .order("id")
+    ),
+    visibilitySets(supabase, userId),
   ]);
-  const withTasks = new Set((await visibleTasks(supabase, userId, tasks)).map((t: any) => t.project_id));
+  const withTasks = new Set(filterVisible(tasks, userId, memberships, sets).map((t: any) => t.project_id));
   return projects
     .filter((p: any) => {
       if (SUPER_ROLES.includes(roleIn(memberships, p.desk_id))) return true;
@@ -337,7 +385,20 @@ export async function projectMemberIds(
   return Array.from(ids);
 }
 
-/** Record an action in the activity history. Never throws. */
+/** Run `work` just after the response has gone out (inline outside a request). */
+export async function afterResponse(work: () => Promise<unknown>): Promise<void> {
+  const safe = () => work().catch((err) => console.error("background work failed:", err));
+  try {
+    after(safe);
+  } catch {
+    await safe();
+  }
+}
+
+/**
+ * Record an action in the activity history. Never throws, and never makes
+ * the person wait: it's written just after the response goes out.
+ */
 export async function logActivity(
   supabase: any,
   entry: {
@@ -349,7 +410,7 @@ export async function logActivity(
     changes?: any;
   }
 ) {
-  try {
+  await afterResponse(async () => {
     await supabase.from("activity_log").insert({
       entity_type: entry.entity_type,
       entity_id: entry.entity_id,
@@ -358,9 +419,7 @@ export async function logActivity(
       desk_id: entry.desk_id ?? null,
       changes: entry.changes ?? null,
     });
-  } catch {
-    /* history must never block the action itself */
-  }
+  });
 }
 
 /**
@@ -377,7 +436,13 @@ export async function logActivity(
  * Pass `email: { subject, body }` for a fuller email than the bell text, or
  * `email: false` to keep it to the bell and Telegram.
  */
-export async function notifyMany(supabase: any, userIds: string[], n: Alert): Promise<AlertResult> {
+export async function notifyMany(supabase: any, userIds: string[], n: Alert, opts: { wait?: boolean } = {}): Promise<AlertResult> {
+  // Nobody waits for alerts: they go out just after the response, unless the
+  // caller needs the counts (opts.wait).
+  if (!opts.wait) {
+    await afterResponse(() => sendAlert(supabase, userIds, n, { inline: true }));
+    return { in_app: 0, email: 0, telegram: 0 };
+  }
   try {
     return await sendAlert(supabase, userIds, n);
   } catch (err: any) {
@@ -386,12 +451,34 @@ export async function notifyMany(supabase: any, userIds: string[], n: Alert): Pr
   }
 }
 
-/** Resolve the logged-in user or return a 401 response. */
-export async function requireUser(supabase: any) {
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  return user as { id: string; email?: string } | null;
+/**
+ * The signed-in person, or null. The sign-in token comes from the cookie and
+ * is checked with Supabase (on the spot where the project's keys allow it),
+ * then trusted for up to a minute on this server, so the several calls a
+ * screen makes at once don't each pay for the check.
+ */
+export async function requireUser(supabase: any): Promise<{ id: string; email?: string } | null> {
+  let token: string | undefined;
+  try {
+    const { data } = await supabase.auth.getSession();
+    token = data?.session?.access_token;
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  const ttl = Math.min(60_000, tokenExpiry(token) - Date.now() - 5_000);
+  return remembered(
+    null,
+    `u:${token.slice(-48)}`,
+    Math.max(0, ttl),
+    async () => {
+      const { data, error } = await supabase.auth.getClaims(token);
+      const c: any = data?.claims;
+      if (error || !c?.sub) return null;
+      return { id: String(c.sub), email: c.email ? String(c.email) : undefined };
+    },
+    (u) => !!u
+  );
 }
 
 /**

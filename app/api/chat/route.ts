@@ -20,27 +20,33 @@ export async function GET(req: Request) {
     const q = (url.searchParams.get("q") || "").trim();
     const after = url.searchParams.get("after");
 
-    const rooms = await roomsFor(supabase, user.id);
+    if (!q && !roomId) return NextResponse.json({ error: "room_id or q required" }, { status: 400 });
+
+    // One room's messages: read them while checking the room is yours (the
+    // database only returns rooms you may read anyway).
+    const roomMessages = () => {
+      let query = supabase.from("chat_messages").select("id, content, author_id, room_id, created_at").eq("room_id", roomId);
+      if (after) query = query.gt("created_at", after);
+      return query.order("created_at", { ascending: false }).limit(200);
+    };
+    const [rooms, early] = await Promise.all([roomsFor(supabase, user.id), !q && roomId ? roomMessages() : Promise.resolve(null)]);
     const allowed = rooms.map((r) => r.id);
     if (roomId && !allowed.includes(roomId)) return NextResponse.json({ error: "Room not found" }, { status: 404 });
     if (!allowed.length) return NextResponse.json({ messages: [], me: user.id });
 
-    let query = supabase
-      .from("chat_messages")
-      .select("id, content, author_id, room_id, created_at")
-      .in("room_id", roomId ? [roomId] : allowed);
-
+    let result: any = early;
     if (q) {
       // Escape the characters PostgREST treats specially in a pattern.
       const safe = q.replace(/[%_,()]/g, " ");
-      query = query.ilike("content", `%${safe}%`).order("created_at", { ascending: false }).limit(100);
-    } else {
-      if (!roomId) return NextResponse.json({ error: "room_id or q required" }, { status: 400 });
-      if (after) query = query.gt("created_at", after);
-      query = query.order("created_at", { ascending: false }).limit(200);
+      result = await supabase
+        .from("chat_messages")
+        .select("id, content, author_id, room_id, created_at")
+        .in("room_id", roomId ? [roomId] : allowed)
+        .ilike("content", `%${safe}%`)
+        .order("created_at", { ascending: false })
+        .limit(100);
     }
-
-    const { data, error } = await query;
+    const { data, error } = result;
     if (error) throw error;
 
     const rows = q ? data || [] : (data || []).reverse();

@@ -3,11 +3,14 @@
 
 const ZONE = process.env.APP_TIMEZONE || "Asia/Kolkata";
 
+// Made once and reused: building a date formatter is slow.
+let peopleFormat: Intl.DateTimeFormat | null = null;
+
 export function formatForPeople(iso: string | null | undefined): string {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso);
-  const text = d.toLocaleString("en-IN", {
+  peopleFormat ||= new Intl.DateTimeFormat("en-IN", {
     timeZone: ZONE,
     weekday: "short",
     day: "numeric",
@@ -15,6 +18,7 @@ export function formatForPeople(iso: string | null | undefined): string {
     hour: "numeric",
     minute: "2-digit",
   });
+  const text = peopleFormat.format(d);
   return ZONE === "Asia/Kolkata" ? `${text} IST` : text;
 }
 
