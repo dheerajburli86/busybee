@@ -218,32 +218,37 @@ export function PersonTasks({
   );
 }
 
+/** A colour name shaded in its own colour. */
+function Shade({ k, children }: { k: "overdue" | "close" | "behind" | "on_track" | "ahead"; children: React.ReactNode }) {
+  const b = BANDS.find((x) => x.key === k)!;
+  return (
+    <span className="px-1.5 py-0.5 rounded font-bold whitespace-nowrap" style={{ background: b.bg, color: b.fg }}>
+      {children}
+    </span>
+  );
+}
+
 export function HowItWorks() {
   return (
     <details className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-sm">
       <summary className="font-semibold cursor-pointer">How the colours work</summary>
-      <ul className="list-disc pl-5 mt-2 space-y-1.5 text-slate-300">
+      <ol className="list-decimal pl-5 mt-3 space-y-2.5 text-slate-200 leading-relaxed">
         <li>
-          <b>Overdue (dark red):</b> past the deadline and not finished. Late is late, however late.
+          <Shade k="overdue">Dark red</Shade> - deadline passed, not finished.
         </li>
         <li>
-          <b>Deadline close (light red):</b> in the last fifth of its time with more than half the work left.
+          <Shade k="close">Light red</Shade> - deadline very near, most work left.
         </li>
         <li>
-          <b>Falling behind (yellow):</b> in the last fifth of its time with some work left, or the work done is clearly behind the time used (for
-          example, half the time gone and only a quarter done).
+          <Shade k="behind">Yellow</Shade> - work is behind time.
         </li>
         <li>
-          <b>On track (light green):</b> the work is keeping up with the time used.
+          <Shade k="on_track">Light green</Shade> - on track.
         </li>
         <li>
-          <b>Ahead (dark green):</b> the work is clearly ahead of the time used, or all done. Finished on time is dark green; finished late is dark red.
+          <Shade k="ahead">Dark green</Shade> - ahead, or done on time.
         </li>
-        <li>Work is counted in checklist items; a task without a checklist uses the progress reported on it.</li>
-        <li>A person&apos;s colour is their worst open task - never an average. With nothing open, it shows how their last week of work went.</li>
-        <li>Approved extensions move the deadline, so they count. Tasks without a deadline, or waiting on another task, have no colour.</li>
-        <li>Only real progress changes a colour - ticking items, reporting progress, finishing. Changing a status doesn&apos;t. Colours update on their own.</li>
-      </ul>
+      </ol>
     </details>
   );
 }
