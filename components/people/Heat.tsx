@@ -114,12 +114,15 @@ function doneWhen(t: HeatTask, h: TaskHeat, now: number): string {
 }
 
 /** One line in a summary box: task name, then the days. */
-function Line({ t, h, days, tag }: { t: HeatTask; h: TaskHeat; days: string; tag?: string }) {
-  const dot = coloursOf(h.band).background;
+function Line({ n, t, h, days, tag }: { n: number; t: HeatTask; h: TaskHeat; days: string; tag?: string }) {
+  const c = coloursOf(h.band);
   return (
     <li>
       <Link href={`/dashboard?task=${t.id}`} className="flex items-start gap-2 px-2 py-1.5 rounded hover:bg-slate-700" title={h.reason}>
-        <span className="mt-1.5 w-2.5 h-2.5 rounded-full shrink-0" style={{ background: dot }} aria-hidden="true" />
+        {/* The task's number, shaded in its colour. */}
+        <span className="mt-0.5 min-w-[1.5rem] h-6 px-1 rounded text-xs font-bold flex items-center justify-center shrink-0 tabular-nums" style={{ background: c.background, color: c.color }}>
+          {n}
+        </span>
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold text-white break-words leading-snug">
             {t.title}
@@ -194,18 +197,18 @@ export function PersonTasks({
 
       <div className="grid gap-3 md:grid-cols-3 mb-6">
         <SummaryBox title="Pending" accent="#facc15" count={pending.length} empty="Nothing pending.">
-          {pending.map((t) => (
-            <Line key={t.id} t={t} h={h(t)} days={dueWhen(t, now)} tag={h(t).state === "close" ? "deadline close!" : undefined} />
+          {pending.map((t, i) => (
+            <Line key={t.id} n={i + 1} t={t} h={h(t)} days={dueWhen(t, now)} tag={h(t).state === "close" ? "deadline close!" : undefined} />
           ))}
         </SummaryBox>
         <SummaryBox title="Completed" accent="#22c55e" count={done.length} empty="Nothing finished in the last 30 days.">
-          {done.map((t) => (
-            <Line key={t.id} t={t} h={h(t)} days={doneWhen(t, h(t), now)} />
+          {done.map((t, i) => (
+            <Line key={t.id} n={i + 1} t={t} h={h(t)} days={doneWhen(t, h(t), now)} />
           ))}
         </SummaryBox>
         <SummaryBox title="Deadline missed" accent="#dc2626" count={missed.length} empty="No missed deadlines.">
-          {missed.map((t) => (
-            <Line key={t.id} t={t} h={h(t)} days={lateBy(t, now)} tag={h(t).stale ? "stale" : undefined} />
+          {missed.map((t, i) => (
+            <Line key={t.id} n={i + 1} t={t} h={h(t)} days={lateBy(t, now)} tag={h(t).stale ? "stale" : undefined} />
           ))}
         </SummaryBox>
       </div>
@@ -231,7 +234,7 @@ function Shade({ k, children }: { k: "overdue" | "close" | "behind" | "on_track"
 export function HowItWorks() {
   return (
     <details className="bg-slate-800 border border-slate-700 rounded-lg px-4 py-3 text-sm">
-      <summary className="font-semibold cursor-pointer">How the colours work</summary>
+      <summary className="font-semibold cursor-pointer">BusyBee colour keys</summary>
       <ol className="list-decimal pl-5 mt-3 space-y-2.5 text-slate-200 leading-relaxed">
         <li>
           <Shade k="overdue">Dark red</Shade> - deadline passed, not finished.
