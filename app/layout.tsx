@@ -22,7 +22,7 @@ export const metadata: Metadata = {
   },
   appleWebApp: { capable: true, title: "BusyBee", statusBarStyle: "black-translucent", startupImage: SPLASH_SCREENS },
   formatDetection: { telephone: false, email: false, address: false },
-  other: { "apple-mobile-web-app-capable": "yes" },
+  other: { "apple-mobile-web-app-capable": "yes", "bb-release": process.env.NEXT_PUBLIC_RELEASE || "" },
 };
 
 // Checklist #45: scale to the device and allow both orientations.

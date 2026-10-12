@@ -14,7 +14,7 @@
  */
 // Change VERSION whenever the cached files below change (icons, offline page);
 // old caches are deleted when the new worker takes over.
-const VERSION = "bb-2026-10-12";
+const VERSION = "bb-2026-10-12b";
 const SHELL = VERSION + "-shell";
 const STATIC = VERSION + "-static";
 const PAGES = VERSION + "-pages";
@@ -52,6 +52,33 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Which release a page belongs to: its <meta name="bb-release"> (set at
+// build time), or else the build files it loads.
+function releaseOf(html) {
+  const meta = /<meta name="bb-release" content="([^"]*)"/.exec(html || "");
+  if (meta && meta[1]) return meta[1];
+  const files = (html || "").match(/\/_next\/static\/[^"'\s)]+\.js/g) || [];
+  return Array.from(new Set(files)).sort().join(" ");
+}
+
+// Save a page that came from the network. Returns true when it belongs to a
+// newer release than the copy saved before (the old release's other saved
+// pages are then dropped: each is fetched fresh the next time it's opened).
+async function savePage(pages, key, copy, before) {
+  const text = await copy.text();
+  const newer = before !== null && before !== undefined && releaseOf(before) !== releaseOf(text);
+  if (newer) {
+    const keys = await pages.keys();
+    await Promise.all(keys.filter((k) => k.url !== key).map((k) => pages.delete(k)));
+  }
+  const headers = new Headers(copy.headers);
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  headers.set("x-bb-saved", String(Date.now()));
+  await pages.put(key, new Response(text, { status: 200, headers }));
+  return newer;
+}
+
 async function trim(cache, max) {
   const keys = await cache.keys();
   for (let i = 0; i < keys.length - max; i++) await cache.delete(keys[i]);
@@ -78,25 +105,12 @@ self.addEventListener("fetch", (event) => {
           return { res, copy: ok ? res.clone() : null };
         })();
         const network = fetched.then((f) => f.res);
-        // Saved for next time, behind whatever is shown now.
+        // Saved for next time, behind whatever is shown now. (If it is a new
+        // release, the app finds out when it asks - see "bb-check-release".)
         event.waitUntil(
           fetched
             .then(async ({ copy }) => {
-              if (!copy) return;
-              const text = await copy.text();
-              const before = await savedText;
-              // A page different from the saved one means a new release: the
-              // other saved pages belong to the old one, so they go (each is
-              // fetched fresh, and saved again, the next time it's opened).
-              if (before !== null && before !== text) {
-                const keys = await pages.keys();
-                await Promise.all(keys.filter((k) => k.url !== key).map((k) => pages.delete(k)));
-              }
-              const headers = new Headers(copy.headers);
-              headers.delete("content-length");
-              headers.delete("content-encoding");
-              headers.set("x-bb-saved", String(Date.now()));
-              await pages.put(key, new Response(text, { status: 200, headers }));
+              if (copy) await savePage(pages, key, copy, await savedText);
             })
             .catch(() => {})
         );
@@ -237,6 +251,32 @@ self.addEventListener("pushsubscriptionchange", (event) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ subscription: sub.toJSON(), old_endpoint: old ? old.endpoint : null }),
       });
+    })().catch(() => {})
+  );
+});
+
+// ---- New releases ------------------------------------------------------------
+// The app says which release it is running when it opens and whenever it comes
+// back to the screen (components/pwa/RegisterSW). The page is fetched fresh;
+// if it belongs to another release, the app is told to reload onto it.
+self.addEventListener("message", (event) => {
+  const d = event.data || {};
+  if (d.type !== "bb-check-release" || typeof d.path !== "string" || !d.path.startsWith("/") || !d.release) return;
+  const source = event.source;
+  event.waitUntil(
+    (async () => {
+      const res = await fetch(d.path, { cache: "no-store", credentials: "same-origin", headers: { Accept: "text/html" } });
+      const ok = res.ok && res.type === "basic" && !res.redirected && (res.headers.get("content-type") || "").includes("text/html");
+      if (!ok) return;
+      const text = await res.clone().text();
+      const pages = await caches.open(PAGES);
+      const key = self.location.origin + d.path;
+      // Keep a saved copy current (so a reload opens the new release), but
+      // don't start saving pages that were never saved.
+      const saved = await pages.match(key);
+      if (saved) await savePage(pages, key, res, await saved.text());
+      const latest = releaseOf(text);
+      if (latest && latest !== d.release && source) source.postMessage({ type: "bb-new-release", release: latest });
     })().catch(() => {})
   );
 });
