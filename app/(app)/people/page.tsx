@@ -213,7 +213,7 @@ export default function PeoplePage() {
         <HeatLegend />
       </div>
       <p className="text-xs text-slate-400 mb-3">
-        Colour = work done compared with the work expected by now, given each deadline. Tap a name to see their open and finished tasks.
+        Each person shows their worst open task: overdue, deadline close, falling behind, on track or ahead. Tap a name to see their tasks.
         {heat.scope === "visible" && " Worked out from the tasks you can see."}
       </p>
       <div className="grid gap-3 sm:grid-cols-2 mb-4">

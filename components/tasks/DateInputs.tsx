@@ -81,7 +81,6 @@ export function DeadlinePicker({
     if (value) setTime(value.slice(11, 16));
   }, [value]);
 
-  const box = "px-3 py-2 bg-slate-900 border border-slate-600 rounded text-sm";
   const iso = value ? fromLocalInput(value) : null;
   return (
     <div className="space-y-2">
@@ -99,7 +98,8 @@ export function DeadlinePicker({
             {q.label}
           </button>
         ))}
-        <span className="flex items-center gap-1.5">
+        {/* Date and time as one compact box: no gap between the text and its icon. */}
+        <span className="tight-dt inline-flex items-center bg-slate-900 border border-slate-600 rounded text-sm">
           <input
             type="date"
             value={date}
@@ -110,7 +110,7 @@ export function DeadlinePicker({
               if (halfTyped(e)) return;
               onChange(e.target.value ? `${e.target.value}T${time || "18:00"}` : "");
             }}
-            className={`${box} w-[10.5rem]`}
+            className="bg-transparent pl-2.5 pr-1 py-2 w-auto"
           />
           <input
             type="time"
@@ -123,7 +123,7 @@ export function DeadlinePicker({
               setTime(t);
               if (date) onChange(`${date}T${t}`);
             }}
-            className={`${box} w-[8.75rem]`}
+            className="bg-transparent pl-1 pr-2.5 py-2 w-auto border-l border-slate-600"
           />
         </span>
       </div>

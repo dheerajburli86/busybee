@@ -118,3 +118,13 @@ nav button,
   content-visibility: auto;
   contain-intrinsic-size: auto 132px;
 }
+
+/* Compact date + time box (components/tasks/DateInputs.tsx): the calendar and
+   clock icons sit right next to the text instead of at the far end. */
+.tight-dt input::-webkit-calendar-picker-indicator {
+  margin-left: 4px;
+  padding: 0;
+}
+.tight-dt input::-webkit-datetime-edit {
+  padding: 0;
+}
