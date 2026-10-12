@@ -195,7 +195,7 @@ export function PersonTasks({
       <div className="grid gap-3 md:grid-cols-3 mb-6">
         <SummaryBox title="Pending" accent="#facc15" count={pending.length} empty="Nothing pending.">
           {pending.map((t) => (
-            <Line key={t.id} t={t} h={h(t)} days={dueWhen(t, now)} tag={h(t).state === "close" ? "deadline close" : h(t).state === "behind" ? "behind" : undefined} />
+            <Line key={t.id} t={t} h={h(t)} days={dueWhen(t, now)} tag={h(t).state === "close" ? "deadline close!" : undefined} />
           ))}
         </SummaryBox>
         <SummaryBox title="Completed" accent="#22c55e" count={done.length} empty="Nothing finished in the last 30 days.">
@@ -237,10 +237,10 @@ export function HowItWorks() {
           <Shade k="overdue">Dark red</Shade> - deadline passed, not finished.
         </li>
         <li>
-          <Shade k="close">Light red</Shade> - deadline very near, most work left.
+          <Shade k="close">Light red</Shade> - alarm: deadline is close and a lot is still left. Act now.
         </li>
         <li>
-          <Shade k="behind">Yellow</Shade> - work is behind time.
+          <Shade k="behind">Yellow</Shade> - reminder: work is pending, but there&apos;s still time.
         </li>
         <li>
           <Shade k="on_track">Light green</Shade> - on track.

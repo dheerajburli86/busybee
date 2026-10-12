@@ -20,10 +20,10 @@
 //     Late is late: no "slightly late". Overdue for more than 30 days is
 //     also listed as stale (close it or give it a new date).
 //   Final stretch (last 20% of its time) and
-//     more than half the work left ................ LIGHT RED    "Deadline close"
+//     more than half the work left ................ LIGHT RED    "Deadline close!"
 //   Final stretch with any work left, or more than
 //     a quarter of its time gone and the work is a
-//     quarter or more behind the time .............. YELLOW       "Falling behind"
+//     quarter or more behind the time .............. YELLOW       "Pending - still time"
 //   Work done is clearly ahead of the time gone,
 //     or all the work is done (just not closed) .... DARK GREEN   "Ahead"
 //   Anything else ................................. LIGHT GREEN  "On track"
@@ -70,8 +70,8 @@ export type Band = { key: BandKey; colour: string; label: string; meaning: strin
 /** Worst to best. Text colours chosen for contrast on each. */
 export const BANDS: Band[] = [
   { key: "overdue", colour: "Dark red", label: "Overdue", meaning: "Past the deadline and not finished", bg: "#7f1d1d", fg: "#ffffff" },
-  { key: "close", colour: "Light red", label: "Deadline close", meaning: "In the final stretch with most of the work left", bg: "#fca5a5", fg: "#000000" },
-  { key: "behind", colour: "Yellow", label: "Falling behind", meaning: "Work is behind the time used", bg: "#fde047", fg: "#000000" },
+  { key: "close", colour: "Light red", label: "Deadline close!", meaning: "Deadline is close and a lot is still left - act now", bg: "#fca5a5", fg: "#000000" },
+  { key: "behind", colour: "Yellow", label: "Pending - still time", meaning: "Work is pending, but there's still time", bg: "#fde047", fg: "#000000" },
   { key: "on_track", colour: "Light green", label: "On track", meaning: "Work is keeping up with the time used", bg: "#86efac", fg: "#000000" },
   { key: "ahead", colour: "Dark green", label: "Ahead", meaning: "Work is ahead of the time used, or done on time", bg: "#166534", fg: "#ffffff" },
 ];
@@ -191,10 +191,10 @@ export function scoreTask(t: HeatTask, now: number): TaskHeat {
   const dueIn = `due in ${span(due - now)}`;
 
   if (done >= 1) return out("ahead", band("ahead"), "Ahead", `All the work is done; ${dueIn}`);
-  if (finalStretch && left > RULES.mostLeft) return out("close", band("close"), "Deadline close", `${capital(dueIn)}; ${work}`);
-  if (finalStretch) return out("behind", band("behind"), "Falling behind", `${capital(dueIn)}; ${work}`);
+  if (finalStretch && left > RULES.mostLeft) return out("close", band("close"), "Deadline close!", `${capital(dueIn)}; ${work}`);
+  if (finalStretch) return out("behind", band("behind"), "Pending - still time", `${capital(dueIn)}; ${work}`);
   if (used >= RULES.behindAfter && used - done >= RULES.behindGap - 1e-9)
-    return out("behind", band("behind"), "Falling behind", `${timeText(used)}; ${work}; ${dueIn}`);
+    return out("behind", band("behind"), "Pending - still time", `${timeText(used)}; ${work}; ${dueIn}`);
   if (done > 0 && done - used >= RULES.aheadGap - 1e-9) return out("ahead", band("ahead"), "Ahead", `${timeText(used)}; ${work}; ${dueIn}`);
   return out("on_track", band("on_track"), "On track", `${timeText(used)}; ${work}; ${dueIn}`);
 }
@@ -230,8 +230,8 @@ export type PersonHeat = {
 
 const PERSON_LABEL: Record<BandKey, string> = {
   overdue: "Overdue work",
-  close: "Deadline close",
-  behind: "Falling behind",
+  close: "Deadline close!",
+  behind: "Work pending - still time",
   on_track: "On track",
   ahead: "Ahead",
 };
@@ -269,7 +269,7 @@ export function scorePerson(tasks: HeatTask[], now: number): PersonHeat & { perT
   const parts: string[] = [];
   if (counts.overdue) parts.push(`${counts.overdue} overdue`);
   if (counts.close) parts.push(`${counts.close} deadline close`);
-  if (counts.behind) parts.push(`${counts.behind} falling behind`);
+  if (counts.behind) parts.push(`${counts.behind} pending`);
   if (counts.on_track) parts.push(`${counts.on_track} on track`);
   if (counts.ahead) parts.push(`${counts.ahead} ahead`);
   if (counts.not_coloured) parts.push(`${counts.not_coloured} without a deadline or waiting`);
@@ -283,7 +283,7 @@ export function scorePerson(tasks: HeatTask[], now: number): PersonHeat & { perT
   let main: string | null = null;
   if (worst === "overdue") main = `Overdue: ${names(byState.get("overdue")!)}`;
   else if (worst === "close") main = `Deadline close: ${names(byState.get("close")!)}`;
-  else if (worst === "behind") main = `Falling behind: ${names(byState.get("behind")!)}`;
+  else if (worst === "behind") main = `Pending: ${names(byState.get("behind")!)}`;
   if (!worst && counts.done_on_time + counts.done_late > 0) {
     b = counts.done_late ? band("on_track") : band("ahead");
     label = counts.done_late ? "Nothing open (some finished late)" : "Nothing open, all done on time";

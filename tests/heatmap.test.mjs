@@ -23,7 +23,7 @@ const task = (over = {}) => ({
 const at = (t, days) => scoreTask(t, T0 + days * D);
 
 test("five colours, labels, no numbers", () => {
-  assert.deepEqual(BANDS.map((b) => b.label), ["Overdue", "Deadline close", "Falling behind", "On track", "Ahead"]);
+  assert.deepEqual(BANDS.map((b) => b.label), ["Overdue", "Deadline close!", "Pending - still time", "On track", "Ahead"]);
   const h = at(task({ done: 3 }), 4);
   assert.equal("score" in h, false);
   assert.doesNotMatch(h.reason, /\/100|score/i);
@@ -133,8 +133,8 @@ test("person: order of colours", () => {
   const close = task({ id: "c", title: "C", done: 1 });
   const behind = task({ id: "b", title: "B", done: 6 });
   const fine = task({ id: "f", due: iso(T0 + 40 * D) });
-  assert.equal(scorePerson([close, behind, fine], now).label, "Deadline close");
-  assert.equal(scorePerson([behind, fine], now).label, "Falling behind");
+  assert.equal(scorePerson([close, behind, fine], now).label, "Deadline close!");
+  assert.equal(scorePerson([behind, fine], now).label, "Work pending - still time");
   assert.equal(scorePerson([fine], now).label, "On track");
 });
 
