@@ -582,7 +582,7 @@ def _forget_chat(user_id: str) -> None:
         warn(f"could not disconnect stale Telegram chat for {user_id}: {exc!r}")
 
 
-def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=None) -> bool:
+def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=None, html: bool = False) -> bool:
     if not TELEGRAM_BOT_TOKEN:
         return False
     chat = _chat_for(user_id)
@@ -591,7 +591,7 @@ def send_telegram(user_id: str, ntype: str, title: str, message: str, task_id=No
     icon = TG_ICONS.get(ntype) or ("⏰" if (ntype or "").startswith("reminder") else "🔔")
     payload = {
         "chat_id": int(chat),
-        "text": f"{icon} <b>{_html(title)}</b>\n{_html(str(message)[:3500])}",
+        "text": f"{icon} <b>{_html(title)}</b>\n{str(message)[:3900] if html else _html(str(message)[:3500])}",
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -920,6 +920,34 @@ def why_you(card, uid) -> str:
             f"{person_name(card.get('created_by')) or 'Someone'} gave this task to {person_name(card.get('assigned_to')) or 'someone'}.")
 
 
+class Linked(str):
+    """A summary line about one task: shown as a link to that task."""
+
+    def __new__(cls, text, task_id):
+        obj = str.__new__(cls, text)
+        obj.task_id = task_id
+        return obj
+
+
+def task_url(task_id) -> str:
+    return f"{APP_URL}/dashboard?task={task_id}" if APP_URL and task_id else ""
+
+
+def render_telegram(headline, sections, cta=None) -> str:
+    """The summary for Telegram (HTML): every task line links to its task."""
+    out = [_html(headline)]
+    for heading, lines, numbered in sections:
+        out += ["", f"<b>{_html(heading)}</b>"]
+        for n, l in enumerate(lines, 1):
+            url = task_url(getattr(l, "task_id", None))
+            out.append(f"{n}. {_html(l)}" if numbered else f"• {_html(l)}")
+            # The link on its own line, so tapping the text never opens anything.
+            if url:
+                out.append(f'      ↳ <a href="{_html(url)}">Open task</a>')
+    text = "\n".join(out)
+    return text if len(text) <= 3900 else text[:3890].rsplit("\n", 1)[0] + "\n…more in BusyBee"
+
+
 def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=(), cta=None, why="", settings=True):
     """Returns (text, html). sections: list of (heading, [lines], numbered)."""
     green = "#2f8f3a"
@@ -946,7 +974,10 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
             t += ["", "Items:"] + [f"  {n}. {item_line(i)}" for n, i in enumerate(items, 1)]
     for heading, lines, numbered in sections:
         t += ["", heading.upper()]
-        t += [f"  {n}. {l}" if numbered else f"  - {l}" for n, l in enumerate(lines, 1)]
+        for n, l in enumerate(lines, 1):
+            t.append(f"  {n}. {l}" if numbered else f"  - {l}")
+            if task_url(getattr(l, "task_id", None)):
+                t.append(f"     {task_url(l.task_id)}")
     if cta:
         t += ["", f"{cta[1]}: {cta[0]}"]
     if settings and APP_URL:
@@ -989,7 +1020,12 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
         tag = "ol" if numbered else "ul"
         h.append(f'<div style="margin:18px 0 6px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:{green}">{e(heading.upper())}</div>')
         h.append(f'<{tag} style="margin:0;padding-left:22px;font-size:14px;line-height:1.6">')
-        h += [f"<li>{e(l)}</li>" for l in lines]
+        for l in lines:
+            url = task_url(getattr(l, "task_id", None))
+            h.append(
+                f'<li style="margin-bottom:4px">{e(l)}<br><a href="{e(url)}" style="font-size:12px;color:#2f8f3a">Open task &rarr;</a></li>'
+                if url else f"<li>{e(l)}</li>"
+            )
         h.append(f"</{tag}>")
     if cta:
         h.append(
@@ -1101,25 +1137,25 @@ def head_digest() -> None:
             headline = "Today: " + " · ".join(bits) + "."
 
             sections = []
-            attention = [f'Review: "{t["title"]}" - {who(t)}' for t in review]
-            attention += [f'More time asked: "{by_id[x["task_id"]]["title"]}" - {person_name(x["requested_by"])} wants '
-                          f'{_short_due(parse(x["requested_date"]))}' for x in exts]
+            attention = [Linked(f'Review: "{t["title"]}" - {who(t)}', t["id"]) for t in review]
+            attention += [Linked(f'More time asked: "{by_id[x["task_id"]]["title"]}" - {person_name(x["requested_by"])} wants '
+                                 f'{_short_due(parse(x["requested_date"]))}', x["task_id"]) for x in exts]
             if attention:
                 sections.append(("Needs your decision", attention, True))
             if late:
-                sections.append(("Overdue", [f'"{t["title"]}" - {who(t)} - {_late_by(parse(t["due_date"]))}' for t in late], True))
+                sections.append(("Overdue", [Linked(f'"{t["title"]}" - {who(t)} - {_late_by(parse(t["due_date"]))}', t["id"]) for t in late], True))
             if done_today:
-                sections.append(("Finished today", [f'"{t["title"]}" - {who(t)}' for t in done_today], True))
+                sections.append(("Finished today", [Linked(f'"{t["title"]}" - {who(t)}', t["id"]) for t in done_today], True))
             if new_today:
                 sections.append(("Given out today", [
-                    f'"{t["title"]}" - {person_name(t.get("created_by")) or "someone"} to {who(t)}, due {_short_due(parse(t.get("due_date")))}'
+                    Linked(f'"{t["title"]}" - {person_name(t.get("created_by")) or "someone"} to {who(t)}, due {_short_due(parse(t.get("due_date")))}', t["id"])
                     for t in new_today], True))
             if due_tmrw:
-                sections.append(("Due tomorrow", [f'"{t["title"]}" - {who(t)}' for t in due_tmrw], True))
+                sections.append(("Due tomorrow", [Linked(f'"{t["title"]}" - {who(t)}', t["id"]) for t in due_tmrw], True))
             if cash:
                 sections.append(("Rewards and penalties today", [
-                    f'{"Reward" if a["kind"] == "reward" else "Penalty"} ₹{float(a["amount"]):,.0f} - {person_name(a["user_id"])} - '
-                    f'"{by_id[a["task_id"]]["title"]}"' for a in cash], True))
+                    Linked(f'{"Reward" if a["kind"] == "reward" else "Penalty"} ₹{float(a["amount"]):,.0f} - {person_name(a["user_id"])} - '
+                           f'"{by_id[a["task_id"]]["title"]}"', a["task_id"]) for a in cash], True))
             # One line per person with work, busiest first.
             people = {}
             for t in ts:
@@ -1149,14 +1185,14 @@ def head_digest() -> None:
             subject = (f"BusyBee {today:%d %b}: {len(done_today)} done, {len(late)} overdue"
                        + (f", {len(review) + len(exts)} need you" if (review or exts) else ""))
             notify(head, None, "head_digest", "BusyBee today", headline, subject=subject,
-                   email=(text, html), telegram_text=text.split("\n--\n")[0])
+                   email=(text, html), telegram_html=render_telegram(headline, sections))
         except Exception as exc:
             warn(f"head_digest: skipping {head}: {exc!r}")
     log(f"sent the head's daily email to {len(heads)}")
 
 
 def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "",
-           email: tuple = None, telegram_text: str = "", overseer: bool = False) -> bool:
+           email: tuple = None, telegram_text: str = "", overseer: bool = False, telegram_html: str = "") -> bool:
     """In-app notification, then the same by email. No email if the in-app one
     couldn't be saved: the saved row is what stops it being sent again.
 
@@ -1195,7 +1231,10 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
         except Exception as exc:
             warn(f"email to {user_id} failed to build: {exc!r}")
     if not quiet and _wants(user_id, ntype, "telegram"):
-        send_telegram(user_id, ntype, title, telegram_text or message, task_id)
+        if telegram_html:
+            send_telegram(user_id, ntype, title, telegram_html, task_id, html=True)
+        else:
+            send_telegram(user_id, ntype, title, telegram_text or message, task_id)
     # Pop-up on their phone, for whatever shows in their bell. The head's only
     # pop-up is the 8 PM summary, like his email.
     if not quiet and _wants(user_id, ntype, "in_app"):
@@ -1733,7 +1772,7 @@ def _task_line(e, with_person=False, done_word=None) -> str:
         parts.append(f"project: {proj}")
     if not with_person and t.get("created_by"):
         parts.append(f"given by {person_name(t.get('created_by'))}")
-    return " - ".join(parts)
+    return Linked(" - ".join(parts), t.get("id"))
 
 
 def _team(info, per_desk):
@@ -1764,9 +1803,9 @@ def _send_summary(uid, ntype, title, subject, headline, paragraphs, sections):
         cta=(f"{APP_URL}/dashboard", "Open BusyBee") if APP_URL else None,
         why="You're getting this daily summary because you're on BusyBee.",
     )
-    # Telegram gets the same words, without the email's footer.
-    tg = text.split("\n--\n")[0]
-    notify(uid, None, ntype, title, headline, subject=subject, email=(text, html), telegram_text=tg)
+    # Telegram gets the same lines, each task a link.
+    tg = render_telegram("\n\n".join([headline, *paragraphs]), sections)
+    notify(uid, None, ntype, title, headline, subject=subject, email=(text, html), telegram_html=tg)
 
 
 def start_of_day() -> None:
