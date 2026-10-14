@@ -536,7 +536,7 @@ export function TaskWorkflow({
                 </div>
               )}
               <p className="text-xs text-slate-500">
-                Nothing is paid or deducted here. This goes onto the month's payroll report for finance to apply, and
+                Nothing is paid or deducted here. This goes onto the month's IROP report for finance to apply, and
                 the person is told straight away. Entries can be cancelled but never edited or deleted.
               </p>
             </div>

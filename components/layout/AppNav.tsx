@@ -8,7 +8,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { ClipboardList, ListChecks, Menu, MessageCircle, Sparkles, FolderKanban, X } from "lucide-react";
+import { ClipboardList, ListChecks, Menu, MessageCircle, Sparkles, FolderKanban, Users, X } from "lucide-react";
 import { NotificationBell } from "@/components/NotificationBell";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { SIMPLE } from "@/lib/simple";
@@ -24,7 +24,7 @@ const SIMPLE_LINKS = [
   { href: "/ask", label: "Ask" },
   { href: "/projects", label: "Projects" },
   { href: "/reports", label: "Reports" },
-  { href: "/payroll", label: "Payroll" },
+  { href: "/payroll", label: "IROP" },
   { href: "/people", label: "People" },
   { href: "/settings", label: "Settings" },
 ];
@@ -40,7 +40,7 @@ const ALL_LINKS = [
   { href: "/documents", label: "Documents" },
   { href: "/people", label: "People" },
   { href: "/timesheet", label: "Timesheet" },
-  { href: "/payroll", label: "Payroll" },
+  { href: "/payroll", label: "IROP" },
   { href: "/settings", label: "Settings" },
 ];
 
@@ -51,8 +51,8 @@ const TABS = SIMPLE
   ? [
       { href: "/dashboard", label: "Tasks", Icon: ClipboardList },
       { href: "/lists", label: "To-Do", Icon: ListChecks },
-      { href: "/chat", label: "Chat", Icon: MessageCircle },
       { href: "/ask", label: "Ask", Icon: Sparkles },
+      { href: "/people", label: "People", Icon: Users },
     ]
   : [
       { href: "/dashboard", label: "Tasks", Icon: ClipboardList },

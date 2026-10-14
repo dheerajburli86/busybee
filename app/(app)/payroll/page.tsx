@@ -180,7 +180,7 @@ export default function PayrollPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `busybee-payroll-${month}${desks.length > 1 ? `-${(desks.find((d) => d.desk_id === desk)?.name || "desk").replace(/\W+/g, "-")}` : ""}.csv`;
+    a.download = `busybee-irop-${month}${desks.length > 1 ? `-${(desks.find((d) => d.desk_id === desk)?.name || "desk").replace(/\W+/g, "-")}` : ""}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -189,7 +189,7 @@ export default function PayrollPage() {
     <div className="p-3 sm:p-6">
       <div className="max-w-5xl mx-auto">
         <div className="flex flex-wrap justify-start items-center gap-3 mb-6">
-          <h1 className="text-3xl font-bold">Payroll adjustments</h1>
+          <h1 className="text-3xl font-bold">IROP <span className="text-lg font-normal text-slate-400">- Instant Reward or Penalty</span></h1>
           <button onClick={() => router.push("/dashboard")} className="text-sm text-slate-400 hover:text-white">
             Back to tasks
           </button>
