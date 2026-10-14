@@ -186,7 +186,7 @@ export default function DocumentsPage() {
     <div className="max-w-5xl mx-auto p-3 sm:p-6">
       <h1 className="text-2xl sm:text-3xl font-bold mb-4">📁 Documents</h1>
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start">
           <span>{error}</span>
           <button onClick={() => setError("")}>dismiss</button>
         </div>
@@ -245,7 +245,7 @@ export default function DocumentsPage() {
       {folders.length > 0 && (
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
           {folders.map((f) => (
-            <div key={f.id} className="bg-slate-800 border border-slate-700 rounded p-3 flex items-center justify-between gap-2 group">
+            <div key={f.id} className="bg-slate-800 border border-slate-700 rounded p-3 flex items-center justify-start gap-2 group">
               <button onClick={() => openFolder(f.id)} className="flex items-center gap-2 text-sm hover:text-blue-400 flex-1 text-left truncate">
                 📁 {f.name}
               </button>

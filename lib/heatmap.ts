@@ -60,6 +60,8 @@ export type HeatTask = {
   last_progress_at?: string | null;
   // For showing only:
   assigned_to?: string | null;
+  /** Who gave the task. */
+  created_by?: string | null;
   project?: string | null;
   is_list?: boolean;
 };

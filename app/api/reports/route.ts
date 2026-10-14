@@ -71,7 +71,7 @@ export async function GET(request: NextRequest) {
       if (projectId) tq = tq.eq("project_id", projectId);
       return tq.order("id");
     });
-    const all = await visibleTasks(supabase, user.id, raw);
+    const all = await visibleTasks(supabase, user.id, raw.filter((t: any) => !t.deleted_at));
     const live = all.filter((t: any) => !t.archived_at);
 
     const [{ data: projects }, { data: mates }] = await Promise.all([

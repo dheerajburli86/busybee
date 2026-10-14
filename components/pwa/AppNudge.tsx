@@ -109,7 +109,7 @@ export function AppNudge() {
     router.push("/install");
   };
 
-  const bar = "border-b px-3 sm:px-6 py-2 text-sm flex flex-wrap items-center justify-between gap-2";
+  const bar = "border-b px-3 sm:px-6 py-2 text-sm flex flex-wrap items-center justify-start gap-2";
   const button = "px-3 py-1.5 rounded text-white text-xs font-semibold disabled:opacity-60";
 
   if (kind === "push") {

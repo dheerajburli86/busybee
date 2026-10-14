@@ -147,7 +147,7 @@ export default function OkrPage() {
   return (
     <div className="p-3 sm:p-6">
       <div className="max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
+        <div className="flex justify-start items-center mb-6">
           <h1 className="text-3xl font-bold">OKR Dashboard</h1>
           <button
             onClick={() => router.push("/dashboard")}
@@ -158,7 +158,7 @@ export default function OkrPage() {
         </div>
 
         {error && (
-          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-3">
+          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start gap-3">
             <span>{error}</span>
             <button onClick={() => setError("")} className="text-red-200 hover:text-white" aria-label="Dismiss">✕</button>
           </div>
@@ -192,7 +192,7 @@ export default function OkrPage() {
               const pct = objectiveProgress(o.id);
               return (
                 <div key={o.id} className="bg-slate-800 border border-slate-700 rounded p-4">
-                  <div className="flex justify-between items-start mb-2">
+                  <div className="flex justify-start items-start mb-2">
                     <h2 className="text-lg font-semibold">{o.title}</h2>
                     <span className="text-slate-400 text-sm">{pct}%</span>
                   </div>
@@ -212,7 +212,7 @@ export default function OkrPage() {
                         const linked = tasks.filter((t) => t.key_result_id === k.id);
                         return (
                           <div key={k.id} className="bg-slate-700 rounded p-3">
-                            <div className="flex justify-between items-center gap-2 mb-2">
+                            <div className="flex justify-start items-center gap-2 mb-2">
                               <span className="text-sm text-slate-200">{k.title}</span>
                               <div className="flex items-center gap-2 shrink-0">
                                 <input

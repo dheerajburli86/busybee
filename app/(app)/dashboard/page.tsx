@@ -8,6 +8,7 @@ import dynamic from "next/dynamic";
 import { SIMPLE } from "@/lib/simple";
 import { cached, freshKeeper, keepSame, load, prefetch, remember, useBeforePaint, useRefresh } from "@/lib/apiCache";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
+import { BulkBar, PickBox, RecentlyDeleted, UndoBar, useBulkDelete } from "@/components/tasks/BulkDelete";
 import { DateTimeInput, DeadlinePicker } from "@/components/tasks/DateInputs";
 import { ItemRow, ItemRows, blankItems, itemsPayload, latestItemDate } from "@/components/tasks/ItemRows";
 
@@ -79,18 +80,24 @@ const TaskCard = memo(function TaskCard({
   section,
   assignee,
   onOpen,
+  picking,
+  picked,
 }: {
   t: Task;
   project: string | null;
   section: string | null;
   assignee: string;
   onOpen: (id: string) => void;
+  /** Selecting for delete: a tap ticks the card instead of opening it. */
+  picking?: boolean;
+  picked?: boolean;
 }) {
   const late = isOverdue(t);
   const sending = t.id.startsWith("sending-");
   return (
     <button
       onClick={() => !sending && onOpen(t.id)}
+      aria-pressed={picking ? !!picked : undefined}
       // A finger on the card starts loading its details before the tap ends.
       onPointerDown={() => !sending && prefetch([`/api/tasks/${t.id}/details`], 10_000)}
       aria-busy={sending || undefined}
@@ -99,6 +106,7 @@ const TaskCard = memo(function TaskCard({
     >
       <div className="flex justify-between items-start gap-3 mb-1">
         <h3 className={`font-bold ${late ? "text-red-400" : ""}`}>
+          {picking && <span className="mr-2 align-middle inline-block"><PickBox on={!!picked} /></span>}
           {t.color && <span className="inline-block w-2.5 h-2.5 rounded-full mr-2 align-middle" style={{ backgroundColor: t.color }} title="Custom color" />}
           {t.title}
           {late && <span className="ml-2 text-xs font-normal">OVERDUE</span>}
@@ -148,6 +156,8 @@ export default function DashboardPage() {
   const [projectF, setProjectF] = useState<string>("");
   const [mine, setMine] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [showDeleted, setShowDeleted] = useState(false);
+  const [deletedKey, setDeletedKey] = useState(0);
   const [sortBy, setSortBy] = useState("created_at");
   const [showFilters, setShowFilters] = useState(false);
   const [dragged, setDragged] = useState<string | null>(null);
@@ -184,6 +194,20 @@ export default function DashboardPage() {
     setInfo(m);
     setTimeout(() => setInfo((cur) => (cur === m ? "" : cur)), 4000);
   }, []);
+  // Select several tasks and delete them (Undo / Recently deleted for 30 days).
+  const bulk = useBulkDelete({
+    onRemoved: (ids) => {
+      const gone = new Set(ids);
+      setTasks((prev) => prev.filter((t) => !gone.has(t.id)));
+      setArchivedTasks((prev) => prev.filter((t) => !gone.has(t.id)));
+      setDeletedKey((k) => k + 1);
+    },
+    onRestored: () => {
+      setDeletedKey((k) => k + 1);
+      loadAll(false);
+    },
+    onError: (m) => showError(m),
+  });
 
   // Load (or reload) everything this page shows. On the first load the
   // remembered copy is already on screen; this swaps in fresh data.
@@ -630,12 +654,12 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-7xl mx-auto p-3 sm:p-6">
-      <div className="flex justify-between items-center gap-3 mb-4">
+      <div className="flex justify-start items-center gap-3 mb-4">
         <h1 className="text-2xl sm:text-3xl font-bold">Tasks</h1>
       </div>
 
       {currentProject && (
-        <div className="mb-4 bg-slate-800 border border-slate-700 rounded p-4 flex justify-between gap-4">
+        <div className="mb-4 bg-slate-800 border border-slate-700 rounded p-4 flex justify-start gap-4">
           <div>
             <p className="text-blue-400 font-semibold">{currentProject.name}</p>
             {currentProject.description && <p className="text-slate-400 text-sm mt-1">{currentProject.description}</p>}
@@ -645,7 +669,7 @@ export default function DashboardPage() {
       )}
 
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-3" role="alert">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start gap-3" role="alert">
           <span>{error}</span>
           <button onClick={() => setError("")} className="text-red-400 shrink-0">dismiss</button>
         </div>
@@ -664,8 +688,10 @@ export default function DashboardPage() {
           people={lookups.people}
           me={lookups.me}
           selected={form.assignees}
-          onChange={(ids) => setForm({ ...form, assignees: ids })}
+          onChange={(ids) => setForm((f) => ({ ...f, assignees: ids }))}
           loading={loading}
+          onPeopleChange={(people) => setLookups((cur) => ({ ...cur, people }))}
+          myRole={myRole}
         />
         {SIMPLE && <p className="text-sm font-semibold text-white pt-1">2. What needs doing?</p>}
         <input
@@ -729,7 +755,9 @@ export default function DashboardPage() {
               {showMore ? "Fewer options" : "More options"}
             </button>
           )}
-          <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto">
+          {/* The main button starts its own line, on the left. */}
+          <div className="basis-full h-0" aria-hidden="true" />
+          <button type="submit" disabled={creating || !form.title.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-5 py-2.5 rounded font-semibold">
             {creating
               ? "Creating..."
               : form.assignees.length > 1
@@ -809,6 +837,8 @@ export default function DashboardPage() {
       <div className="flex flex-wrap gap-2 mb-4 items-center">
         <button onClick={() => setMine(!mine)} className={pill(mine)}>My tasks</button>
         <button onClick={() => setShowArchived(!showArchived)} className={pill(showArchived)}>🗄️ Archive</button>
+        {view === "list" && <BulkBar bulk={bulk} allIds={filtered.filter((t) => !t.id.startsWith("sending-")).map((t) => t.id)} />}
+        <button onClick={() => setShowDeleted(!showDeleted)} className={pill(showDeleted)}>🗑 Recently deleted</button>
         <button onClick={() => setShowFilters(!showFilters)} className={pill(showFilters || activeFilters > 0)}>
           Filters{activeFilters ? ` (${activeFilters})` : ""}
         </button>
@@ -853,6 +883,9 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {showDeleted && <RecentlyDeleted lists={false} bulk={bulk} nameOf={(id) => nameOf(lookups.people, id)} reloadKey={deletedKey} />}
+      <UndoBar bulk={bulk} />
+
       {loading ? (
         <p className="text-slate-400">Loading...</p>
       ) : filtered.length === 0 ? (
@@ -868,7 +901,9 @@ export default function DashboardPage() {
               project={SIMPLE && t.project_id ? projectNames.get(t.project_id) || null : null}
               section={!SIMPLE ? sectionName(t) || null : null}
               assignee={nameOf(lookups.people, t.assigned_to)}
-              onOpen={setOpenId}
+              onOpen={bulk.selecting ? bulk.toggle : setOpenId}
+              picking={bulk.selecting}
+              picked={bulk.picked.has(t.id)}
             />
           ))}
         </div>

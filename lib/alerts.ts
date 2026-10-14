@@ -199,7 +199,7 @@ export async function sendAlert(supabase: any, userIds: string[], a: Alert, opts
       jobs.push(
         pushToUsers(pushIds, {
           title: a.title,
-          body: a.message,
+          body: a.message.length > 140 ? `${a.message.slice(0, 139)}…` : a.message,
           // Same place the bell and the email open (to-do lists included).
           url: a.task_id ? `/dashboard?task=${a.task_id}` : "/dashboard",
           tag: a.task_id ? `task-${a.task_id}` : `bb-${a.type}`,

@@ -344,7 +344,7 @@ export function TaskWorkflow({
                 const row = accept.acceptances.find((a) => a.user_id === uid);
                 const state = !row || row.stale ? "waiting" : row.decision;
                 return (
-                  <div key={uid} className="flex items-center justify-between gap-2 text-sm">
+                  <div key={uid} className="flex items-center justify-start gap-2 text-sm">
                     <span className="text-slate-300">{nameOf(people, uid)}</span>
                     <span
                       className={
@@ -442,7 +442,7 @@ export function TaskWorkflow({
               key={a.id}
               className={`bg-slate-900 rounded p-3 mb-2 text-sm ${a.voided_at ? "opacity-60" : ""}`}
             >
-              <div className="flex justify-between gap-2">
+              <div className="flex justify-start gap-2">
                 <span className={a.kind === "reward" ? "text-green-400" : "text-red-400"}>
                   {a.kind === "reward" ? "Reward" : "Penalty"} {rupees(a.amount)}
                   {a.voided_at && <span className="text-slate-400"> (cancelled)</span>}

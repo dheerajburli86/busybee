@@ -106,7 +106,7 @@ export default function SettingsPage() {
       </p>
 
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start">
           <span>{error}</span>
           <button onClick={() => setError("")}>dismiss</button>
         </div>
@@ -122,7 +122,7 @@ export default function SettingsPage() {
 
       {telegramConfigured && (
         <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-4">
-          <label className="flex items-center justify-between gap-3">
+          <label className="flex items-center justify-start gap-3">
             <span>
               <span className="font-semibold">Telegram alerts</span>
               <span className="block text-xs text-slate-400 mt-0.5">
@@ -141,7 +141,7 @@ export default function SettingsPage() {
       )}
 
       <div className="bg-slate-800 border border-slate-700 rounded p-4 mb-4">
-        <label className="flex items-center justify-between gap-3">
+        <label className="flex items-center justify-start gap-3">
           <span>
             <span className="font-semibold">Email notifications</span>
             <span className="block text-xs text-slate-400 mt-0.5">

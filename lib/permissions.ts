@@ -177,12 +177,14 @@ export function isPrivateToSomeoneElse(task: any, userId: string): boolean {
   return !!task.personal && task.created_by !== userId && task.assigned_to !== userId;
 }
 
-export async function taskAccess(supabase: any, userId: string, taskId: string): Promise<TaskAccess | null> {
+export async function taskAccess(supabase: any, userId: string, taskId: string, opts: { includeDeleted?: boolean } = {}): Promise<TaskAccess | null> {
   const [{ data: task }, memberships] = await Promise.all([
     supabase.from("tasks").select("*").eq("id", taskId).maybeSingle(),
     getMemberships(supabase, userId),
   ]);
   if (!task) return null;
+  // Deleted (waiting 30 days before it's removed for good): gone, except to Undo.
+  if (task.deleted_at && !opts.includeDeleted) return null;
   if (isPrivateToSomeoneElse(task, userId)) return null;
   if (!memberships.some((m) => m.desk_id === task.desk_id)) return null;
 

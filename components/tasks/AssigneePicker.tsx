@@ -9,7 +9,9 @@
 // attach to one person and one piece of work, never to a crowd.
 
 import { useMemo, useState } from "react";
-import { Search, X } from "lucide-react";
+import { Search, UserPlus, X } from "lucide-react";
+import { sendJSON } from "@/lib/api";
+import { cached, remember } from "@/lib/apiCache";
 import { Person } from "./types";
 
 export function AssigneePicker({
@@ -19,6 +21,8 @@ export function AssigneePicker({
   onChange,
   disabled,
   loading,
+  onPeopleChange,
+  myRole,
 }: {
   people: Person[];
   me: string | null;
@@ -27,8 +31,44 @@ export function AssigneePicker({
   disabled?: boolean;
   /** True until the names have arrived, so an empty list doesn't read as "nobody". */
   loading?: boolean;
+  /** Given: the "Add person" button shows, and a new person is passed back here. */
+  onPeopleChange?: (people: Person[]) => void;
+  /** The adder's desk role (only an admin can add an admin). */
+  myRole?: string;
 }) {
   const [q, setQ] = useState("");
+  // ---- Add person -----------------------------------------------------------
+  const blank = { name: "", email: "", telegram: "", role: "member" };
+  const [adding, setAdding] = useState(false);
+  const [np, setNp] = useState(blank);
+  const [addErr, setAddErr] = useState("");
+  const [addNote, setAddNote] = useState<{ text: string; link?: string | null; tg?: string | null } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const addPerson = async () => {
+    if (saving) return;
+    setAddErr("");
+    setSaving(true);
+    try {
+      const r = await sendJSON("/api/team/add", "POST", np);
+      const person = { id: r.person.id, name: r.person.name, email: r.person.email, role: r.person.role } as Person;
+      const list = people.some((x) => x.id === person.id) ? people : [...people, person];
+      onPeopleChange?.(list);
+      const known = cached<any>("/api/team/members");
+      if (known) remember("/api/team/members", { ...known, members: list });
+      if (!selected.includes(person.id)) onChange([...selected, person.id]);
+      setAddNote({
+        text: `${person.name} added${r.emailed ? " - a welcome email with a sign-in link is on its way" : ""}.`,
+        link: r.sign_in_link,
+        tg: r.telegram_link,
+      });
+      setNp(blank);
+      setAdding(false);
+    } catch (e: any) {
+      setAddErr(e.message || "Could not add them");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const sorted = useMemo(
     () =>
@@ -54,7 +94,7 @@ export function AssigneePicker({
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+      <div className="flex flex-wrap items-baseline justify-start gap-2">
         <p className="text-sm text-slate-300">
           {stillLoading ? (
             "Loading people..."
@@ -69,6 +109,16 @@ export function AssigneePicker({
           )}
         </p>
         <div className="flex gap-3 text-xs">
+          {onPeopleChange && (
+            <button
+              type="button"
+              onClick={() => { setAdding((a) => !a); setAddNote(null); }}
+              className="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 font-semibold"
+              disabled={disabled}
+            >
+              <UserPlus size={14} aria-hidden="true" /> Add person
+            </button>
+          )}
           {selected.length > 0 && (
             <button type="button" onClick={() => onChange([])} className="text-slate-400 hover:text-white" disabled={disabled}>
               Clear
@@ -76,6 +126,46 @@ export function AssigneePicker({
           )}
         </div>
       </div>
+
+      {adding && (
+        <div className="bg-slate-900 border border-slate-600 rounded p-3 space-y-2" role="group" aria-label="Add person">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input value={np.name} onChange={(e) => setNp({ ...np, name: e.target.value })} placeholder="1. Name" aria-label="Name" className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm" />
+            <input value={np.email} onChange={(e) => setNp({ ...np, email: e.target.value })} placeholder="2. Email" type="email" aria-label="Email" className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm" />
+            <input value={np.telegram} onChange={(e) => setNp({ ...np, telegram: e.target.value })} placeholder="3. Telegram @username or id (optional)" aria-label="Telegram" className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm" />
+            <select value={np.role} onChange={(e) => setNp({ ...np, role: e.target.value })} aria-label="Designation" className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm">
+              <option value="member">4. Member</option>
+              {myRole === "admin" && <option value="admin">4. Admin</option>}
+            </select>
+          </div>
+          {addErr && <p className="text-sm text-red-400">{addErr}</p>}
+          <div className="flex gap-2">
+            <button type="button" onClick={addPerson} disabled={saving || !np.name.trim() || !np.email.trim()} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded text-sm font-semibold">
+              {saving ? "Adding..." : "Add"}
+            </button>
+            <button type="button" onClick={() => setAdding(false)} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {addNote && (
+        <div className="text-sm bg-green-950 border border-green-800 text-green-200 rounded px-3 py-2 space-y-1" role="status">
+          <p>{addNote.text}</p>
+          {addNote.link && (
+            <p>
+              Send them this sign-in link:{" "}
+              <button type="button" className="underline" onClick={() => navigator.clipboard?.writeText(addNote.link!)}>copy link</button>
+            </p>
+          )}
+          {addNote.tg && (
+            <p>
+              Telegram alerts:{" "}
+              <button type="button" className="underline" onClick={() => navigator.clipboard?.writeText(addNote.tg!)}>copy Telegram link</button>
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Search: type part of a name or email; Enter picks the top match. */}
       <div className="relative">

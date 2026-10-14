@@ -6,6 +6,8 @@
 // No numbers: colours and plain words only (rules in lib/heatmap.ts).
 
 import Link from "next/link";
+import { useState } from "react";
+import { scoreTask } from "@/lib/heatmap";
 import { BANDS, NO_BAND, type HeatTask, type TaskHeat } from "@/lib/heatmap";
 import { formatDue } from "@/components/tasks/types";
 import { ago, type PersonResult } from "./useHeatmap";
@@ -71,7 +73,7 @@ export function PersonTile({
         {heat?.nextDue && <p className="text-xs mt-0.5 opacity-90">Next deadline {formatDue(heat.nextDue)}</p>}
         {heat?.lastProgress && <p className="text-xs mt-0.5 opacity-90">Last progress {ago(heat.lastProgress, now)}</p>}
       </button>
-      {children && <div className="bg-slate-900 px-3 py-2 flex flex-wrap items-center justify-between gap-2">{children}</div>}
+      {children && <div className="bg-slate-900 px-3 py-2 flex flex-wrap items-center justify-start gap-2">{children}</div>}
     </div>
   );
 }
@@ -154,6 +156,9 @@ export function PersonTasks({
   now,
   scope,
   onBack,
+  personId,
+  all,
+  nameOf,
 }: {
   name: string;
   me: boolean;
@@ -161,7 +166,12 @@ export function PersonTasks({
   now: number;
   scope: "all" | "visible";
   onBack: () => void;
+  personId: string;
+  /** Every task the viewer can see (for "who gave what"). */
+  all: HeatTask[];
+  nameOf: (id: string | null | undefined) => string;
 }) {
+  const [mode, setMode] = useState<"status" | "who">("status");
   const tasks = heat?.tasks || [];
   const per = heat?.perTask || new Map<string, TaskHeat>();
   const h = (t: HeatTask) => per.get(t.id)!;
@@ -195,6 +205,30 @@ export function PersonTasks({
 
       {scope === "visible" && <p className="text-xs text-slate-400 mb-3">Only the tasks you can see.</p>}
 
+      {/* Toggle: work status, or who gave what to whom. */}
+      <div className="flex gap-1 mb-3" role="tablist" aria-label="View">
+        {(
+          [
+            ["status", "Pending · Completed · Missed"],
+            ["who", "Who gave what"],
+          ] as const
+        ).map(([k, label]) => (
+          <button
+            key={k}
+            role="tab"
+            aria-selected={mode === k}
+            onClick={() => setMode(k)}
+            className={`px-3 py-2 rounded text-sm ${mode === k ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "who" ? (
+        <WhoGaveWhat personId={personId} name={name} all={all} per={per} now={now} nameOf={nameOf} />
+      ) : (
+      <>
       <div className="grid gap-3 md:grid-cols-3 mb-6">
         <SummaryBox title="Pending" accent="#facc15" count={pending.length} empty="Nothing pending.">
           {pending.map((t, i) => (
@@ -215,6 +249,8 @@ export function PersonTasks({
       <p className="text-xs text-slate-400 -mt-4 mb-6">
         Completed covers the last 30 days{late ? `; ${late} of them finished after the deadline` : ""}. Tasks marked stale have been overdue for over 30 days - close them or give them a new date. Tap a task to open it.
       </p>
+      </>
+      )}
 
       <HowItWorks />
     </div>
@@ -253,5 +289,78 @@ export function HowItWorks() {
         </li>
       </ol>
     </details>
+  );
+}
+
+/** Assignor -> assignee tracking for one person: what they were given (by whom) and what they gave (to whom), with deadlines. */
+function WhoGaveWhat({
+  personId,
+  name,
+  all,
+  per,
+  now,
+  nameOf,
+}: {
+  personId: string;
+  name: string;
+  all: HeatTask[];
+  per: Map<string, TaskHeat>;
+  now: number;
+  nameOf: (id: string | null | undefined) => string;
+}) {
+  const heatOf = (t: HeatTask) => per.get(t.id) || scoreTask(t, now);
+  const due = (t: HeatTask) => (t.due ? Date.parse(t.due) : Infinity);
+  const order = (a: HeatTask, b: HeatTask) => Number(!heatOf(a).open) - Number(!heatOf(b).open) || due(a) - due(b);
+  const given = all.filter((t) => t.assigned_to === personId).sort(order);
+  const gave = all.filter((t) => t.created_by === personId && t.assigned_to !== personId).sort(order);
+  const first = name.split(" ")[0];
+  const Table = ({ rows, other, otherLabel }: { rows: HeatTask[]; other: (t: HeatTask) => string; otherLabel: string }) =>
+    rows.length === 0 ? (
+      <p className="text-sm text-slate-400 mb-6">Nothing here.</p>
+    ) : (
+      <div className="overflow-x-auto mb-6 border border-slate-700 rounded-lg">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900 text-slate-400 text-xs uppercase tracking-wide">
+            <tr>
+              <th className="text-left px-3 py-2 w-8">#</th>
+              <th className="text-left px-3 py-2">Task</th>
+              <th className="text-left px-3 py-2">{otherLabel}</th>
+              <th className="text-left px-3 py-2">Deadline</th>
+              <th className="text-left px-3 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((t, i) => {
+              const h = heatOf(t);
+              const c = coloursOf(h.band);
+              return (
+                <tr key={t.id} className="border-t border-slate-700 hover:bg-slate-800">
+                  <td className="px-3 py-2 text-slate-400 tabular-nums">{i + 1}</td>
+                  <td className="px-3 py-2 font-semibold">
+                    <Link href={`/dashboard?task=${t.id}`} className="hover:underline break-words">{t.title}</Link>
+                  </td>
+                  <td className="px-3 py-2">{other(t)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{t.due ? formatDue(t.due) : "No deadline"}</td>
+                  <td className="px-3 py-2">
+                    <span className="text-xs font-bold px-2 py-1 rounded whitespace-nowrap" style={c}>{h.label}</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  return (
+    <>
+      <h2 className="text-lg font-semibold mb-2">
+        Given to {first} <span className="text-slate-400 font-normal">({given.length})</span>
+      </h2>
+      <Table rows={given} other={(t) => nameOf(t.created_by)} otherLabel="Given by" />
+      <h2 className="text-lg font-semibold mb-2">
+        Given by {first} <span className="text-slate-400 font-normal">({gave.length})</span>
+      </h2>
+      <Table rows={gave} other={(t) => nameOf(t.assigned_to)} otherLabel="Given to" />
+    </>
   );
 }

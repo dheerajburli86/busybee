@@ -154,7 +154,7 @@ export function PushSettings() {
       )}
 
       {state === "off" && (
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-start gap-3">
           <p className="text-sm text-slate-300">Off on this {what === "This device" ? "device" : what}.</p>
           <button onClick={turnOn} disabled={!!busy || !ready} className={`${btn} bg-amber-600 hover:bg-amber-500 text-white`}>
             {busy === "on" ? "Turning on..." : "Turn on"}
@@ -172,7 +172,7 @@ export function PushSettings() {
       )}
 
       {state === "on" && (
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-start gap-3">
           <p className="text-sm text-green-300 font-medium">✓ On for this {what === "This device" ? "device" : what}</p>
           <span className="flex gap-2">
             <button onClick={test} disabled={!!busy} className={`${btn} bg-slate-700 hover:bg-slate-600 text-white`}>

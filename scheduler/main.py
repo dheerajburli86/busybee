@@ -885,30 +885,27 @@ def task_card(task_id):
 
 
 def _card_rows(card):
+    """A few short rows - readers are busy."""
     finished = card.get("status") in FINISHED
+    giver = person_name(card.get("created_by")) or "Someone"
+    doer = person_name(card.get("assigned_to")) or "nobody yet"
     rows = [
-        ("To-do list" if card.get("is_list") else "Task", card.get("title") or ""),
-        ("What it's about", (card.get("description") or "").strip() or "No description was given."),
-        ("Assigned to", person_name(card.get("assigned_to")) or "Nobody yet"),
-        ("Given by", (person_name(card.get("created_by")) or "Someone")
-         + (" (set this task for themselves)" if card.get("created_by") and card.get("created_by") == card.get("assigned_to") else "")),
+        ("List" if card.get("is_list") else "Task", card.get("title") or ""),
+        ("Due", when_text(parse(card.get("due_date")), finished)),
+        ("Who", giver if card.get("created_by") and card.get("created_by") == card.get("assigned_to") else f"{giver} → {doer}"),
     ]
-    proj = project_name(card.get("project_id"))
-    if proj:
-        rows.append(("Project", proj))
-    if card.get("priority"):
+    if card.get("priority") in ("high", "super_high"):
         rows.append(("Priority", PRIORITY_WORDS.get(card["priority"], card["priority"])))
-    rows.append(("Deadline", when_text(parse(card.get("due_date")), finished)))
-    stand = STATUS_WORDS.get(card.get("status"), card.get("status") or "")
-    if card.get("review_status") == "sent_back" and not finished:
-        stand += " (sent back for changes)"
-    rows.append(("Where it stands", stand))
     items = card.get("items") or []
     if items:
-        done = sum(1 for i in items if i.get("done"))
-        rows.append(("Progress", f"{done} of {len(items)} items done"))
-    elif card.get("progress_percent") is not None:
-        rows.append(("Progress", f"{card['progress_percent']}%"))
+        rows.append(("Items", f"{sum(1 for i in items if i.get('done'))}/{len(items)} done"))
+    if card.get("status") != "pending":
+        stand = STATUS_WORDS.get(card.get("status"), card.get("status") or "")
+        if card.get("review_status") == "sent_back" and not finished:
+            stand += " (sent back)"
+        rows.append(("Status", stand))
+    if (card.get("description") or "").strip():
+        rows.append(("Note", _clip(card["description"], 140)))
     return rows
 
 
@@ -927,7 +924,11 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
     """Returns (text, html). sections: list of (heading, [lines], numbered)."""
     green = "#2f8f3a"
     rows = _card_rows(card) if card else []
-    items = (card or {}).get("items") or []
+    items = []  # the app has the full list; emails stay short
+    greeting = None
+    paragraphs = [_clip(p, 200) for p in paragraphs]
+    MAX_LINES = 8
+    sections = [(hd, (ls[:MAX_LINES] + [f"+{len(ls) - MAX_LINES} more in BusyBee"]) if len(ls) > MAX_LINES else ls, nb) for hd, ls, nb in sections]
 
     def item_line(i):
         d = parse(i.get("due_date"))
@@ -940,7 +941,7 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
     for p in paragraphs:
         t += ["", p]
     if card:
-        t += ["", "ABOUT THIS TASK"] + [f"{k}: {v}" for k, v in rows]
+        t += [""] + [f"{k}: {v}" for k, v in rows]
         if items:
             t += ["", "Items:"] + [f"  {n}. {item_line(i)}" for n, i in enumerate(items, 1)]
     for heading, lines, numbered in sections:
@@ -948,9 +949,8 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
         t += [f"  {n}. {l}" if numbered else f"  - {l}" for n, l in enumerate(lines, 1)]
     if cta:
         t += ["", f"{cta[1]}: {cta[0]}"]
-    t += ["", "--", why or "You're getting this because you use BusyBee."]
     if settings and APP_URL:
-        t.append(f"Choose which emails you get: {APP_URL}/settings")
+        t += ["", f"-- Email settings: {APP_URL}/settings"]
     text = "\n".join(t)
 
     e = _html
@@ -967,14 +967,12 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
         h.append(f'<p style="margin:0 0 12px;font-size:15px;line-height:1.5">{e(p)}</p>')
     if card:
         h.append('<div style="margin:16px 0;border:1px solid #dfe5df;border-radius:6px">')
-        h.append(f'<div style="background:#eef5ee;padding:8px 14px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:{green}">ABOUT THIS TASK</div>')
         h.append('<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px">')
         for k, v in rows:
             # Label above value: reads well on a phone.
             h.append(
-                f'<tr><td style="padding:8px 14px;border-top:1px solid #eef1ee">'
-                f'<div style="font-size:12px;color:#5b6b5e;margin-bottom:2px">{e(k)}</div>'
-                f'<div style="font-size:15px;line-height:1.45">{e(v)}</div></td></tr>'
+                f'<tr><td style="padding:6px 12px;border-top:1px solid #eef1ee;font-size:12px;color:#5b6b5e;width:64px;vertical-align:top">{e(k)}</td>'
+                f'<td style="padding:6px 12px 6px 0;border-top:1px solid #eef1ee;font-size:14px;line-height:1.4">{e(v)}</td></tr>'
             )
         h.append("</table>")
         if items:
@@ -998,10 +996,10 @@ def render_email(greeting=None, headline="", paragraphs=(), card=None, sections=
             f'<p style="margin:20px 0 4px"><a href="{e(cta[0])}" style="background:{green};color:#ffffff;text-decoration:none;'
             f'padding:10px 18px;border-radius:6px;font-size:14px;font-weight:bold;display:inline-block">{e(cta[1])}</a></p>'
         )
-    foot = e(why or "You're getting this because you use BusyBee.")
+    foot = "BusyBee"
     if settings and APP_URL:
-        foot += f' <a href="{e(APP_URL)}/settings" style="color:#7a887c">Choose which emails you get</a>.'
-    h.append(f'</div><div style="border-top:1px solid #dfe5df;padding:12px 20px;font-size:12px;color:#7a887c;line-height:1.5">{foot}</div></div></div>')
+        foot += f' · <a href="{e(APP_URL)}/settings" style="color:#7a887c">Email settings</a>'
+    h.append(f'</div><div style="border-top:1px solid #dfe5df;padding:8px 20px;font-size:11px;color:#7a887c">{foot}</div></div></div>')
     return text, "".join(h)
 
 
@@ -1262,9 +1260,7 @@ def deadline_reminders() -> None:
                            subject=f"Overdue: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})",
                            overseer=True)
                 for r in recipients:
-                    msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} was due {when_text(due, True)} and isn't finished yet."
-                    if r == task.get("assigned_to"):
-                        msg += " Finish it, or open the task and ask for more time."
+                    msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} · was due {when_text(due, True)}"
                     notify(r, task["id"], "overdue", "Overdue", msg,
                            subject=f"Overdue: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
                 sent += 1
@@ -1285,13 +1281,12 @@ def deadline_reminders() -> None:
                 continue
             title = f"Due in {threshold} hours" if hours_left > threshold - 0.5 else f"Due in {hours_text(hours_left)}"
             for r in recipients:
-                msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} is due {when_text(due)}."
+                msg = f"{whose(task, r)[0].upper()}{whose(task, r)[1:]} · due {when_text(due)}"
                 notify(r, task["id"], marker, title, msg,
                        subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
             who = person_name(task.get("assigned_to")) or "Nobody"
             cc_overseers(task, desks, recipients, marker, title,
-                         f'{who}\'s task "{task["title"]}", given by {person_name(task.get("created_by")) or "someone"}, '
-                         f"is due {when_text(due)}. Right now it is: {STATUS_WORDS.get(task.get('status'), 'open').lower()}.",
+                         f'{task["title"]} · {person_name(task.get("created_by")) or "someone"} → {who} · due {when_text(due)}',
                          f"{title}: {task['title']} ({who})")
             sent += 1
         except Exception as exc:
@@ -1363,20 +1358,18 @@ def daily_countdown() -> None:
                 lead = whose(task, r)
                 lead = lead[0].upper() + lead[1:]
                 if body is None:
-                    msg = f"{lead} was due {when_text(due, True)} and is still open."
-                    msg += (" Finish it, or open the task and ask for more time." if r == task.get("assigned_to")
-                            else " You're copied in because you gave this task.")
+                    msg = f"{lead} · was due {when_text(due, True)}"
                 else:
-                    msg = f"{lead} is due {when_text(due)}. This is the daily reminder until it's done."
+                    msg = f"{lead} · due {when_text(due)}"
                 notify(r, task["id"], marker, title, msg,
                        subject=f"{title}: {task['title']} ({person_name(task.get('assigned_to')) or 'unassigned'})")
             who = person_name(task.get("assigned_to")) or "Nobody"
             giver = person_name(task.get("created_by")) or "someone"
             cc_overseers(
                 task, desks, recipients, marker, title,
-                (f'{who}\'s task "{task["title"]}", given by {giver}, was due {when_text(due, True)} and is still not finished.'
+                (f'{task["title"]} · {giver} → {who} · was due {when_text(due, True)}'
                  if body is None else
-                 f'{who}\'s task "{task["title"]}", given by {giver}, is due {when_text(due)}. This is the daily reminder until it is done.'),
+                 f'{task["title"]} · {giver} → {who} · due {when_text(due)}'),
                 f"{title}: {task['title']} ({who})",
             )
             sent += 1

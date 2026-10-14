@@ -109,7 +109,7 @@ const esc = (s: unknown) =>
 
 export type Section = { heading: string; lines: string[]; numbered?: boolean };
 
-export function renderEmail(opts: {
+export function renderEmail(input: {
   greeting?: string | null;
   headline: string;
   /** A small line under the headline, e.g. who did it and when. */
@@ -121,33 +121,27 @@ export function renderEmail(opts: {
   why?: string;
   settingsUrl?: string | null;
 }): { text: string; html: string } {
+  let opts = input;
   const { card } = opts;
   const finished = !!card && ["done", "closed"].includes(card.status);
 
-  // ---- the task card, as label/value rows ----
+  // ---- the task card: a few short rows (busy readers) ----
+  const clip = (x: string, n: number) => (x.length > n ? `${x.slice(0, n - 1).trimEnd()}…` : x);
   const rows: [string, string][] = [];
   if (card) {
-    rows.push([card.is_list ? "To-do list" : "Task", card.title]);
-    rows.push(["What it's about", card.description?.trim() || "No description was given."]);
-    rows.push(["Assigned to", card.assignee || "Nobody yet"]);
-    rows.push([
-      "Given by",
-      card.given_by_id && card.given_by_id === card.assignee_id
-        ? `${card.given_by || "Someone"} (set this task for themselves)`
-        : card.given_by || "Someone",
-    ]);
-    if (card.project) rows.push(["Project", card.project]);
-    if (card.priority) rows.push(["Priority", PRIORITY[card.priority] || card.priority]);
-    rows.push(["Deadline", dueText(card.due, finished)]);
-    rows.push(["Where it stands", `${STATUS[card.status] || card.status}${card.review_status === "sent_back" && !finished ? " (sent back for changes)" : ""}`]);
-    if (card.items.length) {
-      const done = card.items.filter((i) => i.done).length;
-      rows.push(["Progress", `${done} of ${card.items.length} items done (${card.progress ?? Math.round((done / card.items.length) * 100)}%)`]);
-    } else if (card.progress != null) {
-      rows.push(["Progress", `${card.progress}%`]);
-    }
+    rows.push([card.is_list ? "List" : "Task", card.title]);
+    rows.push(["Due", dueText(card.due, finished)]);
+    const by = card.given_by || "Someone";
+    rows.push(["Who", card.given_by_id && card.given_by_id === card.assignee_id ? by : `${by} → ${card.assignee || "nobody yet"}`]);
+    if (card.priority === "high" || card.priority === "super_high") rows.push(["Priority", PRIORITY[card.priority]]);
+    if (card.items.length) rows.push(["Items", `${card.items.filter((i) => i.done).length}/${card.items.length} done`]);
+    if (card.status !== "pending") rows.push(["Status", `${STATUS[card.status] || card.status}${card.review_status === "sent_back" && !finished ? " (sent back)" : ""}`]);
+    if (card.description?.trim()) rows.push(["Note", clip(card.description.trim().replace(/\s+/g, " "), 140)]);
   }
-  const itemLines = card?.items.map((i, n) => `${n + 1}. ${i.done ? "[done] " : ""}${i.title}${i.due ? ` - by ${formatForPeople(i.due)}` : ""}`) || [];
+  // Long lists are cut short: the app has the rest.
+  const MAX_LINES = 8;
+  const short = (lines: string[]) => (lines.length > MAX_LINES ? [...lines.slice(0, MAX_LINES), `+${lines.length - MAX_LINES} more in BusyBee`] : lines);
+  opts = { ...opts, greeting: null, paragraphs: (opts.paragraphs || []).map((x) => clip(x, 200)), sections: (opts.sections || []).map((x) => ({ ...x, lines: short(x.lines) })) };
 
   // ---- plain text ----
   const t: string[] = [];
@@ -156,20 +150,15 @@ export function renderEmail(opts: {
   if (opts.meta) t.push(opts.meta);
   (opts.paragraphs || []).forEach((p) => t.push("", p));
   if (card) {
-    t.push("", "ABOUT THIS TASK");
+    t.push("");
     rows.forEach(([k, v]) => t.push(`${k}: ${v}`));
-    if (itemLines.length) {
-      t.push("", "Items:");
-      itemLines.forEach((l) => t.push(`  ${l}`));
-    }
   }
   (opts.sections || []).forEach((s) => {
     t.push("", s.heading.toUpperCase());
     s.lines.forEach((l, i) => t.push(s.numbered === false ? `  ${l}` : `  ${i + 1}. ${l}`));
   });
   if (opts.cta) t.push("", `${opts.cta.label}: ${opts.cta.url}`);
-  t.push("", "--", opts.why || "You're getting this because you use BusyBee.");
-  if (opts.settingsUrl) t.push(`Choose which emails you get: ${opts.settingsUrl}`);
+  if (opts.settingsUrl) t.push("", `-- Email settings: ${opts.settingsUrl}`);
   const text = t.join("\n");
 
   // ---- HTML ----
@@ -188,25 +177,15 @@ export function renderEmail(opts: {
   if (card) {
     h.push(
       `<div style="margin:16px 0;border:1px solid #dfe5df;border-radius:6px">`,
-      `<div style="background:#eef5ee;padding:8px 14px;font-size:12px;font-weight:bold;letter-spacing:.06em;color:${green}">ABOUT THIS TASK</div>`,
       `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px">`
     );
     rows.forEach(([k, v]) =>
       h.push(
         // Label above value: reads well on a phone, where two columns squeeze the text.
-        `<tr><td style="padding:8px 14px;border-top:1px solid #eef1ee"><div style="font-size:12px;color:#5b6b5e;margin-bottom:2px">${esc(k)}</div><div style="font-size:15px;line-height:1.45">${esc(v)}</div></td></tr>`
+        `<tr><td style="padding:6px 12px;border-top:1px solid #eef1ee;font-size:12px;color:#5b6b5e;width:64px;vertical-align:top">${esc(k)}</td><td style="padding:6px 12px 6px 0;border-top:1px solid #eef1ee;font-size:14px;line-height:1.4">${esc(v)}</td></tr>`
       )
     );
     h.push(`</table>`);
-    if (card.items.length) {
-      h.push(`<div style="padding:4px 14px 12px"><div style="font-size:13px;color:#5b6b5e;margin:6px 0">Items</div><ol style="margin:0;padding-left:22px;font-size:14px;line-height:1.6">`);
-      card.items.forEach((i) =>
-        h.push(
-          `<li style="${i.done ? "color:#8a978c;text-decoration:line-through" : ""}">${esc(i.title)}${i.due ? ` <span style="color:#8a978c">- by ${esc(formatForPeople(i.due))}</span>` : ""}</li>`
-        )
-      );
-      h.push(`</ol></div>`);
-    }
     h.push(`</div>`);
   }
   (opts.sections || []).forEach((s) => {
@@ -222,8 +201,8 @@ export function renderEmail(opts: {
     );
   h.push(
     `</div>`,
-    `<div style="border-top:1px solid #dfe5df;padding:12px 20px;font-size:12px;color:#7a887c;line-height:1.5">${esc(opts.why || "You're getting this because you use BusyBee.")}${
-      opts.settingsUrl ? ` <a href="${esc(opts.settingsUrl)}" style="color:#7a887c">Choose which emails you get</a>.` : ""
+    `<div style="border-top:1px solid #dfe5df;padding:8px 20px;font-size:11px;color:#7a887c">BusyBee${
+      opts.settingsUrl ? ` · <a href="${esc(opts.settingsUrl)}" style="color:#7a887c">Email settings</a>` : ""
     }</div>`,
     `</div></div>`
   );

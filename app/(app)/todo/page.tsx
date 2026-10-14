@@ -182,7 +182,7 @@ export default function TodoPage() {
   return (
     <div className="p-3 sm:p-6">
       <div className="max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6 gap-3">
+        <div className="flex justify-start items-center mb-6 gap-3">
           <h1 className="text-2xl sm:text-3xl font-bold">My To-Do List</h1>
           <button onClick={() => router.push("/dashboard")} className="text-sm text-slate-400 hover:text-white">
             Back to tasks
@@ -190,7 +190,7 @@ export default function TodoPage() {
         </div>
 
         {error && (
-          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-2">
+          <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start gap-2">
             <span>{error}</span>
             <button onClick={() => setError("")}>dismiss</button>
           </div>
@@ -246,7 +246,7 @@ export default function TodoPage() {
               >
                 <input type="checkbox" checked={false} onChange={() => toggleDone(t)} className="mt-1" aria-label={`Mark ${t.title} done`} />
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start justify-start gap-2">
                     <a href={`/dashboard?task=${t.id}`} className="text-slate-200 hover:text-blue-400 break-words">
                       {t.personal && "🔒 "}
                       {t.title}

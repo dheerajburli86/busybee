@@ -137,7 +137,7 @@ export default function SearchPage() {
         <div className={section}>
           <h2 className="text-sm font-semibold text-slate-400 mb-2">People</h2>
           {results.people.map((p) => (
-            <div key={p.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex justify-between gap-2">
+            <div key={p.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex justify-start gap-2">
               <div>
                 <p className="font-semibold">{p.name}</p>
                 <p className="text-xs text-slate-500">{p.email} · {ROLE_LABEL[p.role] || "Member"}</p>
@@ -153,7 +153,7 @@ export default function SearchPage() {
         <div className={section}>
           <h2 className="text-sm font-semibold text-slate-400 mb-2">Files</h2>
           {results.files.map((f) => (
-            <div key={f.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex flex-wrap justify-between gap-2">
+            <div key={f.id} className="bg-slate-800 border border-slate-700 rounded p-3 mb-2 flex flex-wrap justify-start gap-2">
               <a href={f.download_url} target="_blank" rel="noreferrer" className="text-blue-400 hover:underline">{f.file_name}</a>
               <a href={`/dashboard?task=${f.task_id}`} className="text-xs text-slate-400 hover:text-white">on {f.task_title}</a>
             </div>

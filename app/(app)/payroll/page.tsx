@@ -188,7 +188,7 @@ export default function PayrollPage() {
   return (
     <div className="p-3 sm:p-6">
       <div className="max-w-5xl mx-auto">
-        <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
+        <div className="flex flex-wrap justify-start items-center gap-3 mb-6">
           <h1 className="text-3xl font-bold">Payroll adjustments</h1>
           <button onClick={() => router.push("/dashboard")} className="text-sm text-slate-400 hover:text-white">
             Back to tasks
@@ -396,7 +396,7 @@ export default function PayrollPage() {
                   key={e.id}
                   className={`bg-slate-800 border border-slate-700 rounded p-3 text-sm ${e.voided_at ? "opacity-60" : ""}`}
                 >
-                  <div className="flex flex-wrap justify-between gap-2">
+                  <div className="flex flex-wrap justify-start gap-2">
                     <span className={e.kind === "reward" ? "text-green-400" : "text-red-400"}>
                       {e.kind === "reward" ? "Reward" : "Penalty"} {rupees(e.amount)} · {e.person}
                       {e.voided_at && <span className="text-slate-400"> (cancelled)</span>}

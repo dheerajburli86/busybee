@@ -11,6 +11,7 @@ import { cached, freshKeeper, keepSame, load as loadApi, remember, useBeforePain
 import { sendJSON } from "@/lib/api";
 import { isFinished, isOverdue, statusClass, statusLabel } from "@/lib/status";
 import { DeadlinePicker } from "@/components/tasks/DateInputs";
+import { BulkBar, PickBox, RecentlyDeleted, UndoBar, useBulkDelete } from "@/components/tasks/BulkDelete";
 import { ItemRows, blankItem, type ItemRow } from "@/components/tasks/ItemRows";
 import { AssigneePicker } from "@/components/tasks/AssigneePicker";
 import { Person, formatDue, fromLocalInput, nameOf } from "@/components/tasks/types";
@@ -116,6 +117,22 @@ export default function ListsPage() {
   }, [lists, items, loading]);
 
   const canGive = ["admin", "supervisor", "manager"].includes(role);
+
+  // Select several lists and delete them (Undo / Recently deleted for 30 days).
+  const [showDeleted, setShowDeleted] = useState(false);
+  const [deletedKey, setDeletedKey] = useState(0);
+  const bulk = useBulkDelete({
+    onRemoved: (ids) => {
+      const gone = new Set(ids);
+      setLists((prev) => prev.filter((l) => !gone.has(l.id)));
+      setDeletedKey((k) => k + 1);
+    },
+    onRestored: () => {
+      setDeletedKey((k) => k + 1);
+      load();
+    },
+    onError: (m) => setError(m),
+  });
   useEffect(() => {
     if (!loading && !canGive) setTab("mine");
   }, [loading, canGive]);
@@ -262,7 +279,7 @@ export default function ListsPage() {
       <p className="text-slate-400 text-sm mb-4">Many small things for one person, sent as one list. They tick items off as they go.</p>
 
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between gap-3" role="alert">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start gap-3" role="alert">
           <span>{error}</span>
           <button onClick={() => setError("")} className="text-red-400 shrink-0">dismiss</button>
         </div>
@@ -276,7 +293,7 @@ export default function ListsPage() {
       {canGive && (
         <div className="bg-slate-800 border border-slate-700 rounded p-3 sm:p-4 mb-6 space-y-3">
           <p className="text-sm font-semibold text-white">1. Who is this list for?</p>
-          <AssigneePicker people={people} me={me} selected={who} onChange={setWho} loading={loading} />
+          <AssigneePicker people={people} me={me} selected={who} onChange={setWho} loading={loading} onPeopleChange={setPeople} myRole={role} />
 
           <p className="text-sm font-semibold text-white pt-1">2. Name the list and write the items</p>
           <input
@@ -307,7 +324,7 @@ export default function ListsPage() {
             <button
               onClick={create}
               disabled={saving || !who.length || !name.trim() || !filled.length}
-              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded ml-auto font-semibold"
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded font-semibold"
             >
               {saving ? "Sending..." : `Send list (${filled.length} item${filled.length === 1 ? "" : "s"})`}
             </button>
@@ -333,6 +350,18 @@ export default function ListsPage() {
           ))}
         </div>
       )}
+      <div className="flex flex-wrap gap-2 mb-3">
+        <BulkBar bulk={bulk} allIds={shown.filter((l) => !l.id.startsWith("sending-")).map((l) => l.id)} noun="list" />
+        <button
+          onClick={() => setShowDeleted(!showDeleted)}
+          className={`px-3 py-2 rounded text-sm ${showDeleted ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}
+        >
+          🗑 Recently deleted
+        </button>
+      </div>
+      {showDeleted && <RecentlyDeleted lists bulk={bulk} nameOf={(id) => nameOf(people, id)} reloadKey={deletedKey} />}
+      <UndoBar bulk={bulk} />
+
 
       {loading ? (
         <p className="text-slate-400">Loading...</p>
@@ -348,8 +377,22 @@ export default function ListsPage() {
             const late = isOverdue(l as any);
             const sending = l.id.startsWith("sending-");
             return (
-              <div key={l.id} className={`bg-slate-800 border rounded p-4 ${late ? "border-red-800" : "border-slate-700"} ${sending ? "opacity-70" : ""}`}>
-                <div className="flex flex-wrap justify-between items-start gap-2">
+              <div
+                key={l.id}
+                // While selecting, a tap anywhere on the list selects it (and ticks nothing).
+                onClickCapture={
+                  bulk.selecting
+                    ? (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        bulk.toggle(l.id);
+                      }
+                    : undefined
+                }
+                className={`bg-slate-800 border rounded p-4 ${late ? "border-red-800" : "border-slate-700"} ${sending ? "opacity-70" : ""} ${bulk.selecting ? "cursor-pointer" : ""} ${bulk.picked.has(l.id) ? "ring-2 ring-blue-500" : ""}`}
+              >
+                <div className="flex flex-wrap justify-start items-start gap-2">
+                  {bulk.selecting && <PickBox on={bulk.picked.has(l.id)} />}
                   <div className="min-w-0">
                     <h3 className="font-bold text-lg break-words">{l.title}</h3>
                     <p className={`text-xs mt-0.5 ${late ? "text-red-400" : "text-slate-400"}`}>

@@ -115,7 +115,7 @@ export function TelegramConnect({ onChange }: { onChange?: (connected: boolean) 
 
   return (
     <div className="bg-slate-800 border border-slate-700 rounded p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-start gap-3">
         <span>
           <span className="font-semibold">Telegram</span>
           <span className="block text-xs text-slate-400 mt-0.5">

@@ -97,7 +97,7 @@ export function useHeatmap(peopleIds: string[]) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, key, tick]);
 
-  return { ready: !!data, scope: data?.scope || "visible", error, loadedAt, now: results.now, people: results.out, refresh };
+  return { all: data?.tasks || [], ready: !!data, scope: data?.scope || "visible", error, loadedAt, now: results.now, people: results.out, refresh };
 }
 
 /** "just now", "5 minutes ago", "3 hours ago", "2 days ago". */

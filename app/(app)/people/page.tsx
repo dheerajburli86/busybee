@@ -157,6 +157,9 @@ export default function PeoplePage() {
         heat={heat.people.get(opened.id)}
         now={heat.now}
         scope={heat.scope}
+        personId={opened.id}
+        all={heat.all}
+        nameOf={(id) => (id ? people.find((p) => p.id === id)?.name || "Someone" : "Nobody")}
         onBack={() => (window.history.length > 1 ? window.history.back() : openPerson(null))}
       />
     );
@@ -173,7 +176,7 @@ export default function PeoplePage() {
       </p>
 
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start">
           <span>{error}</span>
           <button onClick={() => setError("")}>dismiss</button>
         </div>
@@ -186,7 +189,7 @@ export default function PeoplePage() {
             <p className="text-xs text-slate-400 mb-3">These people signed up but aren&apos;t on the desk yet, so they can&apos;t see anything. Let in the ones you know.</p>
             <div className="space-y-2">
               {pending.map((p) => (
-                <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 rounded px-3 py-2">
+                <div key={p.id} className="flex flex-wrap items-center justify-start gap-2 bg-slate-900 rounded px-3 py-2">
                   <div className="min-w-0">
                     <p className="text-sm truncate">{p.name}</p>
                     <p className="text-xs text-slate-500 truncate">{p.email}{p.created_at ? ` · signed up ${new Date(p.created_at).toLocaleDateString()}` : ""}</p>
@@ -203,7 +206,7 @@ export default function PeoplePage() {
       )}
 
       {/* People, coloured by the live heatmap, with their roles */}
-      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+      <div className="flex flex-wrap items-baseline justify-start gap-2 mb-2">
         <h2 className="text-lg font-semibold">People &amp; how their work is going</h2>
         <p className="text-xs text-slate-400">
           {heat.error ? <span className="text-red-400">{heat.error}</span> : heat.loadedAt ? "Live - colours update every minute" : "Loading the heatmap..."}
@@ -237,7 +240,7 @@ export default function PeoplePage() {
                 </span>
               )}
             </p>
-            <div className="flex items-center gap-2 ml-auto">
+            <div className="flex items-center gap-2">
               {isSuper && (
                 <button
                   onClick={() => toggleOversees(p)}
@@ -277,7 +280,7 @@ export default function PeoplePage() {
         <>
           <h2 className="text-lg font-semibold mb-2">System check</h2>
           <div className={card}>
-            <div className="flex flex-wrap justify-between items-center gap-2">
+            <div className="flex flex-wrap justify-start items-center gap-2">
               <p className="text-xs text-slate-400">Checks the database update is in place, email and Telegram are set up and the reminder scheduler is running.</p>
               <div className="flex gap-2">
                 <button onClick={reconnectBot} className="px-3 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm" title="Re-register the Telegram webhook (after changing the bot token or site address)">

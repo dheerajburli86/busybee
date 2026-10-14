@@ -119,27 +119,22 @@ function iconFor(type: string): string {
 
 /** Format one alert for Telegram (HTML parse mode). */
 export function formatAlert(n: { type: string; title: string; message: string }, card?: TaskCard | null): string {
-  const body = String(n.message || "").slice(0, 2000);
+  const raw = String(n.message || "");
+  const body = raw.length > 300 ? `${raw.slice(0, 299)}…` : raw;
   const text = `${iconFor(n.type)} <b>${escapeHtml(n.title)}</b>\n${escapeHtml(body)}${card ? taskDetails(card) : ""}`;
   return text.length > 4000 ? `${text.slice(0, 3990)}...` : text;
 }
 
 const PRIORITY_NAMES: Record<string, string> = { super_high: "Super high", high: "High", medium: "Medium", low: "Low" };
 
-/** Everything about a task, for a new-task message: what, when, who, the items. */
+/** A new task in three short lines: due, who, items/note. */
 function taskDetails(card: TaskCard): string {
-  const lines: string[] = ["", ""];
-  lines.push(`<b>${card.is_list ? "To-do list" : "Task"}:</b> ${escapeHtml(card.title)}`);
-  if (card.description?.trim()) lines.push(`<b>What it's about:</b> ${escapeHtml(card.description.trim().slice(0, 1200))}`);
-  lines.push(`<b>Deadline:</b> ${escapeHtml(dueText(card.due))}`);
-  const extra = [card.priority ? `Priority: ${PRIORITY_NAMES[card.priority] || card.priority}` : "", card.project ? `Project: ${card.project}` : ""].filter(Boolean);
-  if (extra.length) lines.push(escapeHtml(extra.join(" · ")));
-  if (card.given_by) lines.push(`<b>Given by:</b> ${escapeHtml(card.given_by)}`);
-  if (card.items.length) {
-    lines.push(`<b>${card.items.length} item${card.items.length === 1 ? "" : "s"}:</b>`);
-    card.items.slice(0, 30).forEach((i, k) => lines.push(`${k + 1}. ${escapeHtml(i.title)}${i.due ? ` - by ${escapeHtml(formatForPeople(i.due))}` : ""}`));
-    if (card.items.length > 30) lines.push(`...and ${card.items.length - 30} more in BusyBee`);
-  }
+  const lines: string[] = [""];
+  lines.push(`⏰ ${escapeHtml(dueText(card.due))}`);
+  if (card.given_by) lines.push(`👤 ${escapeHtml(card.given_by)}${card.priority === "high" || card.priority === "super_high" ? ` · ${PRIORITY_NAMES[card.priority]} priority` : ""}`);
+  if (card.items.length) lines.push(`☑ ${card.items.length} item${card.items.length === 1 ? "" : "s"}`);
+  const note = card.description?.trim().replace(/\s+/g, " ");
+  if (note) lines.push(`📝 ${escapeHtml(note.length > 120 ? `${note.slice(0, 119)}…` : note)}`);
   return lines.join("\n");
 }
 

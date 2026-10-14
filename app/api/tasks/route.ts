@@ -1,6 +1,7 @@
 // app/api/tasks/route.ts
 import { createServerSideClient } from "@/lib/supabase-server";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
+import { createAdminClient } from "@/lib/supabase-admin";
 import {
   deny,
   getMemberships,
@@ -160,6 +161,8 @@ export async function GET(request: NextRequest) {
     // ?archived=only -> archived tasks, ?archived=all -> both, default -> live only.
     // ?lists=1 -> only the to-do lists, each with its items (the To-Do page).
     const archived = request.nextUrl.searchParams.get("archived");
+    // ?deleted=1 -> "Recently deleted" (kept 30 days for Undo).
+    const deletedOnly = request.nextUrl.searchParams.get("deleted") === "1";
     const listsOnly = request.nextUrl.searchParams.get("lists") === "1";
 
     const memberships = await getMemberships(supabase, user.id);
@@ -169,7 +172,8 @@ export async function GET(request: NextRequest) {
     const query = (cols: string) => () => {
       let q = supabase.from("tasks").select(cols).in("desk_id", deskIds);
       if (listsOnly) q = q.eq("is_list", true);
-      if (archived === "only") q = q.not("archived_at", "is", null);
+      if (deletedOnly) q = q.not("deleted_at", "is", null);
+      else if (archived === "only") q = q.not("archived_at", "is", null);
       else if (archived !== "all") q = q.is("archived_at", null);
       return q.order("created_at", { ascending: false }).order("id");
     };
@@ -202,6 +206,9 @@ export async function GET(request: NextRequest) {
       // A database that can't join them: tasks first, then their items.
       tasks = await selectAll<any>(query("*"));
     }
+    // Deleted tasks only show in "Recently deleted" (archived ones in the archive).
+    if (!deletedOnly) tasks = tasks.filter((t: any) => !t.deleted_at);
+    else after(() => purgeOldDeleted(supabase).catch(() => null));
     const visible = filterVisible(tasks, user.id, memberships, sets);
     const shown = new Set(visible.map((t: any) => t.id));
 
@@ -396,18 +403,17 @@ export async function POST(request: NextRequest) {
     if (!task.assigned_to) (await projectMemberIds(supabase, task.project_id)).forEach((id) => recipients.add(id));
     recipients.delete(user.id);
     if (recipients.size) {
-      // Step 4 of the assignment flow: a task with a deadline asks to be accepted.
+      // Short: what, when, who else. (Accepting the deadline is in the app.)
       const deadline = task.due_date && !task.personal;
-      const due = deadline ? ` - due ${formatForPeople(task.due_date)}.` : "";
-      const also = mates.length ? ` Also given to ${listOf(mates)} - each of you has your own copy.` : "";
-      const ask = deadline ? " Open it to accept the deadline or ask for more time." : "";
+      const due = deadline ? ` · due ${formatForPeople(task.due_date)}` : "";
+      const also = mates.length ? ` · also ${listOf(mates)}` : "";
       await notifyMany(supabase, Array.from(recipients), {
         task_id: task.id,
         type: "assigned",
-        title: isList ? "New to-do list" : "New task assigned",
+        title: isList ? "New to-do list" : "New task",
         message: isList
-          ? `You were given a to-do list: ${task.title} (${subtaskCount} item${subtaskCount === 1 ? "" : "s"})${due}${also}${ask}`
-          : `You were assigned: ${task.title}${due}${also}${ask}`,
+          ? `${task.title} (${subtaskCount} item${subtaskCount === 1 ? "" : "s"})${due}${also}`
+          : `${task.title}${due}${also}`,
         email: { subject: `${isList ? "New to-do list" : "New task assigned"}: ${task.title}` },
       });
     }
@@ -756,6 +762,40 @@ export async function PUT(request: NextRequest) {
 
 // #1: the owner of a private to-do item can delete it. Shared work is archived
 // instead (never deleted) so its history and the reports keep it.
+/** Deleted tasks are kept this long (so Undo works), then removed for good. */
+const KEEP_DELETED_MS = 30 * 24 * 3600 * 1000;
+
+/** Remove a task and everything hanging off it, for good. */
+async function eraseTask(db: any, id: string) {
+  // Stored files first (the storage rule finds a file through its row).
+  const { data: files } = await db.from("attachments").select("storage_path").eq("task_id", id);
+  const paths = (files || []).map((f: any) => f.storage_path).filter(Boolean);
+  if (paths.length) await db.storage.from("task-files").remove(paths);
+  for (const table of ["attachments", "subtasks", "comments", "task_assignors", "extension_requests", "task_dependencies", "task_reminders"]) {
+    await db.from(table).delete().eq("task_id", id);
+  }
+  await db.from("task_dependencies").delete().eq("depends_on_task_id", id);
+  await db.from("notifications").delete().eq("task_id", id);
+  await db.from("activity_log").delete().eq("entity_type", "task").eq("entity_id", id);
+  const { error } = await db.from("tasks").delete().eq("id", id);
+  return !error;
+}
+
+/** Remove for good whatever was deleted more than 30 days ago (runs now and then). */
+async function purgeOldDeleted(supabase: any) {
+  const db = createAdminClient() || supabase;
+  const cutoff = new Date(Date.now() - KEEP_DELETED_MS).toISOString();
+  const { data, error } = await db.from("tasks").select("id").lt("deleted_at", cutoff).limit(200);
+  if (error || !data) return;
+  for (const t of data) await eraseTask(db, t.id).catch(() => false);
+}
+
+/**
+ * Delete one or more tasks: { id } or { ids: [...] }. They go to "Recently
+ * deleted" for 30 days (archived, so they leave every list and reminder at
+ * once); { restore: true } brings them back. Each task is checked on its own:
+ * private to-dos by their owner, other tasks by whoever can manage them.
+ */
 export async function DELETE(request: NextRequest) {
   try {
     const supabase = await createServerSideClient();
@@ -763,43 +803,69 @@ export async function DELETE(request: NextRequest) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const body = await request.json().catch(() => ({}));
-    const id = body?.id;
-    if (!id || typeof id !== "string") return NextResponse.json({ error: "Task ID is required" }, { status: 400 });
+    const ids: string[] = Array.from(
+      new Set((Array.isArray(body?.ids) ? body.ids : [body?.id]).filter((x: any) => typeof x === "string" && x))
+    ).slice(0, 500) as string[];
+    if (!ids.length) return NextResponse.json({ error: "Task ID is required" }, { status: 400 });
+    const restore = body?.restore === true;
 
-    const access = await taskAccess(supabase, user.id, id);
-    if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
-    const task = access.task;
-
-    // #1: personal to-do items can be deleted only by their owner.
-    // Project tasks can be deleted only by those who can manage them (assignor/supervisor).
-    if (task.personal) {
-      if (isPrivateToSomeoneElse(task, user.id)) {
-        return deny("Only your own private to-do items can be deleted.");
+    const done: string[] = [];
+    const failed: { id: string; error: string }[] = [];
+    const now = new Date().toISOString();
+    for (const id of ids) {
+      const access = await taskAccess(supabase, user.id, id, { includeDeleted: true });
+      if (!access) {
+        failed.push({ id, error: "Task not found" });
+        continue;
       }
-    } else {
-      if (!access.canManage) {
-        return deny("Only the assignor or a supervisor can delete this task.");
+      const task = access.task;
+      const allowed = task.personal ? !isPrivateToSomeoneElse(task, user.id) : access.canManage;
+      if (!allowed) {
+        failed.push({ id, error: task.personal ? "Only your own private to-do items can be deleted." : "Only the assignor or a supervisor can delete this task." });
+        continue;
       }
+      if (restore) {
+        if (!task.deleted_at) {
+          done.push(id);
+          continue;
+        }
+        // Archived only because it was deleted (same moment): un-archive too.
+        const wasLive = task.archived_at && Date.parse(task.archived_at) === Date.parse(task.deleted_at);
+        const { error } = await supabase
+          .from("tasks")
+          .update({ deleted_at: null, deleted_by: null, ...(wasLive ? { archived_at: null } : {}) })
+          .eq("id", id);
+        if (error) failed.push({ id, error: error.message });
+        else done.push(id);
+        continue;
+      }
+      const { error } = await supabase
+        .from("tasks")
+        .update({ deleted_at: now, deleted_by: user.id, archived_at: task.archived_at || now })
+        .eq("id", id);
+      if (error) {
+        // Database without the 30-day bin yet: say so rather than delete for good.
+        failed.push({
+          id,
+          error: /deleted_at|deleted_by|column/i.test(error.message || "")
+            ? "Run supabase/migrations/20261014_soft_delete.sql in Supabase first (it turns on Undo and Recently deleted)."
+            : error.message,
+        });
+        continue;
+      }
+      done.push(id);
+      await logActivity(supabase, {
+        entity_type: "task",
+        entity_id: id,
+        action: "deleted the task",
+        performed_by: user.id,
+        desk_id: task.desk_id,
+        changes: { title: task.title },
+      }).catch(() => null);
     }
-
-    // Stored files first (the storage rule finds a file through its row),
-    // then everything that hangs off the item.
-    const { data: files } = await supabase.from("attachments").select("storage_path").eq("task_id", id);
-    const paths = (files || []).map((f: any) => f.storage_path).filter(Boolean);
-    if (paths.length) await supabase.storage.from("task-files").remove(paths);
-    for (const table of ["attachments", "subtasks", "comments", "task_assignors", "extension_requests", "task_dependencies", "task_reminders"]) {
-      await supabase.from(table).delete().eq("task_id", id);
-    }
-    await supabase.from("task_dependencies").delete().eq("depends_on_task_id", id);
-    await supabase.from("notifications").delete().eq("task_id", id);
-    await supabase.from("activity_log").delete().eq("entity_type", "task").eq("entity_id", id);
-
-    const { error } = await supabase.from("tasks").delete().eq("id", id);
-    if (error) {
-      console.error("DELETE /api/tasks failed:", error);
-      return NextResponse.json({ error: "Could not delete task. It may have dependencies that prevent deletion." }, { status: 400 });
-    }
-    return NextResponse.json({ ok: true });
+    after(() => purgeOldDeleted(supabase).catch(() => null));
+    if (!done.length && failed.length) return NextResponse.json({ error: failed[0].error, done, failed }, { status: failed[0].error === "Task not found" ? 404 : 403 });
+    return NextResponse.json({ ok: true, done, failed });
   } catch (error: any) {
     console.error("DELETE /api/tasks failed:", error);
     return NextResponse.json({ error: error?.message || "Could not delete the item" }, { status: 500 });

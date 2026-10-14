@@ -297,12 +297,12 @@ export default function ChatPage() {
 
   return (
     <div className="max-w-6xl mx-auto p-3 sm:p-6">
-      <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
+      <div className="flex flex-wrap justify-start items-center gap-2 mb-4">
         <h1 className="text-2xl sm:text-3xl font-bold">Chat</h1>
         <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search all messages..." className={`${inputCls} w-full sm:w-64`} />
       </div>
       {error && (
-        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-between">
+        <div className="bg-red-950 border border-red-800 text-red-300 px-4 py-3 rounded mb-4 text-sm flex justify-start">
           <span>{error}</span>
           <button onClick={() => setError("")}>dismiss</button>
         </div>
@@ -310,7 +310,7 @@ export default function ChatPage() {
 
       {results ? (
         <div className="bg-slate-800 border border-slate-700 rounded p-4">
-          <div className="flex justify-between mb-3">
+          <div className="flex justify-start mb-3">
             <p className="text-sm text-slate-400">{results.length} message{results.length === 1 ? "" : "s"} found</p>
             <button onClick={() => setSearch("")} className="text-sm text-blue-400">Close search</button>
           </div>
@@ -377,7 +377,7 @@ export default function ChatPage() {
 
           {/* Messages */}
           <section className="bg-slate-800 border border-slate-700 rounded flex flex-col h-[70vh]">
-            <div className="px-4 py-3 border-b border-slate-700 flex flex-wrap justify-between items-center gap-2">
+            <div className="px-4 py-3 border-b border-slate-700 flex flex-wrap justify-start items-center gap-2">
               <div className="min-w-0">
                 <p className="font-semibold truncate"># {room?.name || "..."}</p>
                 {room && ["private", "custom"].includes(room.kind) && (
@@ -457,7 +457,7 @@ export default function ChatPage() {
             )}
             <p className="text-xs text-slate-400 mb-2">Who's in it?</p>
             <PeoplePicker people={members.filter((m) => m.id !== me)} value={creating.people} onChange={(people) => setCreating({ ...creating, people })} />
-            <div className="flex justify-end gap-2 mt-4">
+            <div className="flex justify-start gap-2 mt-4">
               <button onClick={() => setCreating(null)} className="px-3 py-2 bg-slate-700 rounded text-sm">Cancel</button>
               <button onClick={createRoom} disabled={creating.people.length === 0 || (creating.kind === "custom" && !creating.name.trim())}
                 className="px-3 py-2 bg-blue-600 disabled:opacity-50 rounded text-sm">Create</button>

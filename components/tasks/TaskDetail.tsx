@@ -254,6 +254,41 @@ export function TaskDetail({
   const patch = async (p: Partial<Task>) => {
     const ok = await onPatch(task.id, p);
     if (ok) refreshHistory();
+    return ok;
+  };
+
+  // Field changes wait for "Save changes" (nothing is saved by tapping
+  // elsewhere, and a slider brushed while scrolling changes nothing).
+  const [draft, setDraft] = useState<Partial<Task>>({});
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDraft({}), [task.id]);
+  const edit = (p: Partial<Task>) =>
+    setDraft((d) => {
+      const next: any = { ...d, ...p };
+      for (const k of Object.keys(p)) if ((task as any)[k] === next[k]) delete next[k];
+      return next;
+    });
+  const view: Task = { ...task, ...draft } as Task;
+  const [closeWarn, setCloseWarn] = useState(false);
+  useEffect(() => {
+    if (!Object.keys(draft).length) setCloseWarn(false);
+  }, [draft]);
+  const tryClose = () => {
+    if (Object.keys(draft).length) setCloseWarn(true);
+    else onClose();
+  };
+  const dirty = Object.keys(draft).length > 0;
+  const saveDraft = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
+    try {
+      if (await patch(draft)) {
+        setDraft({});
+        onInfo("Changes saved.");
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
   const canManage = !!access?.canManage;
@@ -542,7 +577,7 @@ export function TaskDetail({
                   <h4 className={h4}>{SIMPLE ? "More time" : "Deadline extension"}</h4>
                   {extensions.map((x) => (
                     <div key={x.id} className="bg-slate-900 rounded p-3 mb-2 text-sm">
-                      <div className="flex justify-between gap-2">
+                      <div className="flex justify-start gap-2">
                         <span className="text-slate-300">"{x.reason}"</span>
                         <span className={`text-xs shrink-0 ${x.status === "approved" ? "text-green-400" : x.status === "rejected" ? "text-red-400" : "text-yellow-400"}`}>
                           {x.status === "pending" ? "waiting for a decision" : x.status === "approved" ? "approved" : "not approved"}
@@ -594,7 +629,7 @@ export function TaskDetail({
   const assignorIds = [task.created_by, ...assignors.map((a) => a.user_id)].filter(Boolean) as string[];
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-50 flex items-stretch sm:items-center justify-center sm:p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/60 z-50 flex items-stretch sm:items-center justify-center sm:p-4" onClick={tryClose}>
       <div
         className="bg-slate-800 sm:rounded border border-slate-700 w-full max-w-3xl h-full sm:h-auto sm:max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
@@ -615,7 +650,7 @@ export function TaskDetail({
                 {task.completed_at && ` · finished ${formatDue(task.completed_at)}`}
               </p>
             </div>
-            <button onClick={onClose} className="text-slate-400 hover:text-white text-xl px-2" aria-label="Close">
+            <button onClick={tryClose} className="text-slate-400 hover:text-white text-xl px-2" aria-label="Close">
               ✕
             </button>
           </div>
@@ -842,14 +877,14 @@ export function TaskDetail({
                 ) : (
                   <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Status</span>
-                    <select value={task.status} disabled={!canWork} onChange={(e) => patch({ status: e.target.value })} className={input}>
+                    <select value={view.status} disabled={!canWork} onChange={(e) => edit({ status: e.target.value })} className={input}>
                       {STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                     </select>
                   </label>
                 )}
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Priority</span>
-                  <select value={task.priority} disabled={!(access?.isSuper || access?.isAssignor)} onChange={(e) => patch({ priority: e.target.value })} className={input}>
+                  <select value={view.priority} disabled={!(access?.isSuper || access?.isAssignor)} onChange={(e) => edit({ priority: e.target.value })} className={input}>
                     {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </label>
@@ -863,8 +898,8 @@ export function TaskDetail({
                         disabled={!canManage}
                         title={c.label}
                         aria-label={`Color: ${c.label}`}
-                        onClick={() => patch({ color: c.value || null })}
-                        className={`w-6 h-6 rounded-full border-2 disabled:opacity-40 ${(task.color || "") === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[10px]"}`}
+                        onClick={() => edit({ color: c.value || null })}
+                        className={`w-6 h-6 rounded-full border-2 disabled:opacity-40 ${(view.color || "") === c.value ? "border-white" : "border-slate-700"} ${c.value ? "" : "bg-slate-700 flex items-center justify-center text-[10px]"}`}
                         style={c.value ? { backgroundColor: c.value } : undefined}
                       >
                         {!c.value && "✕"}
@@ -875,9 +910,9 @@ export function TaskDetail({
                 {!SIMPLE && <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Start</span>
                   <DateTimeField
-                    value={task.start_date}
+                    value={view.start_date}
                     disabled={!canManage}
-                    onCommit={(iso) => patch({ start_date: iso })}
+                    onCommit={(iso) => edit({ start_date: iso })}
                     className={input}
                     ariaLabel="Start"
                   />
@@ -885,51 +920,51 @@ export function TaskDetail({
                 <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Due {canManage ? "" : SIMPLE ? "(press Ask for more time to change it)" : "(ask for an extension to change)"}</span>
                   <DateTimeField
-                    value={task.due_date}
+                    value={view.due_date}
                     disabled={!canManage}
                     allowClear={false}
-                    onCommit={(iso) => iso && patch({ due_date: iso })}
+                    onCommit={(iso) => iso && edit({ due_date: iso })}
                     className={input}
                     ariaLabel="Due"
                   />
                 </label>
                 {<label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Project</span>
-                  <select value={task.project_id || ""} disabled={!canManage} onChange={(e) => e.target.value && patch({ project_id: e.target.value })} className={input}>
+                  <select value={view.project_id || ""} disabled={!canManage} onChange={(e) => e.target.value && edit({ project_id: e.target.value })} className={input}>
                     {lookups.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                 </label>}
-                {!SIMPLE && sectionsFor(lookups.projects, task.project_id).length > 0 && (
+                {!SIMPLE && sectionsFor(lookups.projects, view.project_id).length > 0 && (
                   <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Section</span>
-                    <select value={task.stage_id || ""} disabled={!canManage} onChange={(e) => e.target.value && patch({ stage_id: e.target.value })} className={input} aria-label="Section">
-                      {!task.stage_id && <option value="">None</option>}
-                      {sectionsFor(lookups.projects, task.project_id).map((sec) => <option key={sec.id} value={sec.id}>{sec.name}</option>)}
+                    <select value={view.stage_id || ""} disabled={!canManage} onChange={(e) => e.target.value && edit({ stage_id: e.target.value })} className={input} aria-label="Section">
+                      {!view.stage_id && <option value="">None</option>}
+                      {sectionsFor(lookups.projects, view.project_id).map((sec) => <option key={sec.id} value={sec.id}>{sec.name}</option>)}
                     </select>
                   </label>
                 )}
                 {!SIMPLE && <label className="flex flex-col gap-1">
-                  <span className="text-slate-400 text-xs">Remind me at {task.remind_at && !canWork ? "" : "(optional)"}</span>
+                  <span className="text-slate-400 text-xs">Remind me at {view.remind_at && !canWork ? "" : "(optional)"}</span>
                   <div className="flex gap-2">
                     <DateTimeField
-                      value={task.remind_at}
+                      value={view.remind_at}
                       disabled={!canWork}
-                      onCommit={(iso) => patch({ remind_at: iso })}
+                      onCommit={(iso) => edit({ remind_at: iso })}
                       className={`${input} flex-1 min-w-0`}
                       ariaLabel="Reminder"
                     />
-                    {task.remind_at && canWork && (
-                      <button onClick={() => patch({ remind_at: null })} className="text-xs text-slate-400 hover:text-white px-2" aria-label="Clear reminder">✕</button>
+                    {view.remind_at && canWork && (
+                      <button onClick={() => edit({ remind_at: null })} className="text-xs text-slate-400 hover:text-white px-2" aria-label="Clear reminder">✕</button>
                     )}
                   </div>
                 </label>}
                 {!SIMPLE && <label className="flex flex-col gap-1">
                   <span className="text-slate-400 text-xs">Milestone</span>
-                  <select value={task.milestone || ""} disabled={!canManage} onChange={(e) => patch({ milestone: e.target.value || null })} className={input}>
+                  <select value={view.milestone || ""} disabled={!canManage} onChange={(e) => edit({ milestone: e.target.value || null })} className={input}>
                     <option value="">None</option>
                     {MILESTONES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-                    {task.milestone && !MILESTONES.some((m) => m.value === task.milestone) && (
-                      <option value={task.milestone}>{task.milestone}</option>
+                    {view.milestone && !MILESTONES.some((m) => m.value === view.milestone) && (
+                      <option value={view.milestone}>{view.milestone}</option>
                     )}
                   </select>
                 </label>}
@@ -941,7 +976,7 @@ export function TaskDetail({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                   <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Person</span>
-                    <select value={task.assigned_to || ""} disabled={!canManage} onChange={(e) => patch({ assigned_to: e.target.value || null })} className={input}>
+                    <select value={view.assigned_to || ""} disabled={!canManage} onChange={(e) => edit({ assigned_to: e.target.value || null })} className={input}>
                       <option value="">Nobody</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
@@ -961,14 +996,14 @@ export function TaskDetail({
                   )}
                   {!SIMPLE && <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">Task manager</span>
-                    <select value={task.task_manager_id || ""} disabled={!canManage} onChange={(e) => patch({ task_manager_id: e.target.value || null })} className={input}>
+                    <select value={view.task_manager_id || ""} disabled={!canManage} onChange={(e) => edit({ task_manager_id: e.target.value || null })} className={input}>
                       <option value="">None</option>
                       {people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                     </select>
                   </label>}
                   {!SIMPLE && <label className="flex flex-col gap-1">
                     <span className="text-slate-400 text-xs">OKR key result</span>
-                    <select value={task.key_result_id || ""} disabled={!canManage} onChange={(e) => patch({ key_result_id: e.target.value || null })} className={input}>
+                    <select value={view.key_result_id || ""} disabled={!canManage} onChange={(e) => edit({ key_result_id: e.target.value || null })} className={input}>
                       <option value="">Not linked</option>
                       {lookups.keyResults.map((k) => <option key={k.id} value={k.id}>{k.title}</option>)}
                     </select>
@@ -978,51 +1013,48 @@ export function TaskDetail({
 
               {/* Progress (checklist #11 / #37) */}
               <div className={section}>
-                <h4 className={h4}>Progress: {task.progress_percent}%</h4>
+                <h4 className={h4}>Progress: {view.progress_percent}%</h4>
                 <div className="w-full bg-slate-700 rounded h-2 mb-3">
-                  <div className="bg-blue-600 h-2 rounded" style={{ width: `${task.progress_percent}%` }} />
+                  <div className="bg-blue-600 h-2 rounded" style={{ width: `${view.progress_percent}%` }} />
                 </div>
                 {hasSubtasks ? (
                   <p className="text-xs text-slate-400">Calculated from the {subtasks.length} subtasks below.</p>
                 ) : (
                   <div className="flex flex-wrap gap-2 items-center text-sm">
                     {!SIMPLE && <select
-                      value={task.progress_type || "percent"}
+                      value={view.progress_type || "percent"}
                       disabled={!canManage}
-                      onChange={(e) => patch({ progress_type: e.target.value })}
+                      onChange={(e) => edit({ progress_type: e.target.value })}
                       className={input}
                     >
                       <option value="percent">Percentage</option>
                       <option value="number">Number of units</option>
                       <option value="amount">Amount</option>
                     </select>}
-                    {!SIMPLE && (task.progress_type === "number" || task.progress_type === "amount") ? (
+                    {!SIMPLE && (view.progress_type === "number" || view.progress_type === "amount") ? (
                       <>
                         <input
-                          key={`cur-${task.progress_current}`}
+                          key={`cur-${view.progress_current}`}
                           type="number" min="0" disabled={!canWork}
-                          defaultValue={task.progress_current ?? 0}
-                          onBlur={(e) => Number(e.target.value) !== Number(task.progress_current ?? 0) && patch({ progress_current: Number(e.target.value) })}
+                          defaultValue={view.progress_current ?? 0}
+                          onBlur={(e) => Number(e.target.value) !== Number(view.progress_current ?? 0) && edit({ progress_current: Number(e.target.value) })}
                           className={`${input} w-24`} aria-label="Done so far"
                         />
                         <span className="text-slate-400">of</span>
                         <input
-                          key={`tgt-${task.progress_target}`}
+                          key={`tgt-${view.progress_target}`}
                           type="number" min="0" disabled={!canManage}
-                          defaultValue={task.progress_target ?? 0}
-                          onBlur={(e) => Number(e.target.value) !== Number(task.progress_target ?? 0) && patch({ progress_target: Number(e.target.value) })}
+                          defaultValue={view.progress_target ?? 0}
+                          onBlur={(e) => Number(e.target.value) !== Number(view.progress_target ?? 0) && edit({ progress_target: Number(e.target.value) })}
                           className={`${input} w-24`} aria-label="Target"
                         />
-                        <span className="text-xs text-slate-500">{task.progress_type === "amount" ? "amount" : "units"}</span>
+                        <span className="text-xs text-slate-500">{view.progress_type === "amount" ? "amount" : "units"}</span>
                       </>
                     ) : (
                       <input
-                        key={`pct-${task.progress_percent}`}
                         type="range" min={0} max={100} step={5} disabled={!canWork}
-                        defaultValue={task.progress_percent}
-                        onMouseUp={(e) => patch({ progress_percent: Number((e.target as HTMLInputElement).value) })}
-                        onTouchEnd={(e) => patch({ progress_percent: Number((e.target as HTMLInputElement).value) })}
-                        onKeyUp={(e) => patch({ progress_percent: Number((e.target as HTMLInputElement).value) })}
+                        value={view.progress_percent || 0}
+                        onChange={(e) => edit({ progress_percent: Number(e.target.value) })}
                         className="flex-1 min-w-40" aria-label="Progress"
                       />
                     )}
@@ -1139,7 +1171,7 @@ export function TaskDetail({
                 {deps.map((id) => {
                   const d = allTasks.find((t) => t.id === id);
                   return (
-                    <div key={id} className="bg-slate-900 px-3 py-2 rounded text-sm flex justify-between items-center gap-2 mb-1">
+                    <div key={id} className="bg-slate-900 px-3 py-2 rounded text-sm flex justify-start items-center gap-2 mb-1">
                       <span>
                         🔗 {d ? d.title : "A task you can't see"}
                         {d && <span className={`ml-2 text-xs px-1.5 rounded ${statusClass(d.status)}`}>{statusLabel(d.status)}</span>}
@@ -1381,6 +1413,21 @@ export function TaskDetail({
             </ol>
           )}
         </div>
+
+        {/* Unsaved field changes: saved only when "Save changes" is tapped. */}
+        {dirty && (
+          <div className="sticky bottom-0 z-20 bg-slate-900 border-t border-slate-600 px-4 py-3 flex flex-wrap items-center gap-2" role="region" aria-label="Unsaved changes">
+            <button onClick={saveDraft} disabled={saving} className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 rounded font-semibold text-sm">
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+            <button onClick={() => { setDraft({}); setCloseWarn(false); }} disabled={saving} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">
+              Discard
+            </button>
+            <span className={`text-sm ${closeWarn ? "text-amber-300 font-semibold" : "text-slate-400"}`}>
+              {closeWarn ? "Save or discard your changes before closing." : `${Object.keys(draft).length} unsaved change${Object.keys(draft).length === 1 ? "" : "s"}`}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );

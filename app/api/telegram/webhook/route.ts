@@ -22,6 +22,27 @@ function secretOk(req: NextRequest): boolean {
 const reply = (chat_id: number, text: string) =>
   tg("sendMessage", { chat_id, text, parse_mode: "HTML", disable_web_page_preview: true });
 
+/** Connect this chat to the BusyBee user added with this @username, if any (and not already connected). */
+async function linkByUsername(chatId: number, username: string | undefined): Promise<string | null> {
+  if (!username) return null;
+  const admin = createAdminClient();
+  if (!admin) return null;
+  const want = username.toLowerCase();
+  for (let page = 1; page <= 10; page++) {
+    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error || !data?.users?.length) return null;
+    const u = data.users.find((x: any) => String(x.user_metadata?.telegram_username || "").toLowerCase() === want);
+    if (u) {
+      const { data: has } = await admin.from("user_telegram").select("chat_id").eq("user_id", u.id).maybeSingle();
+      if (has && Number(has.chat_id) === chatId) return null;
+      await admin.from("user_telegram").upsert({ user_id: u.id, chat_id: chatId, username, linked_at: new Date().toISOString() }, { onConflict: "user_id" });
+      return String(u.user_metadata?.full_name || u.email || "there");
+    }
+    if (data.users.length < 1000) return null;
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   if (!telegramConfigured() || !secretOk(req)) {
     return NextResponse.json({ ok: false }, { status: 401 });
@@ -42,6 +63,15 @@ export async function POST(req: NextRequest) {
     }
 
     const [command, ...rest] = text.split(/\s+/);
+    // Someone added with their @username (Tasks → Add person): the first
+    // message they send the bot connects them.
+    if (!(command.toLowerCase().startsWith("/start") && rest[0])) {
+      const linked = await linkByUsername(chat.id, msg.from?.username);
+      if (linked) {
+        await reply(chat.id, `✅ Connected, ${escapeHtml(linked)}. Your BusyBee alerts will arrive here.`);
+        return NextResponse.json({ ok: true });
+      }
+    }
     const cmd = command.toLowerCase().replace(/@.*$/, "");
 
     if (cmd === "/start") {

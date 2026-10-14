@@ -141,7 +141,7 @@ export default function TimesheetPage() {
   return (
     <div className="p-3 sm:p-6">
       <div className="max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
+        <div className="flex justify-start items-center mb-6">
           <h1 className="text-3xl font-bold">Timesheet</h1>
           <button
             onClick={() => router.push("/dashboard")}
@@ -246,7 +246,7 @@ export default function TimesheetPage() {
                 const dayTotal = byDate[d].reduce((sum, e) => sum + Number(e.hours), 0);
                 return (
                   <div key={d}>
-                    <div className="flex justify-between items-center mb-2">
+                    <div className="flex justify-start items-center mb-2">
                       <h2 className="text-sm font-semibold text-slate-300">
                         {new Date(`${d}T12:00:00`).toLocaleDateString(undefined, {
                           weekday: "long",
@@ -260,7 +260,7 @@ export default function TimesheetPage() {
                       {byDate[d].map((e) => (
                         <div
                           key={e.id}
-                          className="bg-slate-800 border border-slate-700 rounded p-3 flex justify-between items-start gap-3"
+                          className="bg-slate-800 border border-slate-700 rounded p-3 flex justify-start items-start gap-3"
                         >
                           <div>
                             <p className="text-sm text-slate-200">{titleFor(e)}</p>

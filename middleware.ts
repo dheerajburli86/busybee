@@ -5,7 +5,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = ["/login", "/signup"];
 // Open to everyone, signed in or not: the "get the app" guide.
-const OPEN_PATHS = ["/install"];
+const OPEN_PATHS = ["/install", "/welcome"];
 
 export async function middleware(request: NextRequest) {
   // API routes check the signed-in user themselves. Checking here as well

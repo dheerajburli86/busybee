@@ -133,7 +133,7 @@ export function NotificationBell() {
           role="dialog"
           aria-label="Notifications"
         >
-          <div className="flex justify-between items-center px-3 py-2 border-b border-slate-700">
+          <div className="flex justify-start items-center px-3 py-2 border-b border-slate-700">
             <span className="text-sm font-semibold">Notifications</span>
             <span className="flex items-center gap-3">
               {unread > 0 && (

@@ -237,7 +237,7 @@ export function GanttView({
 
   return (
     <div className="bg-slate-800 border border-slate-700 rounded p-3 sm:p-4">
-      <div className="flex flex-wrap gap-3 items-center justify-between mb-3 text-xs text-slate-400">
+      <div className="flex flex-wrap gap-3 items-center justify-start mb-3 text-xs text-slate-400">
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={showSubs} onChange={() => setShowSubs(!showSubs)} /> Show subtasks

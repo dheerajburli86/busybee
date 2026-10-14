@@ -20,8 +20,8 @@ const DAY = 24 * 3600 * 1000;
 /** Finished tasks are listed on a person's page for this long. */
 const SHOW_FINISHED_DAYS = 30;
 const SUB_COLS = "done, progress_type, progress_target, progress_current, progress_percent, updated_at";
-const TASK_COLS =
-  "id, title, status, desk_id, project_id, team_id, personal, created_by, assigned_to, task_manager_id, created_at, due_date, completed_at, archived_at, is_list, progress_percent";
+// Whole rows: includes deleted_at where the database has it.
+const TASK_COLS = "*";
 
 const latest = (...xs: (string | null | undefined)[]) =>
   xs.filter((x): x is string => !!x).reduce<string | null>((a, b) => (!a || Date.parse(b) > Date.parse(a) ? b : a), null);
@@ -58,7 +58,7 @@ export async function GET() {
     let rows: any[] = joined || (await selectAll<any>(query(TASK_COLS)));
     // Put-away (archived) work that was never finished isn't anyone's to do;
     // finished work with no finishing time is from before that was recorded.
-    rows = filterVisible(rows, user.id, memberships, sets).filter((t: any) => (isFinished(t.status) ? !!t.completed_at : !t.archived_at));
+    rows = filterVisible(rows, user.id, memberships, sets).filter((t: any) => !t.deleted_at && (isFinished(t.status) ? !!t.completed_at : !t.archived_at));
     if (!joined && rows.length) {
       const subs = await inChunks<any>(rows.map((t) => t.id), (part) => supabase.from("subtasks").select(`task_id, ${SUB_COLS}`).in("task_id", part).order("id"), { all: true });
       const by = new Map<string, any[]>();
@@ -114,6 +114,7 @@ export async function GET() {
         blocked: (blockers.get(t.id) || []).some((id) => unfinished.has(id)),
         last_progress_at: latest(lastTick, t.completed_at),
         assigned_to: t.assigned_to,
+        created_by: t.created_by,
         project: t.projects?.name || null,
         is_list: !!t.is_list,
       };
