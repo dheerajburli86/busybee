@@ -163,7 +163,8 @@ export async function GET(request: NextRequest) {
     // ?archived=only -> archived tasks, ?archived=all -> both, default -> live only.
     // ?lists=1 -> only the to-do lists, each with its items (the To-Do page).
     const archived = request.nextUrl.searchParams.get("archived");
-    // ?deleted=1 -> "Recently deleted" (kept 30 days for Undo).
+    // ?deleted=1 -> "Recently deleted": what *I* removed from my view in the
+    // last 30 days. Deleting never removes a task for anyone else.
     const deletedOnly = request.nextUrl.searchParams.get("deleted") === "1";
     const listsOnly = request.nextUrl.searchParams.get("lists") === "1";
 
@@ -174,8 +175,8 @@ export async function GET(request: NextRequest) {
     const query = (cols: string) => () => {
       let q = supabase.from("tasks").select(cols).in("desk_id", deskIds);
       if (listsOnly) q = q.eq("is_list", true);
-      if (deletedOnly) q = q.not("deleted_at", "is", null);
-      else if (archived === "only") q = q.not("archived_at", "is", null);
+      if (deletedOnly) return q.order("created_at", { ascending: false }).order("id");
+      if (archived === "only") q = q.not("archived_at", "is", null);
       else if (archived !== "all") q = q.is("archived_at", null);
       return q.order("created_at", { ascending: false }).order("id");
     };
@@ -183,11 +184,12 @@ export async function GET(request: NextRequest) {
     // One round trip for everything: the tasks with their item counts (or,
     // for lists, the items themselves), alongside what decides which of them
     // this person may see.
-    const [joined, sets, myProjects, reminders] = await Promise.all([
+    const [joined, sets, myProjects, reminders, hidden] = await Promise.all([
       selectAll<any>(query(listsOnly ? `*, subtasks(${ITEM_COLS})` : "*, subtasks(count)")).catch(() => null),
       visibilitySets(supabase, user.id),
       userProjectIds(supabase, user.id),
       myReminders(supabase, user.id),
+      myHidden(supabase, user.id),
     ]);
 
     const counts: Record<string, number> = {};
@@ -209,8 +211,16 @@ export async function GET(request: NextRequest) {
       tasks = await selectAll<any>(query("*"));
     }
     // Deleted tasks only show in "Recently deleted" (archived ones in the archive).
-    if (!deletedOnly) tasks = tasks.filter((t: any) => !t.deleted_at);
-    else after(() => purgeOldDeleted(supabase).catch(() => null));
+    tasks = tasks.filter((t: any) => !t.deleted_at);
+    if (deletedOnly) {
+      const cutoff = Date.now() - KEEP_DELETED_MS;
+      tasks = tasks
+        .filter((t: any) => hidden.has(t.id) && Date.parse(hidden.get(t.id)!) > cutoff)
+        .map((t: any) => ({ ...t, deleted_at: hidden.get(t.id) }));
+      after(() => purgeOldDeleted(supabase).catch(() => null));
+    } else {
+      tasks = tasks.filter((t: any) => !hidden.has(t.id));
+    }
     const visible = filterVisible(tasks, user.id, memberships, sets);
     const shown = new Set(visible.map((t: any) => t.id));
 
@@ -792,20 +802,33 @@ async function eraseTask(db: any, id: string) {
   return !error;
 }
 
-/** Remove for good whatever was deleted more than 30 days ago (runs now and then). */
-async function purgeOldDeleted(supabase: any) {
-  const db = createAdminClient() || supabase;
-  const cutoff = new Date(Date.now() - KEEP_DELETED_MS).toISOString();
-  const { data, error } = await db.from("tasks").select("id").lt("deleted_at", cutoff).limit(200);
-  if (error || !data) return;
-  for (const t of data) await eraseTask(db, t.id).catch(() => false);
+/** Task ids this person removed from their own view, with when. */
+async function myHidden(supabase: any, userId: string): Promise<Map<string, string>> {
+  const rows = await selectAll<any>(() =>
+    supabase.from("task_hidden").select("task_id, hidden_at").eq("user_id", userId).order("task_id")
+  ).catch(() => []);
+  return new Map(rows.map((r: any) => [r.task_id, r.hidden_at]));
 }
 
 /**
- * Delete one or more tasks: { id } or { ids: [...] }. They go to "Recently
- * deleted" for 30 days (archived, so they leave every list and reminder at
- * once); { restore: true } brings them back. Each task is checked on its own:
- * private to-dos by their owner, other tasks by whoever can manage them.
+ * A private to-do its owner deleted 30+ days ago is removed for good (nobody
+ * else can see it). Shared tasks are never erased by one person's delete.
+ */
+async function purgeOldDeleted(supabase: any) {
+  const db = createAdminClient();
+  if (!db) return;
+  const cutoff = new Date(Date.now() - KEEP_DELETED_MS).toISOString();
+  const { data, error } = await db.from("task_hidden").select("user_id, task_id, tasks!inner(personal, created_by)").lt("hidden_at", cutoff).limit(500);
+  if (error || !data) return;
+  for (const r of data as any[]) {
+    if (r.tasks?.personal && r.tasks.created_by === r.user_id) await eraseTask(db, r.task_id).catch(() => false);
+  }
+}
+
+/**
+ * Delete one or more tasks *for me*: { id } or { ids: [...] }. The task leaves
+ * my lists only - the assignee, assignor and everyone else keep it. It sits in
+ * my "Recently deleted" for 30 days; { restore: true } brings it back.
  */
 export async function DELETE(request: NextRequest) {
   try {
@@ -823,56 +846,24 @@ export async function DELETE(request: NextRequest) {
     const done: string[] = [];
     const failed: { id: string; error: string }[] = [];
     const now = new Date().toISOString();
+    const seen: string[] = [];
     for (const id of ids) {
       const access = await taskAccess(supabase, user.id, id, { includeDeleted: true });
-      if (!access) {
-        failed.push({ id, error: "Task not found" });
-        continue;
-      }
-      const task = access.task;
-      const allowed = task.personal ? !isPrivateToSomeoneElse(task, user.id) : access.canManage;
-      if (!allowed) {
-        failed.push({ id, error: task.personal ? "Only your own private to-do items can be deleted." : "Only the assignor or a supervisor can delete this task." });
-        continue;
-      }
-      if (restore) {
-        if (!task.deleted_at) {
-          done.push(id);
-          continue;
-        }
-        // Archived only because it was deleted (same moment): un-archive too.
-        const wasLive = task.archived_at && Date.parse(task.archived_at) === Date.parse(task.deleted_at);
-        const { error } = await supabase
-          .from("tasks")
-          .update({ deleted_at: null, deleted_by: null, ...(wasLive ? { archived_at: null } : {}) })
-          .eq("id", id);
-        if (error) failed.push({ id, error: error.message });
-        else done.push(id);
-        continue;
-      }
-      const { error } = await supabase
-        .from("tasks")
-        .update({ deleted_at: now, deleted_by: user.id, archived_at: task.archived_at || now })
-        .eq("id", id);
+      if (!access) failed.push({ id, error: "Task not found" });
+      else seen.push(id);
+    }
+    if (seen.length) {
+      const { error } = restore
+        ? await supabase.from("task_hidden").delete().eq("user_id", user.id).in("task_id", seen)
+        : await supabase
+            .from("task_hidden")
+            .upsert(seen.map((task_id) => ({ user_id: user.id, task_id, hidden_at: now })), { onConflict: "user_id,task_id" });
       if (error) {
-        // Database without the 30-day bin yet: say so rather than delete for good.
-        failed.push({
-          id,
-          error: /deleted_at|deleted_by|column/i.test(error.message || "")
-            ? "Run supabase/migrations/20261014_soft_delete.sql in Supabase first (it turns on Undo and Recently deleted)."
-            : error.message,
-        });
-        continue;
-      }
-      done.push(id);
-      await logActivity(supabase, {
-        entity_type: "task",
-        entity_id: id,
-        action: "deleted the task",
-        performed_by: user.id,
-        desk_id: task.desk_id,
-        changes: { title: task.title },
-      }).catch(() => null);
+        const msg = /task_hidden/i.test(error.message || "")
+          ? "Run supabase/migrations/20261014b_delete_for_me.sql in Supabase first."
+          : error.message;
+        seen.forEach((id) => failed.push({ id, error: msg }));
+      } else done.push(...seen);
     }
     after(() => purgeOldDeleted(supabase).catch(() => null));
     if (!done.length && failed.length) return NextResponse.json({ error: failed[0].error, done, failed }, { status: failed[0].error === "Task not found" ? 404 : 403 });

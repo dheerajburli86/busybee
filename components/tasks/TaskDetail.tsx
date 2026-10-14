@@ -673,7 +673,7 @@ export function TaskDetail({
               <button
                 onClick={() =>
                   once("delete", async () => {
-                    if (!window.confirm(`Delete "${task.title}"? This can't be undone.`)) return;
+                    if (!window.confirm(`Delete "${task.title}" for you? Everyone else keeps it. You can restore it from Recently deleted for 30 days.`)) return;
                     try {
                       const r = await sendJSON("/api/tasks", "DELETE", { id: task.id });
                       onInfo(r?.archived ? "It couldn't be deleted completely, so it was archived." : "Deleted.");
@@ -720,14 +720,14 @@ export function TaskDetail({
                 {task.archived_at ? "♻️ Restore" : "🗄️ Archive"}
               </button>
             )}
-            {!task.personal && canManage && (
+            {!task.personal && (
               <button
                 onClick={() =>
                   once("delete", async () => {
-                    if (!window.confirm(`Delete "${task.title}"? This can't be undone.`)) return;
+                    if (!window.confirm(`Delete "${task.title}" for you? Everyone else keeps it. You can restore it from Recently deleted for 30 days.`)) return;
                     try {
                       await sendJSON("/api/tasks", "DELETE", { id: task.id });
-                      onInfo("Task deleted.");
+                      onInfo("Deleted for you. Others still have it.");
                       onRemoved?.(task.id);
                       onClose();
                     } catch (e: any) {

@@ -1,7 +1,7 @@
 "use client";
 
 // Select several tasks (or to-do lists) and delete them at once, with Undo.
-// Deleted work waits 30 days in "Recently deleted" (restorable) before it is
+// Deleting is per person: others keep the task. Deleted work waits 30 days in "Recently deleted" (restorable) before it is
 // removed for good - see DELETE /api/tasks.
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -42,7 +42,7 @@ export function useBulkDelete(opts: { onRemoved: (ids: string[]) => void; onRest
       if (done.length) {
         o.current.onRemoved(done);
         clearTimeout(timer.current);
-        setUndo({ ids: done, label: `${done.length} deleted` });
+        setUndo({ ids: done, label: `${done.length} deleted for you (others keep ${done.length === 1 ? "it" : "them"})` });
         timer.current = setTimeout(() => setUndo(null), 15000);
       }
       if (r.failed?.length) o.current.onError(`${r.failed.length} couldn't be deleted: ${r.failed[0].error}`);
@@ -176,7 +176,7 @@ export function RecentlyDeleted({ lists, bulk, nameOf, reloadKey }: { lists: boo
           </>
         )}
       </div>
-      <p className="text-xs text-slate-400 mb-2">Deleted items are removed for good 30 days after they were deleted.</p>
+      <p className="text-xs text-slate-400 mb-2">Deleting only removes a task from your view - everyone else keeps it. Restore within 30 days.</p>
       {rows.length === 0 ? (
         <p className="text-sm text-slate-400">Nothing deleted in the last 30 days.</p>
       ) : (
