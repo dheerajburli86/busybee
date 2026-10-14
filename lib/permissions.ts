@@ -80,6 +80,13 @@ export async function getMemberships(supabase: any, userId: string): Promise<Mem
   return list.map((m) => ({ ...m }));
 }
 
+/** Members can't hand work to anyone else - only admins, supervisors and managers assign. */
+export const ASSIGN_DENIED = "Members can't assign tasks to others. Ask an admin.";
+export function canAssign(memberships: Membership[], deskId?: string | null): boolean {
+  const role = deskId ? roleIn(memberships, deskId) : topRole(memberships);
+  return role !== "member";
+}
+
 export function roleIn(memberships: Membership[], deskId: string | null | undefined): string {
   return memberships.find((m) => m.desk_id === deskId)?.role || "member";
 }

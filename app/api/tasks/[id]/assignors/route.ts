@@ -1,6 +1,6 @@
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextResponse } from "next/server";
-import { deny, getMemberships, logActivity, notifyMany, requireUser, taskAccess } from "@/lib/permissions";
+import { ASSIGN_DENIED, canAssign, deny, getMemberships, logActivity, notifyMany, requireUser, taskAccess } from "@/lib/permissions";
 
 // SOW #44: an assignor can add other assignors to a task. Only someone who
 // already manages the task may do it, so nobody can grant themselves rights.
@@ -41,6 +41,7 @@ export async function POST(req: Request, { params }: Params) {
     const access = await taskAccess(supabase, user.id, id);
     if (!access) return NextResponse.json({ error: "Task not found" }, { status: 404 });
     if (!access.canManage) return deny("Only an existing assignor or a supervisor can add assignors.");
+    if (!canAssign(await getMemberships(supabase, user.id), access.task.desk_id)) return deny(ASSIGN_DENIED);
 
     // The new assignor has to be on the same desk.
     const theirs = await getMemberships(supabase, user_id);

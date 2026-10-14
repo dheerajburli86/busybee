@@ -8,8 +8,7 @@
 //   5. a welcome email with a link to set their password, and a link that
 //      connects Telegram in one tap
 //
-// Anyone on the desk can add a member (themselves included, e.g. a second
-// account); only an admin can add an admin. Needs SUPABASE_SERVICE_ROLE_KEY.
+// Members can't add people; only an admin can add an admin. Needs SUPABASE_SERVICE_ROLE_KEY.
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { createServerSideClient } from "@/lib/supabase-server";
@@ -45,6 +44,9 @@ export async function POST(request: NextRequest) {
     const memberships = await getMemberships(supabase, user.id);
     const mine = memberships[0];
     if (!mine) return NextResponse.json({ error: "You are not on a desk" }, { status: 403 });
+    if (normalizeRole(mine.role) === "member") {
+      return NextResponse.json({ error: "Members can't add people. Ask an admin." }, { status: 403 });
+    }
     if (role === "admin" && normalizeRole(mine.role) !== "admin") {
       return NextResponse.json({ error: "Only an admin can add an admin" }, { status: 403 });
     }

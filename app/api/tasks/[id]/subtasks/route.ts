@@ -6,7 +6,7 @@
 
 import { createServerSideClient } from "@/lib/supabase-server";
 import { NextRequest, NextResponse } from "next/server";
-import { deny, logActivity, notifyMany, notOnDesk, requireUser, taskAccess, taskAudience } from "@/lib/permissions";
+import { ASSIGN_DENIED, canAssign, deny, getMemberships, logActivity, notifyMany, notOnDesk, requireUser, taskAccess, taskAudience } from "@/lib/permissions";
 import { recomputeTaskProgress } from "@/lib/progress";
 import { autoCompleteFromChecklist } from "@/lib/workflow";
 import { normalizeTimestamp } from "@/lib/format";
@@ -65,6 +65,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     if (due_date && access.task.due_date && new Date(due_date) > new Date(access.task.due_date)) {
       return NextResponse.json({ error: "A subtask can't be due after its task" }, { status: 400 });
     }
+    if (assigned_to && assigned_to !== user.id && !canAssign(await getMemberships(supabase, user.id), access.task.desk_id)) return deny(ASSIGN_DENIED);
     if (assigned_to) {
       const problem = await notOnDesk(supabase, access.task.desk_id, { assigned_to });
       if (problem) return NextResponse.json({ error: problem }, { status: 400 });
@@ -178,6 +179,9 @@ export async function PUT(request: NextRequest, { params }: Params) {
     }
     if (patch.due_date && access.task.due_date && new Date(patch.due_date) > new Date(access.task.due_date)) {
       return NextResponse.json({ error: "A subtask can't be due after its task" }, { status: 400 });
+    }
+    if ("assigned_to" in patch && patch.assigned_to && patch.assigned_to !== user.id && patch.assigned_to !== existing.assigned_to) {
+      if (!canAssign(await getMemberships(supabase, user.id), access.task.desk_id)) return deny(ASSIGN_DENIED);
     }
     if ("assigned_to" in patch && patch.assigned_to) {
       const problem = await notOnDesk(supabase, access.task.desk_id, { assigned_to: patch.assigned_to });

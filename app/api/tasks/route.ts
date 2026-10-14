@@ -5,6 +5,8 @@ import { createAdminClient } from "@/lib/supabase-admin";
 import {
   deny,
   getMemberships,
+  canAssign,
+  ASSIGN_DENIED,
   isForMe,
   isPrivateToSomeoneElse,
   logActivity,
@@ -326,6 +328,9 @@ export async function POST(request: NextRequest) {
         : Promise.resolve([] as string[]),
     ]);
     if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+    if (!personal && ((assigned_to && assigned_to !== user.id) || withIds.length || (body.task_manager_id && body.task_manager_id !== user.id))) {
+      if (!canAssign(await getMemberships(supabase, user.id), ctx.desk_id)) return NextResponse.json({ error: ASSIGN_DENIED }, { status: 403 });
+    }
     if (stage_id && !sectionOk) {
       return NextResponse.json({ error: "That section isn't part of the project" }, { status: 400 });
     }
@@ -519,6 +524,12 @@ export async function PUT(request: NextRequest) {
       patch.start_date = start;
     } else if ("start_date" in patch) {
       patch.start_date = null;
+    }
+    if (
+      (patch.assigned_to && patch.assigned_to !== before.assigned_to && patch.assigned_to !== user.id) ||
+      (patch.task_manager_id && patch.task_manager_id !== before.task_manager_id && patch.task_manager_id !== user.id)
+    ) {
+      if (!canAssign(await getMemberships(supabase, user.id), before.desk_id)) return NextResponse.json({ error: ASSIGN_DENIED }, { status: 403 });
     }
     {
       const problem = await notOnDesk(supabase, before.desk_id, patch);

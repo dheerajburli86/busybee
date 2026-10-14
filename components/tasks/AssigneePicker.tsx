@@ -70,12 +70,14 @@ export function AssigneePicker({
     }
   };
 
+  // Members can only make tasks for themselves.
+  const selfOnly = myRole === "member";
   const sorted = useMemo(
     () =>
       people
-        .slice()
+        .filter((p) => !selfOnly || p.id === me)
         .sort((a, b) => (a.id === me ? 1 : b.id === me ? -1 : String(a.name).localeCompare(String(b.name)))),
-    [people, me]
+    [people, me, selfOnly]
   );
   const term = q.trim().toLowerCase();
   // Names starting with what was typed come first, then any other match.
@@ -89,7 +91,7 @@ export function AssigneePicker({
   const toggle = (id: string) =>
     onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
 
-  const available = people.filter((p) => p.id !== me).length;
+  const available = selfOnly ? 0 : people.filter((p) => p.id !== me).length;
   const stillLoading = Boolean(loading) && people.length === 0;
 
   return (
@@ -102,6 +104,7 @@ export function AssigneePicker({
             <>
               <span className="font-semibold text-white">{available}</span>{" "}
               {available === 1 ? "person" : "people"} you can assign to
+              {selfOnly && <span className="text-amber-300"> · Members can only make tasks for themselves</span>}
               {selected.length > 0 && (
                 <span className="text-blue-400"> · {selected.length} selected</span>
               )}
@@ -109,7 +112,7 @@ export function AssigneePicker({
           )}
         </p>
         <div className="flex gap-3 text-xs">
-          {onPeopleChange && (
+          {onPeopleChange && !selfOnly && (
             <button
               type="button"
               onClick={() => { setAdding((a) => !a); setAddNote(null); }}
