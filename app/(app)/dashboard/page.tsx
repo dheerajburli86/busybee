@@ -153,6 +153,7 @@ export default function DashboardPage() {
   const [statusF, setStatusF] = useState("");
   const [priorityF, setPriorityF] = useState("");
   const [assigneeF, setAssigneeF] = useState("");
+  const [fromF, setFromF] = useState("");
   const [projectF, setProjectF] = useState<string>("");
   const [mine, setMine] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -533,6 +534,7 @@ export default function DashboardPage() {
       .filter((t) => (statusF ? (statusF === "overdue" ? isOverdue(t) : t.status === statusF) : true))
       .filter((t) => (priorityF ? t.priority === priorityF : true))
       .filter((t) => (assigneeF ? (assigneeF === "none" ? !t.assigned_to : t.assigned_to === assigneeF) : true))
+      .filter((t) => (fromF ? t.created_by === fromF : true))
       .sort((a, b) => {
         if (sortBy === "due_date") {
           if (!a.due_date && !b.due_date) return 0;
@@ -552,9 +554,9 @@ export default function DashboardPage() {
         }
         return byText(b.created_at, a.created_at);
       });
-  }, [source, q, mine, projectF, statusF, priorityF, assigneeF, sortBy, lookups]);
+  }, [source, q, mine, projectF, statusF, priorityF, assigneeF, fromF, sortBy, lookups]);
 
-  const activeFilters = [statusF, priorityF, assigneeF, projectF, mine ? "mine" : ""].filter(Boolean).length;
+  const activeFilters = [statusF, priorityF, assigneeF, fromF, projectF, mine ? "mine" : ""].filter(Boolean).length;
 
   // Board columns for the chosen arrangement (checklist #16 / #17, SOW #26).
   const projectSections = sectionsFor(lookups.projects, projectF);
@@ -864,10 +866,14 @@ export default function DashboardPage() {
             <option value="">Any priority</option>
             {PRIORITIES.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
-          <select value={assigneeF} onChange={(e) => setAssigneeF(e.target.value)} className={inputCls} aria-label="Assignee">
-            <option value="">Anyone</option>
-            <option value="none">Unassigned</option>
-            {lookups.people.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+          <select value={assigneeF} onChange={(e) => setAssigneeF(e.target.value)} className={inputCls} aria-label="Assigned to">
+            <option value="">Assigned to: everyone</option>
+            <option value="none">Assigned to: nobody</option>
+            {lookups.people.map((m) => <option key={m.id} value={m.id}>Assigned to: {m.name}</option>)}
+          </select>
+          <select value={fromF} onChange={(e) => setFromF(e.target.value)} className={inputCls} aria-label="Assigned from">
+            <option value="">Assigned from: everyone</option>
+            {lookups.people.map((m) => <option key={m.id} value={m.id}>Assigned from: {m.name}</option>)}
           </select>
           {(
             <select value={projectF} onChange={(e) => setProjectF(e.target.value)} className={inputCls} aria-label="Project">
@@ -876,7 +882,7 @@ export default function DashboardPage() {
             </select>
           )}
           {activeFilters > 0 && (
-            <button onClick={() => { setStatusF(""); setPriorityF(""); setAssigneeF(""); setProjectF(""); setMine(false); }} className="text-sm text-slate-400 hover:text-white px-2">
+            <button onClick={() => { setStatusF(""); setPriorityF(""); setAssigneeF(""); setFromF(""); setProjectF(""); setMine(false); }} className="text-sm text-slate-400 hover:text-white px-2">
               Clear
             </button>
           )}
