@@ -37,6 +37,7 @@ export default function ListsPage() {
   const [people, setPeople] = useState<Person[]>([]);
   const [me, setMe] = useState<string | null>(null);
   const [role, setRole] = useState("member");
+  const [amHead, setAmHead] = useState(false);
   const [lists, setLists] = useState<ListTask[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,6 +67,7 @@ export default function ListsPage() {
     setPeople(m.members || []);
     setMe(m.me || null);
     setRole(m.myRole || "member");
+    setAmHead(!!m.amHead);
   };
 
   // Lists and their items come in one request.
@@ -351,7 +353,7 @@ export default function ListsPage() {
         </div>
       )}
       <div className="flex flex-wrap gap-2 mb-3">
-        <BulkBar bulk={bulk} allIds={shown.filter((l) => !l.id.startsWith("sending-")).map((l) => l.id)} noun="list" />
+        <BulkBar bulk={bulk} allIds={shown.filter((l) => !l.id.startsWith("sending-")).map((l) => l.id)} noun="list" role={role} head={amHead} />
         <button
           onClick={() => setShowDeleted(!showDeleted)}
           className={`px-3 py-2 rounded text-sm ${showDeleted ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-300 hover:bg-slate-700"}`}

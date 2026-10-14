@@ -140,6 +140,7 @@ export default function DashboardPage() {
   const [archivedTasks, setArchivedTasks] = useState<Task[]>([]);
   const [lookups, setLookups] = useState<Lookups>(emptyLookups);
   const [myRole, setMyRole] = useState("member");
+  const [amHead, setAmHead] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
@@ -228,7 +229,7 @@ export default function DashboardPage() {
         membersReq.then((m) => {
           if (!m) return;
           setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
-          setMyRole(m.myRole || "member");
+          (setMyRole(m.myRole || "member"), setAmHead(!!m.amHead));
         });
 
         const [td, m, p, okr, tpl] = await Promise.all([tasksReq, membersReq, projectsReq, okrReq, templatesReq]);
@@ -257,7 +258,7 @@ export default function DashboardPage() {
           projects: p?.projects || cur.projects,
           keyResults: okr?.keyResults || cur.keyResults,
         }));
-        if (m) setMyRole(m.myRole || "member");
+        if (m) (setMyRole(m.myRole || "member"), setAmHead(!!m.amHead));
         if (tpl) setTemplates(tpl.templates || []);
       } catch (e: any) {
         showError(e.message || "Could not load tasks");
@@ -292,7 +293,7 @@ export default function DashboardPage() {
     }
     if (m) {
       setLookups((cur) => ({ ...cur, people: m.members || [], me: m.me || null }));
-      setMyRole(m.myRole || "member");
+      (setMyRole(m.myRole || "member"), setAmHead(!!m.amHead));
     }
     if (p) setLookups((cur) => ({ ...cur, projects: p.projects || [] }));
 
@@ -839,7 +840,7 @@ export default function DashboardPage() {
       <div className="flex flex-wrap gap-2 mb-4 items-center">
         <button onClick={() => setMine(!mine)} className={pill(mine)}>My tasks</button>
         <button onClick={() => setShowArchived(!showArchived)} className={pill(showArchived)}>🗄️ Archive</button>
-        {view === "list" && <BulkBar bulk={bulk} allIds={filtered.filter((t) => !t.id.startsWith("sending-")).map((t) => t.id)} />}
+        {view === "list" && <BulkBar bulk={bulk} allIds={filtered.filter((t) => !t.id.startsWith("sending-")).map((t) => t.id)} role={myRole} head={amHead} />}
         <button onClick={() => setShowDeleted(!showDeleted)} className={pill(showDeleted)}>🗑 Recently deleted</button>
         <button onClick={() => setShowFilters(!showFilters)} className={pill(showFilters || activeFilters > 0)}>
           Filters{activeFilters ? ` (${activeFilters})` : ""}
@@ -1013,6 +1014,8 @@ export default function DashboardPage() {
           onAdd={(t) => setTasks((prev) => [t, ...prev])}
           onError={showError}
           onInfo={showInfo}
+          myRole={myRole}
+          amHead={amHead}
           onTemplateSaved={(tpl) => setTemplates((prev) => (prev.some((x) => x.id === tpl.id) ? prev : [...prev, tpl]))}
           onRemoved={(id) => {
             setTasks((prev) => prev.filter((x) => x.id !== id));

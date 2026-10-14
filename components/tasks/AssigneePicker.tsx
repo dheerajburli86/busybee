@@ -9,7 +9,7 @@
 // attach to one person and one piece of work, never to a crowd.
 
 import { useMemo, useState } from "react";
-import { Search, UserPlus, X } from "lucide-react";
+import { Search, UserMinus, UserPlus, X } from "lucide-react";
 import { sendJSON } from "@/lib/api";
 import { cached, remember } from "@/lib/apiCache";
 import { Person } from "./types";
@@ -72,6 +72,33 @@ export function AssigneePicker({
 
   // Members can only make tasks for themselves.
   const selfOnly = myRole === "member";
+  // ---- Remove person (admins) ------------------------------------------------
+  const [removing, setRemoving] = useState(false);
+  const [gone, setGone] = useState("");
+  const [removeErr, setRemoveErr] = useState("");
+  const removePerson = async () => {
+    if (!gone || saving) return;
+    const who = people.find((p) => p.id === gone)?.name || "them";
+    if (!window.confirm(`Remove ${who} from BusyBee? They lose access and stop getting alerts. Their tasks stay.`)) return;
+    setRemoveErr("");
+    setSaving(true);
+    try {
+      const r = await sendJSON("/api/team/add", "DELETE", { user_id: gone });
+      const list = people.filter((p) => p.id !== gone);
+      onPeopleChange?.(list);
+      const known = cached<any>("/api/team/members");
+      if (known) remember("/api/team/members", { ...known, members: list });
+      if (selected.includes(gone)) onChange(selected.filter((x) => x !== gone));
+      setAddNote({ text: `${r.name || who} removed from BusyBee.${r.open_tasks ? ` ${r.open_tasks} open task${r.open_tasks === 1 ? " is" : "s are"} still assigned to them - reassign ${r.open_tasks === 1 ? "it" : "them"}.` : ""}` });
+      setGone("");
+      setRemoving(false);
+    } catch (e: any) {
+      setRemoveErr(e.message || "Could not remove them");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const sorted = useMemo(
     () =>
       people
@@ -122,6 +149,16 @@ export function AssigneePicker({
               <UserPlus size={14} aria-hidden="true" /> Add person
             </button>
           )}
+          {onPeopleChange && myRole === "admin" && (
+            <button
+              type="button"
+              onClick={() => { setRemoving((a) => !a); setAdding(false); setAddNote(null); setRemoveErr(""); }}
+              className="inline-flex items-center gap-1 text-red-400 hover:text-red-300 font-semibold"
+              disabled={disabled}
+            >
+              <UserMinus size={14} aria-hidden="true" /> Remove person
+            </button>
+          )}
           {selected.length > 0 && (
             <button type="button" onClick={() => onChange([])} className="text-slate-400 hover:text-white" disabled={disabled}>
               Clear
@@ -129,6 +166,29 @@ export function AssigneePicker({
           )}
         </div>
       </div>
+
+      {removing && (
+        <div className="bg-slate-900 border border-red-900 rounded p-3 space-y-2" role="group" aria-label="Remove person">
+          <div className="flex flex-wrap items-center gap-2">
+            <select value={gone} onChange={(e) => setGone(e.target.value)} aria-label="Person to remove" className="px-3 py-2 bg-slate-800 border border-slate-600 rounded text-sm min-w-[12rem]">
+              <option value="">Pick who to remove</option>
+              {people
+                .filter((p) => p.id !== me)
+                .slice()
+                .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}{p.email && p.email !== p.name ? ` (${p.email})` : ""}</option>
+                ))}
+            </select>
+            <button type="button" onClick={removePerson} disabled={!gone || saving} className="px-3 py-2 rounded text-sm bg-red-600 hover:bg-red-500 disabled:opacity-50 font-semibold">
+              {saving ? "Removing..." : "Remove"}
+            </button>
+            <button type="button" onClick={() => setRemoving(false)} className="px-3 py-2 rounded text-sm bg-slate-700 hover:bg-slate-600">Cancel</button>
+          </div>
+          <p className="text-xs text-slate-400">They lose access to BusyBee and stop getting alerts. Their tasks and history stay.</p>
+          {removeErr && <p className="text-sm text-red-400" role="alert">{removeErr}</p>}
+        </div>
+      )}
 
       {adding && (
         <div className="bg-slate-900 border border-slate-600 rounded p-3 space-y-2" role="group" aria-label="Add person">

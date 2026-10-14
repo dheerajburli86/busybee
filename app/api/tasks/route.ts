@@ -5,6 +5,7 @@ import { createAdminClient } from "@/lib/supabase-admin";
 import {
   deny,
   getMemberships,
+  normalizeRole,
   canAssign,
   ASSIGN_DENIED,
   isForMe,
@@ -211,15 +212,17 @@ export async function GET(request: NextRequest) {
       tasks = await selectAll<any>(query("*"));
     }
     // Deleted tasks only show in "Recently deleted" (archived ones in the archive).
-    tasks = tasks.filter((t: any) => !t.deleted_at);
     if (deletedOnly) {
+      // What I deleted (for me, or for everyone) in the last 30 days.
       const cutoff = Date.now() - KEEP_DELETED_MS;
       tasks = tasks
-        .filter((t: any) => hidden.has(t.id) && Date.parse(hidden.get(t.id)!) > cutoff)
-        .map((t: any) => ({ ...t, deleted_at: hidden.get(t.id) }));
+        .filter((t: any) =>
+          t.deleted_at ? t.deleted_by === user.id : hidden.has(t.id) && Date.parse(hidden.get(t.id)!) > cutoff
+        )
+        .map((t: any) => ({ ...t, deleted_at: t.deleted_at || hidden.get(t.id) }));
       after(() => purgeOldDeleted(supabase).catch(() => null));
     } else {
-      tasks = tasks.filter((t: any) => !hidden.has(t.id));
+      tasks = tasks.filter((t: any) => !t.deleted_at && !hidden.has(t.id));
     }
     const visible = filterVisible(tasks, user.id, memberships, sets);
     const shown = new Set(visible.map((t: any) => t.id));
@@ -811,13 +814,16 @@ async function myHidden(supabase: any, userId: string): Promise<Map<string, stri
 }
 
 /**
- * A private to-do its owner deleted 30+ days ago is removed for good (nobody
- * else can see it). Shared tasks are never erased by one person's delete.
+ * Removed for good after 30 days: tasks the head deleted for everyone, and
+ * private to-dos their owner deleted. Shared tasks deleted "for me" (or by an
+ * admin for everyone but the head) are never erased - someone still has them.
  */
 async function purgeOldDeleted(supabase: any) {
   const db = createAdminClient();
   if (!db) return;
   const cutoff = new Date(Date.now() - KEEP_DELETED_MS).toISOString();
+  const { data: gone } = await db.from("tasks").select("id").lt("deleted_at", cutoff).limit(200);
+  for (const t of gone || []) await eraseTask(db, t.id).catch(() => false);
   const { data, error } = await db.from("task_hidden").select("user_id, task_id, tasks!inner(personal, created_by)").lt("hidden_at", cutoff).limit(500);
   if (error || !data) return;
   for (const r of data as any[]) {
@@ -825,10 +831,21 @@ async function purgeOldDeleted(supabase: any) {
   }
 }
 
+/** My standing on a desk: admin? head (desk_members.oversees)? */
+async function deskStanding(supabase: any, userId: string, deskId: string) {
+  const { data } = await supabase.from("desk_members").select("role, oversees").eq("desk_id", deskId).eq("user_id", userId).maybeSingle();
+  const admin = normalizeRole(data?.role) === "admin";
+  return { admin, head: admin && !!data?.oversees };
+}
+
 /**
- * Delete one or more tasks *for me*: { id } or { ids: [...] }. The task leaves
- * my lists only - the assignee, assignor and everyone else keep it. It sits in
- * my "Recently deleted" for 30 days; { restore: true } brings it back.
+ * Delete tasks: { id } or { ids }, with { everyone: true } for admins.
+ *   - Anyone: for me - the task leaves my lists only, everyone else keeps it.
+ *   - Head admin, for everyone: gone for every person (erased after 30 days).
+ *   - Admin, for everyone: gone for every person except the head admin(s);
+ *     an admin can't take anything away from the head.
+ * Each sits in the deleter's "Recently deleted" for 30 days;
+ * { restore: true } undoes whichever kind of delete it was.
  */
 export async function DELETE(request: NextRequest) {
   try {
@@ -842,28 +859,103 @@ export async function DELETE(request: NextRequest) {
     ).slice(0, 500) as string[];
     if (!ids.length) return NextResponse.json({ error: "Task ID is required" }, { status: 400 });
     const restore = body?.restore === true;
+    const everyone = body?.everyone === true;
+    const admin = createAdminClient();
 
     const done: string[] = [];
     const failed: { id: string; error: string }[] = [];
     const now = new Date().toISOString();
-    const seen: string[] = [];
+    const standing = new Map<string, { admin: boolean; head: boolean }>();
+    const migrate = (m: string) =>
+      /task_hidden|hidden_by|deleted_at|column/i.test(m || "") ? "Run the latest BusyBee SQL in Supabase first (task_hidden / hidden_by)." : m;
+
     for (const id of ids) {
       const access = await taskAccess(supabase, user.id, id, { includeDeleted: true });
-      if (!access) failed.push({ id, error: "Task not found" });
-      else seen.push(id);
-    }
-    if (seen.length) {
-      const { error } = restore
-        ? await supabase.from("task_hidden").delete().eq("user_id", user.id).in("task_id", seen)
-        : await supabase
-            .from("task_hidden")
-            .upsert(seen.map((task_id) => ({ user_id: user.id, task_id, hidden_at: now })), { onConflict: "user_id,task_id" });
-      if (error) {
-        const msg = /task_hidden/i.test(error.message || "")
-          ? "Run supabase/migrations/20261014b_delete_for_me.sql in Supabase first."
-          : error.message;
-        seen.forEach((id) => failed.push({ id, error: msg }));
-      } else done.push(...seen);
+      if (!access) {
+        failed.push({ id, error: "Task not found" });
+        continue;
+      }
+      const task = access.task;
+      if (!standing.has(task.desk_id)) standing.set(task.desk_id, await deskStanding(supabase, user.id, task.desk_id));
+      const me = standing.get(task.desk_id)!;
+
+      if (restore) {
+        // Undo whatever I did: my own row, rows I wrote for others, a head delete.
+        const errs: string[] = [];
+        const r1 = await supabase.from("task_hidden").delete().eq("user_id", user.id).eq("task_id", id);
+        if (r1.error) errs.push(r1.error.message);
+        if (admin) {
+          const r2 = await admin.from("task_hidden").delete().eq("task_id", id).eq("hidden_by", user.id);
+          if (r2.error && !/hidden_by/.test(r2.error.message)) errs.push(r2.error.message);
+        }
+        if (task.deleted_at && (task.deleted_by === user.id || me.head)) {
+          const wasLive = task.archived_at && Date.parse(task.archived_at) === Date.parse(task.deleted_at);
+          const r3 = await (admin || supabase)
+            .from("tasks")
+            .update({ deleted_at: null, deleted_by: null, ...(wasLive ? { archived_at: null } : {}) })
+            .eq("id", id);
+          if (r3.error) errs.push(r3.error.message);
+        }
+        if (errs.length) failed.push({ id, error: migrate(errs[0]) });
+        else done.push(id);
+        continue;
+      }
+
+      if (!everyone) {
+        const { error } = await supabase
+          .from("task_hidden")
+          .upsert({ user_id: user.id, task_id: id, hidden_at: now }, { onConflict: "user_id,task_id" });
+        if (error) failed.push({ id, error: migrate(error.message) });
+        else done.push(id);
+        continue;
+      }
+
+      // For everyone: admins only.
+      if (!me.admin) {
+        failed.push({ id, error: "Only admins can delete a task for everyone." });
+        continue;
+      }
+      if (!admin) {
+        failed.push({ id, error: "Deleting for everyone needs SUPABASE_SERVICE_ROLE_KEY on the server." });
+        continue;
+      }
+      if (me.head) {
+        const { error } = await admin
+          .from("tasks")
+          .update({ deleted_at: now, deleted_by: user.id, archived_at: task.archived_at || now })
+          .eq("id", id);
+        if (error) {
+          failed.push({ id, error: migrate(error.message) });
+          continue;
+        }
+      } else {
+        // Everyone on the desk except the head admin(s).
+        const { data: rows, error: e1 } = await admin.from("desk_members").select("user_id, oversees, role").eq("desk_id", task.desk_id);
+        if (e1) {
+          failed.push({ id, error: e1.message });
+          continue;
+        }
+        const people = (rows || [])
+          .filter((r: any) => !(r.oversees && normalizeRole(r.role) === "admin"))
+          .map((r: any) => r.user_id as string);
+        if (!people.includes(user.id)) people.push(user.id);
+        const { error } = await admin
+          .from("task_hidden")
+          .upsert(people.map((uid) => ({ user_id: uid, task_id: id, hidden_at: now, hidden_by: user.id })), { onConflict: "user_id,task_id" });
+        if (error) {
+          failed.push({ id, error: migrate(error.message) });
+          continue;
+        }
+      }
+      done.push(id);
+      await logActivity(supabase, {
+        entity_type: "task",
+        entity_id: id,
+        action: me.head ? "deleted the task for everyone" : "deleted the task for everyone but the head",
+        performed_by: user.id,
+        desk_id: task.desk_id,
+        changes: { title: task.title },
+      }).catch(() => null);
     }
     after(() => purgeOldDeleted(supabase).catch(() => null));
     if (!done.length && failed.length) return NextResponse.json({ error: failed[0].error, done, failed }, { status: failed[0].error === "Task not found" ? 404 : 403 });

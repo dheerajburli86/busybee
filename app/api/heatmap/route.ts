@@ -51,14 +51,18 @@ export async function GET() {
 
     // Tasks with their items and project name in one go (separately on a
     // database that can't join them), alongside what decides visibility.
-    const [joined, sets] = await Promise.all([
+    const [joined, sets, hidden] = await Promise.all([
       selectAll<any>(query(`${TASK_COLS}, projects(name), subtasks(${SUB_COLS})`)).catch(() => null),
       visibilitySets(supabase, user.id),
+      // Tasks I deleted for myself (or an admin deleted for me) aren't on my heatmap.
+      selectAll<any>(() => supabase.from("task_hidden").select("task_id").eq("user_id", user.id).order("task_id"))
+        .then((r) => new Set(r.map((x: any) => x.task_id as string)))
+        .catch(() => new Set<string>()),
     ]);
     let rows: any[] = joined || (await selectAll<any>(query(TASK_COLS)));
     // Put-away (archived) work that was never finished isn't anyone's to do;
     // finished work with no finishing time is from before that was recorded.
-    rows = filterVisible(rows, user.id, memberships, sets).filter((t: any) => !t.deleted_at && (isFinished(t.status) ? !!t.completed_at : !t.archived_at));
+    rows = filterVisible(rows, user.id, memberships, sets).filter((t: any) => !t.deleted_at && !hidden.has(t.id) && (isFinished(t.status) ? !!t.completed_at : !t.archived_at));
     if (!joined && rows.length) {
       const subs = await inChunks<any>(rows.map((t) => t.id), (part) => supabase.from("subtasks").select(`task_id, ${SUB_COLS}`).in("task_id", part).order("id"), { all: true });
       const by = new Map<string, any[]>();

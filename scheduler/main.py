@@ -1191,6 +1191,38 @@ def head_digest() -> None:
     log(f"sent the head's daily email to {len(heads)}")
 
 
+_active = {"at": 0.0, "ids": set()}
+
+
+def active_ids() -> set:
+    """Everyone still on a desk (refreshed every 10 minutes). Someone removed
+    from BusyBee gets nothing more - no bell, email or Telegram."""
+    if time.time() - _active["at"] > 600:
+        try:
+            rows = fetch_all(lambda: supabase.table("desk_members").select("user_id").order("user_id"))
+            _active["ids"] = {r["user_id"] for r in rows}
+            _active["at"] = time.time()
+        except Exception as exc:  # noqa: BLE001
+            warn(f"could not read desk members: {exc!r}")
+    return _active["ids"]
+
+
+_hidden = {"at": 0.0, "pairs": set()}
+
+
+def hidden_pairs() -> set:
+    """(person, task) pairs where that person deleted the task for themselves
+    (or an admin deleted it for them): no more alerts about it to them."""
+    if time.time() - _hidden["at"] > 600:
+        try:
+            rows = fetch_all(lambda: supabase.table("task_hidden").select("user_id, task_id").order("user_id").order("task_id"))
+            _hidden["pairs"] = {(r["user_id"], r["task_id"]) for r in rows}
+        except Exception:  # noqa: BLE001 - before the table exists
+            _hidden["pairs"] = set()
+        _hidden["at"] = time.time()
+    return _hidden["pairs"]
+
+
 def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject: str = "",
            email: tuple = None, telegram_text: str = "", overseer: bool = False, telegram_html: str = "") -> bool:
     """In-app notification, then the same by email. No email if the in-app one
@@ -1198,6 +1230,10 @@ def notify(user_id: str, task_id, ntype: str, title: str, message: str, subject:
 
     Checklist #48: skipped per-channel when this person has muted ntype's
     category (or, for email, turned email off entirely)."""
+    if active_ids() and user_id not in active_ids():
+        return False
+    if task_id and (user_id, task_id) in hidden_pairs():
+        return False
     wrote = False
     if _wants(user_id, ntype, "in_app"):
         try:

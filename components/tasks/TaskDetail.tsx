@@ -6,6 +6,7 @@
 // the server says this person may do; the server re-checks every change.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { everyoneLabel } from "./BulkDelete";
 import { sendJSON } from "@/lib/api";
 import { cached, cachedAt, load as loadApi, remember, useBeforePaint } from "@/lib/apiCache";
 import { createClient } from "@/lib/supabase";
@@ -123,6 +124,8 @@ export function TaskDetail({
   onInfo,
   onTemplateSaved,
   onRemoved,
+  myRole,
+  amHead,
 }: {
   task: Task;
   allTasks: Task[];
@@ -137,6 +140,9 @@ export function TaskDetail({
   onTemplateSaved?: (template: { id: string; name: string }) => void;
   /** Lets the page drop a deleted private to-do item from its lists. */
   onRemoved?: (id: string) => void;
+  /** Admins may also delete for everyone (the head admin for everyone at all). */
+  myRole?: string;
+  amHead?: boolean;
 }) {
   const [access, setAccess] = useState<Access | null>(null);
   // Editing the title and instructions (assignor side).
@@ -720,27 +726,32 @@ export function TaskDetail({
                 {task.archived_at ? "♻️ Restore" : "🗄️ Archive"}
               </button>
             )}
-            {!task.personal && (
-              <button
-                onClick={() =>
-                  once("delete", async () => {
-                    if (!window.confirm(`Delete "${task.title}" for you? Everyone else keeps it. You can restore it from Recently deleted for 30 days.`)) return;
-                    try {
-                      await sendJSON("/api/tasks", "DELETE", { id: task.id });
-                      onInfo("Deleted for you. Others still have it.");
-                      onRemoved?.(task.id);
-                      onClose();
-                    } catch (e: any) {
-                      onError(e.message);
-                    }
-                  })
-                }
-                disabled={busy("delete")}
-                className={`${actionBtn} hover:bg-red-900`}
-              >
-                🗑 Delete
-              </button>
-            )}
+            {!task.personal &&
+              [false, ...(everyoneLabel(myRole, amHead) ? [true] : [])].map((all) => (
+                <button
+                  key={String(all)}
+                  onClick={() =>
+                    once("delete", async () => {
+                      const msg = all
+                        ? `${everyoneLabel(myRole, amHead)}: "${task.title}"? You can restore it from Recently deleted for 30 days.`
+                        : `Delete "${task.title}" for you? Everyone else keeps it. You can restore it from Recently deleted for 30 days.`;
+                      if (!window.confirm(msg)) return;
+                      try {
+                        await sendJSON("/api/tasks", "DELETE", { id: task.id, everyone: all });
+                        onInfo(all ? "Deleted for everyone." : "Deleted for you. Others still have it.");
+                        onRemoved?.(task.id);
+                        onClose();
+                      } catch (e: any) {
+                        onError(e.message);
+                      }
+                    })
+                  }
+                  disabled={busy("delete")}
+                  className={`${actionBtn} hover:bg-red-900`}
+                >
+                  🗑 {all ? everyoneLabel(myRole, amHead) : "Delete for me"}
+                </button>
+              ))}
           </div>
 
           <div className="flex gap-1 mt-3 text-sm overflow-x-auto">

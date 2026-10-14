@@ -33,16 +33,16 @@ export function useBulkDelete(opts: { onRemoved: (ids: string[]) => void; onRest
     setPicked(new Set());
   };
 
-  const remove = async (ids: string[]) => {
+  const remove = async (ids: string[], everyone = false) => {
     if (!ids.length || busy) return;
     setBusy(true);
     try {
-      const r = await sendJSON("/api/tasks", "DELETE", { ids });
+      const r = await sendJSON("/api/tasks", "DELETE", { ids, everyone });
       const done: string[] = r.done || [];
       if (done.length) {
         o.current.onRemoved(done);
         clearTimeout(timer.current);
-        setUndo({ ids: done, label: `${done.length} deleted for you (others keep ${done.length === 1 ? "it" : "them"})` });
+        setUndo({ ids: done, label: everyone ? `${done.length} deleted for everyone` : `${done.length} deleted for you (others keep ${done.length === 1 ? "it" : "them"})` });
         timer.current = setTimeout(() => setUndo(null), 15000);
       }
       if (r.failed?.length) o.current.onError(`${r.failed.length} couldn't be deleted: ${r.failed[0].error}`);
@@ -72,7 +72,15 @@ export function useBulkDelete(opts: { onRemoved: (ids: string[]) => void; onRest
 export type Bulk = ReturnType<typeof useBulkDelete>;
 
 /** Select / Select all / Delete selected / Cancel - on the left, in that order. */
-export function BulkBar({ bulk, allIds, noun = "task" }: { bulk: Bulk; allIds: string[]; noun?: string }) {
+/** Who may delete for everyone: the head (everyone) or an admin (all but the head). */
+export function everyoneLabel(role?: string, head?: boolean): string | null {
+  if (head) return "Delete for everyone";
+  if (role === "admin") return "Delete for everyone (head keeps it)";
+  return null;
+}
+
+export function BulkBar({ bulk, allIds, noun = "task", role, head }: { bulk: Bulk; allIds: string[]; noun?: string; role?: string; head?: boolean }) {
+  const forAll = everyoneLabel(role, head);
   if (!bulk.selecting) {
     return (
       <button type="button" onClick={() => bulk.setSelecting(true)} className="px-3 py-2 rounded text-sm bg-slate-800 text-slate-300 hover:bg-slate-700">
@@ -97,8 +105,18 @@ export function BulkBar({ bulk, allIds, noun = "task" }: { bulk: Bulk; allIds: s
         onClick={() => bulk.remove(Array.from(bulk.picked))}
         className="px-3 py-1.5 rounded text-sm bg-red-600 hover:bg-red-500 disabled:opacity-50 font-semibold"
       >
-        {bulk.busy ? "Deleting..." : `🗑 Delete selected (${n})`}
+        {bulk.busy ? "Deleting..." : `🗑 Delete for me (${n})`}
       </button>
+      {forAll && (
+        <button
+          type="button"
+          disabled={!n || bulk.busy}
+          onClick={() => window.confirm(`${forAll}: ${n} selected?`) && bulk.remove(Array.from(bulk.picked), true)}
+          className="px-3 py-1.5 rounded text-sm bg-red-800 hover:bg-red-700 disabled:opacity-50 font-semibold"
+        >
+          🗑 {forAll} ({n})
+        </button>
+      )}
       <button type="button" onClick={bulk.stop} className="px-3 py-1.5 rounded text-sm bg-slate-700 hover:bg-slate-600">
         Cancel
       </button>
@@ -176,7 +194,7 @@ export function RecentlyDeleted({ lists, bulk, nameOf, reloadKey }: { lists: boo
           </>
         )}
       </div>
-      <p className="text-xs text-slate-400 mb-2">Deleting only removes a task from your view - everyone else keeps it. Restore within 30 days.</p>
+      <p className="text-xs text-slate-400 mb-2">"Delete for me" only removes a task from your view. Restore anything here within 30 days - for everyone it was deleted for.</p>
       {rows.length === 0 ? (
         <p className="text-sm text-slate-400">Nothing deleted in the last 30 days.</p>
       ) : (

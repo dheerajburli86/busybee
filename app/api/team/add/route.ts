@@ -67,7 +67,8 @@ export async function POST(request: NextRequest) {
       userId = data.user.id;
       created = true;
     } else {
-      await admin.auth.admin.updateUserById(userId, { user_metadata: meta }).catch(() => null);
+      // Someone removed earlier is let back in.
+      await admin.auth.admin.updateUserById(userId, { user_metadata: meta, ban_duration: "none" } as any).catch(() => null);
     }
 
     // 2. Profile row (the sign-up trigger normally makes it; make sure).
@@ -148,6 +149,72 @@ ${telegramLink ? `<p><a href="${esc(telegramLink)}">Get alerts on Telegram</a> (
   } catch (error: any) {
     console.error("POST /api/team/add failed:", error);
     return NextResponse.json({ error: error?.message || "Could not add the person" }, { status: 500 });
+  }
+}
+
+/**
+ * "Remove person": takes someone off BusyBee. They leave the desk and every
+ * team, group, project and chat; their phone and Telegram alerts stop; their
+ * sign-in is blocked. Their tasks and history stay (reassign open ones).
+ * Adding them again later lets them back in. Admins only; only the head admin
+ * can remove another head admin; nobody removes themselves.
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const supabase = await createServerSideClient();
+    const user = await requireUser(supabase);
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const admin = createAdminClient();
+    if (!admin) return NextResponse.json({ error: "Removing people needs SUPABASE_SERVICE_ROLE_KEY set on the server" }, { status: 500 });
+
+    const body = await request.json().catch(() => ({}));
+    const target = String(body.user_id || "");
+    if (!target) return NextResponse.json({ error: "Who should be removed?" }, { status: 400 });
+    if (target === user.id) return NextResponse.json({ error: "You can't remove yourself" }, { status: 400 });
+
+    const { data: mine } = await admin.from("desk_members").select("desk_id, role, oversees").eq("user_id", user.id);
+    const myDesks = (mine || []).filter((m: any) => normalizeRole(m.role) === "admin");
+    if (!myDesks.length) return NextResponse.json({ error: "Only admins can remove people" }, { status: 403 });
+    const { data: theirs } = await admin.from("desk_members").select("desk_id, role, oversees").eq("user_id", target);
+    const shared = (theirs || []).filter((t: any) => myDesks.some((m: any) => m.desk_id === t.desk_id));
+    if (!shared.length) return NextResponse.json({ error: "That person isn't on your desk" }, { status: 404 });
+    const iAmHead = myDesks.some((m: any) => m.oversees);
+    if (shared.some((t: any) => t.oversees && normalizeRole(t.role) === "admin") && !iAmHead) {
+      return NextResponse.json({ error: "Only the head admin can remove the head admin" }, { status: 403 });
+    }
+
+    const { data: person } = await admin.from("users").select("full_name, email").eq("id", target).maybeSingle();
+    for (const table of [
+      "desk_members", "team_members", "group_members", "project_members", "chat_room_members",
+      "member_roles", "push_subscriptions", "user_telegram", "telegram_link_tokens", "user_presence",
+    ]) {
+      const { error } = await admin.from(table).delete().eq("user_id", target);
+      if (error && !/does not exist|schema cache|column/i.test(error.message)) {
+        return NextResponse.json({ error: `Could not remove them from ${table}: ${error.message}` }, { status: 500 });
+      }
+    }
+    await admin.auth.admin.updateUserById(target, { ban_duration: "876000h" } as any).catch(() => null);
+    accessChanged();
+
+    const { count } = await admin
+      .from("tasks")
+      .select("id", { count: "exact", head: true })
+      .eq("assigned_to", target)
+      .is("archived_at", null)
+      .not("status", "in", "(completed,closed)");
+
+    await logActivity(supabase, {
+      entity_type: "desk",
+      entity_id: shared[0].desk_id,
+      action: `removed ${person?.full_name || person?.email || "someone"} from BusyBee`,
+      performed_by: user.id,
+      desk_id: shared[0].desk_id,
+      changes: { user_id: target },
+    });
+    return NextResponse.json({ ok: true, removed: target, name: person?.full_name || person?.email, open_tasks: count || 0 });
+  } catch (error: any) {
+    console.error("DELETE /api/team/add failed:", error);
+    return NextResponse.json({ error: error?.message || "Could not remove the person" }, { status: 500 });
   }
 }
 

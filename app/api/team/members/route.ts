@@ -31,7 +31,10 @@ export async function GET(request: NextRequest) {
       oversees: !!dm.oversees,
     })) || [];
 
-    const myRole = normalizeRole(data?.find((dm: any) => dm.user_id === user.id)?.role);
+    const myRow = data?.find((dm: any) => dm.user_id === user.id);
+    const myRole = normalizeRole(myRow?.role);
+    // The head admin (oversees): deletes for everyone, nobody deletes for them.
+    const amHead = myRole === "admin" && !!myRow?.oversees;
 
     const seen = new Set<string>();
     const unique = members.filter((m: any) => (seen.has(m.id) ? false : (seen.add(m.id), true)));
@@ -42,7 +45,7 @@ export async function GET(request: NextRequest) {
     // picker showing "0 people you can assign to" while they finished. They
     // are opt-in now, and run together rather than one after the other.
     if (request.nextUrl.searchParams.get("full") !== "1") {
-      return NextResponse.json({ members: unique, me: user.id, myRole, onDesk: true, pending: [] });
+      return NextResponse.json({ members: unique, me: user.id, myRole, amHead, onDesk: true, pending: [] });
     }
 
     const [waiting, linked] = await Promise.all([
@@ -57,7 +60,7 @@ export async function GET(request: NextRequest) {
     const pending = (waiting || []).map((p: any) => ({ id: p.id, email: p.email, name: p.full_name || p.email, created_at: p.created_at }));
     if (linked) unique.forEach((m: any) => (m.telegram = linked.has(m.id)));
 
-    return NextResponse.json({ members: unique, me: user.id, myRole, onDesk: true, pending });
+    return NextResponse.json({ members: unique, me: user.id, myRole, amHead, onDesk: true, pending });
   } catch (error: any) {
     console.error("GET /api/team/members failed:", error);
     return NextResponse.json({ error: error?.message }, { status: 500 });
